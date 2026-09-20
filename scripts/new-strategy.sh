@@ -25,4 +25,4 @@ for f in pyproject.toml README.md; do
 done
 
 echo "Created strategies/$id"
-echo "Next: cd strategies/$id && uv sync && cp .env.example .env && uv run strategy"
+echo "Next: cd strategies/$id && uv sync && cp .env.example .env && set -a && source .env && set +a && uv run strategy"

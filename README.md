@@ -46,7 +46,13 @@ cd cz-quant
 
 5. Fill in `.env`. Set `KALSHI_API_KEY_ID` to the key ID. Set `KALSHI_PRIVATE_KEY_PATH` to the path of the private key file.
 
-6. Run the strategy.
+6. Export the variables into your shell. The code reads the environment only. It does not read `.env`. Do this step in each new shell, and again after you change `.env`.
+
+   ```bash
+   set -a; source .env; set +a
+   ```
+
+7. Run the strategy.
 
    ```bash
    uv run strategy
@@ -69,10 +75,11 @@ logic goes in `src/strategy/runner.py`.
    cd strategies/my-new-strategy
    uv sync
    cp .env.example .env
+   set -a; source .env; set +a
    uv run strategy
    ```
 
-3. Write the strategy in `src/strategy/runner.py`. The `strategy` command calls `run()` after it loads `.env`, so read secrets with `os.environ`. Add modules under `src/strategy/` as the strategy grows. Add options to the parser in `cli.py` and pass them to `run()`.
+3. Write the strategy in `src/strategy/runner.py`. Read secrets with `os.environ`. The code must not read `.env`; the user exports the variables. Add modules under `src/strategy/` as the strategy grows. Add options to the parser in `cli.py` and pass them to `run()`.
 
    ```python
    import os
@@ -106,7 +113,7 @@ cz-quant/
         ├── pyproject.toml       # standalone install
         ├── uv.lock              # pinned dependencies, committed
         ├── .env.example         # every variable the strategy reads, committed
-        ├── .env                 # real secrets, gitignored
+        ├── .env                 # real secrets, gitignored, exported by the user
         ├── README.md            # the market, the edge, the risks, how to run
         └── src/strategy/
             ├── cli.py           # the single entry point, the `strategy` command
@@ -120,8 +127,14 @@ the strategy directory.
 
 `uv sync` creates `.venv/` in the strategy directory from `pyproject.toml` and
 `uv.lock`. The `strategy` command is `main()` in `src/strategy/cli.py`. It
-parses the command line, loads `.env` from the strategy directory, then calls
-`run()` in `src/strategy/runner.py`. A new strategy starts with an empty `run()`.
+parses the command line, then calls `run()` in `src/strategy/runner.py`. A new
+strategy starts with an empty `run()`.
+
+Configuration comes from the environment only. No code reads `.env`, and no
+strategy depends on a dotenv library. The `.env` file is a convenience for the
+user, who exports it with `set -a; source .env; set +a` before a run. This keeps
+the code the same on a laptop, in a container, and under a scheduler, where the
+platform sets the variables.
 
 The Python package is named `strategy` in every strategy. This is safe because
 each strategy installs into its own virtual environment, and it keeps the
