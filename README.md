@@ -1,1 +1,1 @@
-# cizi-quant
+# cz-quant
