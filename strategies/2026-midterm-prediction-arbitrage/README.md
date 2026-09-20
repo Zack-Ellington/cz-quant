@@ -15,9 +15,15 @@ uv sync
 cp .env.example .env
 ```
 
-Fill in `.env` before the first run. `.env.example` points at the Kalshi demo
-environment, which uses separate API keys from production. Stay on demo until
-the strategy is tested.
+Fill in `.env`. `.env.example` points at the Kalshi demo environment, which uses
+separate API keys from production. Stay on demo until the strategy is tested.
+
+Then export the variables into your shell. Do this in each new shell, and again
+after you change `.env`.
+
+```bash
+set -a; source .env; set +a
+```
 
 ## Run
 
@@ -25,7 +31,8 @@ the strategy is tested.
 uv run strategy
 ```
 
-The `strategy` command loads `.env`, then calls `run()` in `src/strategy/runner.py`.
+The `strategy` command calls `run()` in `src/strategy/runner.py`. The code reads
+configuration from the environment only. It does not read `.env`.
 
 ## References
 

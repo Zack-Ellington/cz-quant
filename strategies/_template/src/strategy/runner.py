@@ -1,4 +1,4 @@
-"""Runner for the strategy. The CLI calls run() after it loads .env."""
+"""Runner for the strategy. Configuration comes from exported environment variables."""
 
 
 def run() -> None:
