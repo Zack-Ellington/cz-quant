@@ -9,7 +9,12 @@ uv sync
 cp .env.example .env
 ```
 
-Fill in `.env` before the first run.
+Fill in `.env`. Then export the variables into your shell. Do this in each new
+shell, and again after you change `.env`.
+
+```bash
+set -a; source .env; set +a
+```
 
 ## Run
 
@@ -17,4 +22,5 @@ Fill in `.env` before the first run.
 uv run strategy
 ```
 
-The `strategy` command loads `.env`, then calls `run()` in `src/strategy/runner.py`.
+The `strategy` command calls `run()` in `src/strategy/runner.py`. The code reads
+configuration from the environment only. It does not read `.env`.
