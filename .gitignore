@@ -1,0 +1,20 @@
+# Secrets: every strategy has its own .env. Only .env.example is committed.
+.env
+*.pem
+*.key
+
+# The template has no lockfile. Each real strategy commits its own uv.lock.
+strategies/_template/uv.lock
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Tools
+.ruff_cache/
+.pytest_cache/
+.DS_Store
