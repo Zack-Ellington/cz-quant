@@ -10,7 +10,7 @@ or retired without an effect on the others.
 
 ## Strategies
 
-- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): arbitrage on Kalshi markets for the 2026 US midterm elections. Scaffold only.
+- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): Monte Carlo of 2026 Congress control (the four DD/DR/RD/RR outcomes) from Kalshi's individual House and Senate race markets, compared to the `KXBALANCEPOWERCOMBO` combo market for arbitrage.
 
 ## Quickstart
 
@@ -58,8 +58,10 @@ cd cz-quant
    uv run strategy
    ```
 
-The strategy is a scaffold, so the command exits with no output. The strategy
-logic goes in `src/strategy/runner.py`.
+This strategy is implemented: the command reads the live Kalshi race markets,
+runs the Monte Carlo, and prints the model-vs-market table. See its
+[README](strategies/2026-midterm-prediction-arbitrage/README.md) for the method,
+a sample table, and the reproducible `--snapshot` run.
 
 ### Create a new strategy
 
