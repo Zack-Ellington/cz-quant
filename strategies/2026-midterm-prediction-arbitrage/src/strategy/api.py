@@ -1,26 +1,29 @@
 """Read-only Kalshi market-data client.
 
-Kalshi's event, market, and order-book endpoints are public, so this client
-sends no authentication headers.
+Kalshi's series, event, and order-book endpoints are public, so this client sends
+no authentication headers.
 
-Prices come from the **order book**, not the market summary. Kalshi leaves the
-``yes_bid`` / ``yes_ask`` / ``last_price`` summary fields empty on these 2026
-markets even while a real book of resting orders exists, so the only reliable
-source of a quote is ``GET /markets/{ticker}/orderbook``. ``fetch_orderbook``
-returns that book normalized to ``{"yes": [[price, size], ...], "no": [...]}``
-with prices as 0-1 probabilities.
+Every response is normalized to a small, stable shape before anything else sees
+it. That keeps the rest of the strategy independent of Kalshi's wire format, and
+it is what makes a run replayable: ``snapshot.RecordingClient`` saves exactly
+these normalized payloads and ``snapshot.SnapshotClient`` serves them back.
 
-Tests do not touch the network: they use ``FixtureClient`` instead, which serves
-saved books from ``tests/fixtures/``. Both clients satisfy the same interface --
-``fetch_event`` and ``fetch_orderbook`` -- so nothing downstream knows which one
-it is holding.
+* ``fetch_event``  -> ``{"event_ticker", "title", "mutually_exclusive",
+  "markets": [{"ticker", "yes_sub_title", "strike_type", "floor_strike",
+  "cap_strike", "last_price", "volume"}]}``
+* ``fetch_orderbook`` -> ``{"yes": [[price, size], ...], "no": [...]}``, prices
+  as 0-1 probabilities, ascending, best price last, at most ``BOOK_DEPTH``
+  levels per side.
+* ``fetch_series`` -> ``{"fee_type", "fee_multiplier"}``
+
+Prices come from the order book. Kalshi's legacy integer-cent summary fields
+(``yes_bid``, ``yes_ask``, ``last_price``) are null on these markets; the book is
+the authoritative source for the best bid and ask and also carries depth.
 """
 
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -31,16 +34,24 @@ from strategy.constants import DEFAULT_BASE_URL
 # [price, size] with price in [0, 1], sorted so the best (highest) price is last.
 Book = dict[str, list[list[float]]]
 
+# Levels kept per side. Every estimator reads the top of book; the extra levels
+# are kept for inspection and make a saved snapshot self-describing.
+BOOK_DEPTH = 5
+
 
 class Client(Protocol):
-    """The two methods the rest of the strategy needs from a data source."""
+    """The data-source interface the strategy depends on."""
 
     def fetch_event(self, ticker: str) -> dict | None:
-        """Return the event dict (with ``markets``), or ``None`` if absent."""
+        """Normalized event with its markets, or ``None`` if it does not exist."""
         ...
 
     def fetch_orderbook(self, ticker: str) -> Book | None:
-        """Return the market's normalized order book, or ``None`` if absent."""
+        """Normalized order book, or ``None`` if the market does not exist."""
+        ...
+
+    def fetch_series(self, ticker: str) -> dict | None:
+        """Normalized fee settings for a series, or ``None`` if absent."""
         ...
 
 
@@ -71,18 +82,16 @@ class KalshiClient:
         self._client.close()
 
     def fetch_event(self, ticker: str) -> dict | None:
-        """Fetch one event and its markets, or ``None`` for a 404."""
         payload = self._get(f"/events/{ticker}", {"with_nested_markets": "true"})
-        return _normalize_event(payload) if payload is not None else None
+        return normalize_event(payload) if payload is not None else None
 
     def fetch_orderbook(self, ticker: str) -> Book | None:
-        """Fetch a market's order book, normalized to 0-1 prices.
-
-        Returns ``None`` for a 404 (no such market) and an empty book
-        (``{"yes": [], "no": []}``) for a listed market with no resting orders.
-        """
         payload = self._get(f"/markets/{ticker}/orderbook", None)
-        return _normalize_book(payload) if payload is not None else None
+        return normalize_book(payload) if payload is not None else None
+
+    def fetch_series(self, ticker: str) -> dict | None:
+        payload = self._get(f"/series/{ticker}", None)
+        return normalize_series(payload) if payload is not None else None
 
     def _get(self, path: str, params: dict | None) -> dict | None:
         """GET with retries. Returns parsed JSON, or ``None`` on a 404."""
@@ -108,67 +117,64 @@ class KalshiClient:
         raise last_exc
 
 
-def _normalize_event(payload: dict) -> dict:
-    """Flatten Kalshi's ``{"event": {...}, "markets": [...]}`` into one dict."""
-    event = dict(payload.get("event") or {})
-    markets = payload.get("markets")
-    if markets is None:
-        markets = event.get("markets", [])
-    event["markets"] = markets
-    return event
-
-
-def _normalize_book(payload: dict) -> Book:
-    """Normalize an order-book response to ``{"yes": [...], "no": [...]}``.
-
-    Kalshi returns ``orderbook_fp`` with ``yes_dollars`` / ``no_dollars`` (prices
-    already in dollars, i.e. 0-1) and, on some markets, a legacy ``orderbook``
-    with ``yes`` / ``no`` in integer cents. Both are handled; each side is a list
-    of ``[price, size]`` sorted ascending, so the best price is the last entry.
-    """
-    raw = payload.get("orderbook_fp")
-    if raw is not None:
-        return {
-            "yes": _levels(raw.get("yes_dollars"), in_dollars=True),
-            "no": _levels(raw.get("no_dollars"), in_dollars=True),
-        }
-    raw = payload.get("orderbook") or {}
+def normalize_event(payload: dict) -> dict:
+    """Reduce an event response to the fields the strategy uses."""
+    event = payload.get("event") or {}
+    # With nested markets requested, Kalshi may put them at the top level, inside
+    # the event, or both (with one of the two an empty list).
+    markets = payload.get("markets") or event.get("markets") or []
     return {
-        "yes": _levels(raw.get("yes"), in_dollars=False),
-        "no": _levels(raw.get("no"), in_dollars=False),
+        "event_ticker": event.get("event_ticker"),
+        "title": event.get("title"),
+        "mutually_exclusive": bool(event.get("mutually_exclusive")),
+        "markets": [
+            {
+                "ticker": m.get("ticker"),
+                "yes_sub_title": m.get("yes_sub_title"),
+                "strike_type": m.get("strike_type"),
+                "floor_strike": m.get("floor_strike"),
+                "cap_strike": m.get("cap_strike"),
+                "last_price": _to_float(m.get("last_price_dollars")),
+                "volume": _to_float(m.get("volume_fp")) or 0.0,
+            }
+            for m in markets
+        ],
     }
 
 
-def _levels(levels: list | None, *, in_dollars: bool) -> list[list[float]]:
+def normalize_book(payload: dict, depth: int = BOOK_DEPTH) -> Book:
+    """Normalize an order-book response to ``{"yes": [...], "no": [...]}``.
+
+    Kalshi returns ``orderbook_fp`` with ``yes_dollars`` / ``no_dollars`` (prices
+    in dollars, i.e. 0-1) and, on some markets, a legacy ``orderbook`` with
+    ``yes`` / ``no`` in integer cents. Both are handled. Each side is sorted
+    ascending and trimmed to the best ``depth`` levels.
+    """
+    raw = payload.get("orderbook_fp")
+    if raw is not None:
+        yes, no, scale = raw.get("yes_dollars"), raw.get("no_dollars"), 1.0
+    else:
+        raw = payload.get("orderbook") or {}
+        yes, no, scale = raw.get("yes"), raw.get("no"), 100.0
+    return {"yes": _levels(yes, scale, depth), "no": _levels(no, scale, depth)}
+
+
+def normalize_series(payload: dict) -> dict:
+    series = payload.get("series") or {}
+    return {
+        "fee_type": series.get("fee_type") or "quadratic",
+        "fee_multiplier": float(series.get("fee_multiplier") or 1.0),
+    }
+
+
+def _levels(levels: list | None, scale: float, depth: int) -> list[list[float]]:
     if not levels:
         return []
-    scale = 1.0 if in_dollars else 100.0
-    return [[float(price) / scale, float(size)] for price, size in levels]
+    parsed = sorted([float(p) / scale, float(s)] for p, s in levels)
+    return parsed[-depth:]
 
 
-class FixtureClient:
-    """Serves saved events and order books from a directory of JSON snapshots.
-
-    Each snapshot file is one JSON object. Book snapshots map a market ticker to
-    a normalized book; event snapshots map an event ticker to an event dict. The
-    two are told apart by shape (a book has ``yes`` / ``no`` keys), so one client
-    can span the Senate, House, and combo snapshots.
-    """
-
-    def __init__(self, snapshot_dir: str | Path) -> None:
-        self._books: dict[str, Book] = {}
-        self._events: dict[str, dict] = {}
-        for path in sorted(Path(snapshot_dir).glob("*.json")):
-            with path.open(encoding="utf-8") as handle:
-                data = json.load(handle)
-            for ticker, payload in data.items():
-                if isinstance(payload, dict) and "yes" in payload and "no" in payload:
-                    self._books[ticker] = payload
-                else:
-                    self._events[ticker] = payload
-
-    def fetch_event(self, ticker: str) -> dict | None:
-        return self._events.get(ticker)
-
-    def fetch_orderbook(self, ticker: str) -> Book | None:
-        return self._books.get(ticker)
+def _to_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
