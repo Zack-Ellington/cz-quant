@@ -1,7 +1,7 @@
 [project]
 name = "2026-midterm-prediction-arbitrage"
 version = "0.1.0"
-description = "Arbitrage on Kalshi prediction markets for the 2026 US midterm elections."
+description = "Independent-race model of 2026 Congress control vs. Kalshi's combo market, with paper trading."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

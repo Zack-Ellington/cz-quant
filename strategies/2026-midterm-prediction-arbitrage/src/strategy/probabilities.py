@@ -1,103 +1,71 @@
-"""Turn Kalshi order books into a Democratic win probability for every race.
+"""Turn Kalshi race markets into a probability for every race.
 
-Each race is a mutually-exclusive Kalshi event with a Democratic and a
-Republican market. The price of the Democratic outcome is read from that
-market's order book: the best bid comes from the top of the YES side, and the
-best ask is one minus the top of the NO side (buying NO at ``p`` is selling YES
-at ``1 - p``). We take the bid/ask midpoint of each leg, then normalize the two
-legs against each other, because the two mid prices rarely sum to exactly 1.
+Each race is a mutually-exclusive Kalshi event with a Democratic leg, a
+Republican leg, and sometimes independent candidates. ``load_race_quotes``
+reads every leg -- best bid and ask from the order book, last trade and volume
+from the event -- and ``apply_estimator`` turns them into a ``RaceProb`` (P(D
+nominee wins), P(independent wins)) with the chosen estimator. Loading and
+estimating are separate so several estimators can be compared on one set of
+quotes without refetching.
 
-When a market is missing (Louisiana, safe seats) or its book is empty, the race
-falls back to its prior. In practice the 2026 books are well populated, so the
-simulation runs on live prices, not priors.
+``caucus_probs`` then collapses each race to the single number the simulations
+use: P(the seat caucuses with Democrats) = P(D) + share * P(independent), where
+``share`` is the fraction of independent winners assumed to caucus with
+Democrats (fitted in ``calibration``; 0 when not calibrated).
+
+Races with no market (Louisiana, the safe House seats) and legs the event does
+not list get no quote; every estimator returns the prior when nothing is quoted.
 """
 
 from __future__ import annotations
 
-from strategy import constants
-from strategy.api import Book, Client
+from strategy.api import Client
+from strategy.estimators import ESTIMATORS, RaceProb
+from strategy.markets import Quote, load_quote
 from strategy.races import Race
 
+# race_id -> (Democratic leg, Republican leg, independent legs)
+RaceQuotes = dict[str, tuple[Quote | None, Quote | None, tuple[Quote, ...]]]
 
-def extract_probabilities(races: list[Race], client: Client) -> dict[str, float]:
-    """Return ``{race_id: P(Democratic win)}`` for every race.
 
-    Two order books are read per race that has a market (the Democratic and
-    Republican legs). Races with no market are scored from their prior without a
-    network call.
+def load_race_quotes(races: list[Race], client: Client) -> RaceQuotes:
+    """Every leg's quote for every race.
+
+    One event fetch per race gives the list of legs and their summaries; one
+    order-book fetch per listed leg gives the bid and ask.
     """
-    probs: dict[str, float] = {}
-    cache: dict[str, float | None] = {}
+    quotes: RaceQuotes = {}
     for race in races:
-        probs[race.race_id] = _race_probability(race, client, cache)
-    return probs
+        if not race.has_market:
+            quotes[race.race_id] = (None, None, ())
+            continue
+        event = client.fetch_event(race.event)
+        tickers = [m["ticker"] for m in event["markets"]] if event else []
+        d = load_quote(client, race.d_ticker, event) if race.d_ticker in tickers else None
+        r = load_quote(client, race.r_ticker, event) if race.r_ticker in tickers else None
+        others = tuple(
+            load_quote(client, t, event) for t in tickers if t not in (race.d_ticker, race.r_ticker)
+        )
+        quotes[race.race_id] = (d, r, others)
+    return quotes
 
 
-def _race_probability(
-    race: Race, client: Client, cache: dict[str, float | None]
-) -> float:
-    if not race.has_market:
-        return race.prior
-    d_mid = _cached_mid(race.d_ticker, client, cache)
-    r_mid = _cached_mid(race.r_ticker, client, cache)
-
-    if d_mid is not None and r_mid is not None:
-        total = d_mid + r_mid
-        if total > 0:
-            return d_mid / total
-    if d_mid is not None:
-        return d_mid
-    if r_mid is not None:
-        return 1.0 - r_mid
-    return race.prior
+def apply_estimator(
+    races: list[Race], quotes: RaceQuotes, estimator: str = "midpoint"
+) -> dict[str, RaceProb]:
+    """``{race_id: RaceProb}`` using the named estimator."""
+    fn = ESTIMATORS[estimator]
+    return {r.race_id: fn(*quotes[r.race_id], r.prior) for r in races}
 
 
-def read_combo_prices(client: Client) -> dict[str, float | None]:
-    """Return the Kalshi combo-market price for each control outcome.
-
-    Each of the four legs of ``KXBALANCEPOWERCOMBO`` is priced from its own order
-    book. A leg with no book comes back as ``None`` (shown as ``n/a``).
-    """
-    return {
-        code: _book_mid(client.fetch_orderbook(ticker))
-        for code, ticker in constants.COMBO_MARKETS.items()
-    }
+def caucus_probs(race_probs: dict[str, RaceProb], share: float = 0.0) -> dict[str, float]:
+    """``{race_id: P(seat caucuses with Democrats)}`` for a caucus ``share``."""
+    return {rid: rp.caucus(share) for rid, rp in race_probs.items()}
 
 
-def _cached_mid(
-    ticker: str | None, client: Client, cache: dict[str, float | None]
-) -> float | None:
-    if ticker is None:
-        return None
-    if ticker not in cache:
-        cache[ticker] = _book_mid(client.fetch_orderbook(ticker))
-    return cache[ticker]
-
-
-def _book_mid(book: Book | None) -> float | None:
-    """Best bid/ask midpoint of a market's YES side, as a 0-1 probability.
-
-    ``yes_bid`` is the top of the YES book; ``yes_ask`` is one minus the top of
-    the NO book. Returns the midpoint when both sides are present, the single
-    side when only one is, and ``None`` for an empty or missing book.
-    """
-    if not book:
-        return None
-    yes_bid = _best(book.get("yes"))
-    no_bid = _best(book.get("no"))
-    yes_ask = (1.0 - no_bid) if no_bid is not None else None
-
-    if yes_bid is not None and yes_ask is not None:
-        return (yes_bid + yes_ask) / 2.0
-    if yes_bid is not None:
-        return yes_bid
-    if yes_ask is not None:
-        return yes_ask
-    return None
-
-
-def _best(levels: list[list[float]] | None) -> float | None:
-    """Highest price on one side of the book (the best resting bid)."""
-    if not levels:
-        return None
-    return max(price for price, _size in levels)
+def extract_probabilities(
+    races: list[Race], client: Client, estimator: str = "midpoint", share: float = 0.0
+) -> dict[str, float]:
+    """Load quotes, apply ``estimator``, and collapse with caucus ``share``."""
+    race_probs = apply_estimator(races, load_race_quotes(races, client), estimator)
+    return caucus_probs(race_probs, share)

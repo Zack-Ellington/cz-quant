@@ -75,9 +75,21 @@ COMBO_MARKETS = {
     "RD": f"{COMBO_EVENT}-RD",  # R House, D Senate
     "RR": f"{COMBO_EVENT}-RR",  # Republicans sweep
 }
-# Single-chamber control markets, used only as a cross-check in the output.
+# Single-chamber control markets. Each has a -D and a -R leg. The combo legs
+# settle on the same CONTROL rules, so DD+DR must equal House-D and DD+RD must
+# equal Senate-D at settlement: these are exact identities, not approximations.
 CONTROL_HOUSE_EVENT = "CONTROLH-2026"
 CONTROL_SENATE_EVENT = "CONTROLS-2026"
+
+# "Will the same party control the House and Senate?" -- single YES/NO market
+# that settles on the same CONTROL rules, so it must equal DD + RR.
+SAME_PARTY_MARKET = "KXSAMEPARTYCONGRESS-27FEB01"
+
+# Seat-count markets: mutually-exclusive buckets of the Democratic seat total on
+# Feb 1, 2027, counting members who caucus with Democrats (King, Sanders), which
+# matches SENATE_NOT_UP_DEM. They calibrate how much races move together.
+HOUSE_SEATS_EVENT = "KXDHOUSESEATS-27"
+SENATE_SEATS_EVENT = "KXDSENATESEATS-27"
 
 
 @dataclass(frozen=True)

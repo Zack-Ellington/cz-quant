@@ -1,14 +1,35 @@
-"""Render the model-vs-market comparison table.
+"""Shared rendering: model-free checks, trade EV, the paper section, the ledger.
 
-The table is the whole point of the strategy: for each of the four control
-outcomes it puts the simulation's probability next to the Kalshi combo-market
-price and shows the edge (model minus market, in percentage points). A large
-positive edge means the model thinks the outcome is underpriced.
+Model-specific tables live in ``report.py``. This module is shared by the
+2026 midterm strategies and should stay identical between them.
+
+Every number in the paper section and the ledger report is read back from
+``ledger.jsonl`` files and names the run directory that produced it.
 """
 
 from __future__ import annotations
 
-from strategy.simulation import OUTCOMES, SimulationResult
+import math
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+from typing import Mapping
+
+from strategy import money
+from strategy.checks import Check
+from strategy.fees import FeeSchedule
+from strategy.ledger import read_events, read_runs
+from strategy.markets import Quote
+from strategy.pnl import (
+    SIMULATIONS,
+    SimulatedPnL,
+    free_cash,
+    latest_model,
+    positions_from_events,
+    select_positions,
+    simulate_pnl,
+    summarize,
+)
 
 LABELS = {
     "DD": "Democrats sweep",
@@ -18,60 +39,225 @@ LABELS = {
 }
 
 
-def format_table(
-    result: SimulationResult,
-    combo_prices: dict[str, float | None],
-    *,
-    snapshot_label: str,
-) -> str:
-    """Return the comparison table as a string."""
-    name_w = max(len(v) for v in LABELS.values())
-    header_line = (
-        f"{'Outcome'.ljust(name_w)}  {'Model':>7}  {'Market':>7}  {'Edge':>8}"
-    )
-    rule = "-" * len(header_line)
+# --- Small formatters ------------------------------------------------------------
 
-    lines = [
-        "2026 Midterm - Congress balance of power",
-        f"{result.n:,} simulations - snapshot {snapshot_label}",
-        "",
-        header_line,
-        rule,
-    ]
-    for code in OUTCOMES:
-        model = result.combo[code]
-        market = combo_prices.get(code)
-        lines.append(
-            f"{LABELS[code].ljust(name_w)}  {_pct(model):>7}  "
-            f"{_pct(market):>7}  {_edge(model, market):>8}"
-        )
-    lines.append(rule)
-    lines.append(
-        f"Democratic control:  House {_pct(result.p_house_dem)}  "
-        f"Senate {_pct(result.p_senate_dem)}"
+
+def pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+def cents(value) -> str:
+    return f"{float(value) * 100:+.1f}c"
+
+
+def usd(value: Decimal | float) -> str:
+    value = Decimal(str(value)) if not isinstance(value, Decimal) else value
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.2f}"
+
+
+def edge(model: float, market: float | None) -> str:
+    return "n/a" if market is None else f"{(model - market) * 100:+.1f}pp"
+
+
+def bid_ask(quote: Quote) -> str:
+    bid = "-" if quote.bid is None else f"{quote.bid * 100:.1f}"
+    ask = "-" if quote.ask is None else f"{quote.ask * 100:.1f}"
+    return f"{bid}/{ask}"
+
+
+def size_text(sets: float) -> str:
+    return f"{sets:,.0f}" if sets >= 1 else f"{sets:.2f}"
+
+
+# --- Trade EV at an executable quantity -------------------------------------------
+
+
+def ev_after_fees(
+    model: float, quote: Quote, schedule: FeeSchedule, contracts: int
+) -> tuple[str, Decimal, int] | None:
+    """Best of buying YES at the ask or NO at the bid, per contract, after fees.
+
+    The quantity is capped by the contracts resting at that price, and the fee
+    is computed at that quantity, so a one-contract book pays a one-contract
+    fee. Returns ``(action, EV per contract, quantity)`` or ``None`` if neither
+    side has a positive EV at an executable quantity.
+    """
+    if not quote.is_open:
+        return None
+    p = Decimal(repr(model))
+    best = None
+    if quote.ask is not None:
+        n = min(contracts, math.floor(quote.ask_size))
+        if n >= 1:
+            ask = money.price(quote.ask)
+            best = ("buy", p - ask - schedule.fee(ask, n) / n, n)
+    if quote.bid is not None:
+        n = min(contracts, math.floor(quote.bid_size))
+        if n >= 1:
+            no = 1 - money.price(quote.bid)
+            ev = (1 - p) - no - schedule.fee(no, n) / n
+            if best is None or ev > best[1]:
+                best = ("sell", ev, n)
+    return best if best is not None and best[1] > 0 else None
+
+
+def ev_text(model: float, quote: Quote, fees: Mapping[str, FeeSchedule], contracts: int) -> str:
+    trade = ev_after_fees(model, quote, fees.get(quote.series, FeeSchedule()), contracts)
+    if trade is None:
+        return "-"
+    action, ev, n = trade
+    return f"{action} {cents(ev)} x{n}"
+
+
+# --- Model-free checks ----------------------------------------------------------
+
+
+def checks_section(checks: list[Check], contracts: int) -> list[str]:
+    name_w = max((len(c.name) for c in checks), default=10)
+    header = (
+        f"{'Check'.ljust(name_w)}  {'Cost':>7}  {'Raw':>7}  {'Net':>7}  "
+        f"{'Worst':>8}  {'Size':>7}  Verdict"
     )
-    worst_se = max(result.standard_error.values())
-    lines.append(f"Monte Carlo SE <= {worst_se * 100:.2f}pp")
+    lines = [
+        f"Model-free checks (taker; per set, in cents; fees at min({contracts}, size) sets; "
+        "Raw/Net assume D or R leaders, Worst covers independent or vacant leaders)",
+        header,
+        "-" * len(header),
+    ]
+    for c in checks:
+        lines.append(
+            f"{c.name.ljust(name_w)}  {c.cost:>7.4f}  {cents(c.raw_edge):>7}  "
+            f"{cents(c.net_edge):>7}  {cents(c.worst_net_edge):>8}  {size_text(c.size):>7}  {c.verdict}"
+        )
+    counts = {v: sum(1 for c in checks if c.verdict == v) for v in ("ARB", "cond", "fees")}
+    lines.append(
+        f"{counts['ARB']} arbitrage(s) in every settlement state; {counts['cond']} conditional on "
+        f"D/R leaders; {counts['fees']} positive only before fees."
+    )
+    return lines
+
+
+# --- Paper section of a run -------------------------------------------------------
+
+
+def paper_section(run_label: str, run_id: str, events: list[dict], bankroll: Decimal) -> list[str]:
+    """What this run did on paper, read from the ledger of every run so far."""
+    mine = [e for e in events if e["run_id"] == run_id]
+    positions = positions_from_events(events)
+    open_ = [p for p in positions.values() if p.is_open]
+    lines = [
+        f"Paper trading - {run_label} (paper mode: simulated fills, nothing sent)",
+        f"Bankroll {usd(bankroll)}; free cash {usd(free_cash(events, bankroll))} after this run; "
+        f"{len(open_)} open position(s), entry capital {usd(sum((p.entry_capital for p in open_), money.ZERO))}",
+    ]
+    settled = [e for e in mine if e["type"] == "settlement"]
+    for e in settled:
+        p = positions[e["position_id"]]
+        lines.append(
+            f"  settled {p.position_id} {p.basket}: receipt {usd(Decimal(e['receipt']))}, "
+            f"P&L {usd(Decimal(e['pnl']))} on {e['received_at'][:10]}"
+        )
+    signals = [e for e in mine if e["type"] == "signal"]
+    accepted = [e for e in signals if e["accepted"]]
+    lines.append(f"Signals: {len(accepted)} accepted, {len(signals) - len(accepted)} rejected")
+    for e in signals:
+        if e["accepted"]:
+            lines.append(
+                f"  + {e['position_id']} {e['basket']}: {e['quantity']} x, "
+                f"edge {cents(Decimal(e['edge']))}/set > threshold {cents(Decimal(e['threshold']))}"
+            )
+        else:
+            lines.append(f"  - {e['basket']}: {e['reason']}")
+    for e in mine:
+        if e["type"] == "fill":
+            lines.append(
+                f"  fill {e['position_id']} {e['ticker']} {e['side'].upper()} {e['quantity']} @ "
+                f"{Decimal(e['price']):.4f}, fee {usd(Decimal(e['fee']))}, cash {usd(Decimal(e['cash_delta']))}"
+                + (" (simulated)" if e.get("simulated") else "")
+            )
+    valuation = next((e for e in reversed(mine) if e["type"] == "valuation"), None)
+    if open_:
+        summary = summarize(open_)
+        lines.append(f"Open book: projected minimum profit {usd(summary.projected_min_profit)} (worst settlement state)")
+    if valuation is not None:
+        lines.append(_valuation_line(valuation))
+    return lines
+
+
+def _valuation_line(v: Mapping) -> str:
+    return (
+        f"Simulated P&L of the open book under {v['model']} ({v['n']:,} draws, seed {v['seed']}): "
+        f"mean {usd(v['mean'])}, 5%-95% {usd(v['p05'])} to {usd(v['p95'])}, P(loss) {v['prob_loss'] * 100:.1f}%"
+    )
+
+
+# --- The ledger subcommand --------------------------------------------------------
+
+
+def ledger_report(
+    runs_dir: Path,
+    strategy: str,
+    since: date | None = None,
+    until: date | None = None,
+    n: int = SIMULATIONS,
+    seed: int = 0,
+) -> str:
+    """Per-run and total aggregates for ``strategy``, joined across runs."""
+    events = read_events(runs_dir, strategy)
+    runs = {m["run_id"]: m for m in read_runs(runs_dir, strategy)}
+    chosen = select_positions(positions_from_events(events), since, until)
+    window = f"{since or 'start'} to {until or 'now'}"
+    lines = [
+        f"Paper ledger - {strategy} - {Path(runs_dir).name}/{strategy} - positions entered {window}",
+        f"{len(runs)} run(s) on disk; {len(chosen)} position(s) selected",
+    ]
+    header = (
+        f"{'Entry run':<18}{'Pos':>4}{'Open':>5}{'Settled':>8}{'Volume':>11}{'Capital open':>14}"
+        f"{'Capital settled':>17}{'Proj. min':>11}{'Settled P&L':>13}{'Return':>9}"
+    )
+    lines += ["", header, "-" * len(header)]
+    for run_id in sorted({p.run_id for p in chosen}):
+        lines.append(_summary_row(run_id, summarize([p for p in chosen if p.run_id == run_id])))
+    lines.append("-" * len(header))
+    total = summarize(chosen)
+    lines.append(_summary_row("Total", total))
+
+    if chosen:
+        lines += ["", "Positions"]
+        for p in chosen:
+            status = (
+                f"settled in {p.settled_run} on {p.received_at[:10]}: receipt {usd(p.receipt)}, "
+                f"P&L {usd(p.settled_pnl)}, return {p.settled_pnl / p.entry_capital * 100:+.1f}%"
+                if not p.is_open
+                else f"open: minimum payout {usd(p.min_payout)}, projected minimum profit {usd(p.projected_min_profit)}"
+            )
+            lines.append(
+                f"  {p.position_id} {p.basket} x{p.quantity} entered {p.entry_time[:10]} "
+                f"(runs/{strategy}/{p.run_id}): capital {usd(p.entry_capital)}; {status}"
+            )
+
+    latest = latest_model(events)
+    if latest is not None:
+        name, probs, source_run = latest
+        sim = simulate_pnl(chosen, probs, name, n, seed)
+        if sim is not None:
+            lines += ["", _simulated_line(sim, source_run)]
     return "\n".join(lines)
 
 
-def print_table(
-    result: SimulationResult,
-    combo_prices: dict[str, float | None],
-    *,
-    snapshot_label: str = "live",
-) -> None:
-    """Print the comparison table to stdout."""
-    print(format_table(result, combo_prices, snapshot_label=snapshot_label))
+def _summary_row(label: str, s) -> str:
+    ret = "n/a" if s.return_on_capital is None else f"{s.return_on_capital * 100:+.1f}%"
+    return (
+        f"{label:<18}{s.positions:>4}{s.open:>5}{s.settled:>8}{usd(s.volume):>11}{usd(s.capital_open):>14}"
+        f"{usd(s.capital_settled):>17}{usd(s.projected_min_profit):>11}{usd(s.settled_pnl):>13}{ret:>9}"
+    )
 
 
-def _pct(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value * 100:.1f}%"
-
-
-def _edge(model: float, market: float | None) -> str:
-    if market is None:
-        return "n/a"
-    return f"{(model - market) * 100:+.1f}pp"
+def _simulated_line(sim: SimulatedPnL, source_run: str) -> str:
+    return (
+        f"Simulated P&L of the {sim.positions} open position(s) under {sim.model} "
+        f"(model of run {source_run}; {sim.n:,} draws, seed {sim.seed}): mean {usd(sim.mean)}, "
+        f"sd {usd(sim.sd)}, 5%/50%/95% {usd(sim.p05)} / {usd(sim.p50)} / {usd(sim.p95)}, "
+        f"P(loss) {sim.prob_loss * 100:.1f}%. A model valuation, not earned P&L."
+    )

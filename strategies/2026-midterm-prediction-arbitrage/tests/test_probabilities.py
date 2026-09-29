@@ -1,121 +1,94 @@
-"""Price extraction from order books: leg normalization and the fallbacks."""
+"""Race quotes: every leg is read, unlisted legs and missing events fall back."""
 
 from __future__ import annotations
 
 import pytest
 
-from strategy.probabilities import extract_probabilities, read_combo_prices
+from strategy.probabilities import (
+    apply_estimator,
+    caucus_probs,
+    extract_probabilities,
+    load_race_quotes,
+)
 from strategy.races import Race, discover_races
-
-
-def book(yes=None, no=None):
-    """A normalized order book with a single level per side (price, size)."""
-    return {
-        "yes": [[yes, 100.0]] if yes is not None else [],
-        "no": [[no, 100.0]] if no is not None else [],
-    }
+from strategy.snapshot import SnapshotClient
+from tests.conftest import committed_snapshot
 
 
 class StubClient:
-    """Serves canned order books by ticker; unknown tickers return ``None``."""
+    def __init__(self, events=None, books=None):
+        self.events, self.books, self.calls = events or {}, books or {}, []
 
-    def __init__(self, books: dict[str, dict]):
-        self._books = books
+    def fetch_event(self, ticker):
+        self.calls.append(ticker)
+        return self.events.get(ticker)
 
-    def fetch_event(self, ticker: str):
+    def fetch_orderbook(self, ticker):
+        self.calls.append(ticker)
+        return self.books.get(ticker)
+
+    def fetch_series(self, ticker):
         return None
 
-    def fetch_orderbook(self, ticker: str):
-        return self._books.get(ticker)
+
+def _race(event="SENATENE-26", prior=0.1):
+    return Race("senate:NE", "senate", "NE Senate", event,
+                f"{event}-D" if event else None, f"{event}-R" if event else None, prior)
 
 
-def _race(event="SENATEXX-26"):
-    return Race(
-        race_id="senate:XX",
-        chamber="senate",
-        label="XX Senate",
-        event=event,
-        d_ticker=f"{event}-D" if event else None,
-        r_ticker=f"{event}-R" if event else None,
-        prior=0.30,
-    )
+def _event(*suffixes, ticker="SENATENE-26"):
+    return {"event_ticker": ticker, "markets": [
+        {"ticker": f"{ticker}-{s}", "last_price": None, "volume": 0.0} for s in suffixes
+    ]}
 
 
-def test_legs_are_normalized_against_each_other():
-    # D book mid = (0.54 + (1-0.44))/2 = 0.55; R book mid = (0.40 + (1-0.58))/2
-    # = 0.41. The two legs sum to 0.96, so P(D) = 0.55 / 0.96, not 0.55.
+def _book(bid, ask):
+    return {"yes": [[bid, 1.0]], "no": [[1 - ask, 1.0]]}
+
+
+def test_every_leg_is_read_including_independents():
     client = StubClient(
-        {
-            "SENATEXX-26-D": book(yes=0.54, no=0.44),
-            "SENATEXX-26-R": book(yes=0.40, no=0.58),
-        }
+        {"SENATENE-26": _event("R", "D", "DOSB")},
+        {"SENATENE-26-D": _book(0.00, 0.01), "SENATENE-26-R": _book(0.68, 0.69),
+         "SENATENE-26-DOSB": _book(0.31, 0.32)},
     )
-    probs = extract_probabilities([_race()], client)
-    assert probs["senate:XX"] == pytest.approx(0.55 / (0.55 + 0.41), abs=1e-9)
+    quotes = load_race_quotes([_race()], client)
+    d, r, others = quotes["senate:NE"]
+    assert d.ticker.endswith("-D") and r.ticker.endswith("-R")
+    assert [o.ticker for o in others] == ["SENATENE-26-DOSB"]
+    p = apply_estimator([_race()], quotes)["senate:NE"]
+    assert p.ind == pytest.approx(0.315 / (0.005 + 0.685 + 0.315))
 
 
-def test_yes_ask_from_no_side():
-    # Only the NO book has orders: yes_ask = 1 - best_no, and with no yes bids
-    # that ask is the price. D no-best 0.30 -> 0.70; R no-best 0.72 -> 0.28.
-    client = StubClient(
-        {
-            "SENATEXX-26-D": book(no=0.30),
-            "SENATEXX-26-R": book(no=0.72),
-        }
-    )
-    probs = extract_probabilities([_race()], client)
-    assert probs["senate:XX"] == pytest.approx(0.70 / (0.70 + 0.28), abs=1e-9)
+def test_leg_the_event_does_not_list_is_none():
+    client = StubClient({"SENATENE-26": _event("R")}, {"SENATENE-26-R": _book(0.9, 0.92)})
+    d, r, _ = load_race_quotes([_race()], client)["senate:NE"]
+    assert d is None and r is not None
+    assert "SENATENE-26-D" not in client.calls  # no book fetch for an unlisted leg
 
 
-def test_empty_book_falls_back_to_prior():
-    client = StubClient({"SENATEXX-26-D": book(), "SENATEXX-26-R": book()})
-    assert extract_probabilities([_race()], client)["senate:XX"] == pytest.approx(0.30)
+def test_missing_event_falls_back_to_the_prior():
+    probs = extract_probabilities([_race(prior=0.2)], StubClient())
+    assert probs["senate:NE"] == pytest.approx(0.2)
 
 
-def test_absent_market_falls_back_to_prior():
-    assert extract_probabilities([_race()], StubClient({}))["senate:XX"] == pytest.approx(0.30)
+def test_race_without_a_market_never_calls_the_client():
+    client = StubClient()
+    probs = extract_probabilities([_race(event=None, prior=0.03)], client)
+    assert probs["senate:NE"] == pytest.approx(0.03)
+    assert client.calls == []
 
 
-def test_no_market_race_uses_prior_without_fetching():
-    # A race with event=None (Louisiana, safe seats) never calls the client.
-    class Boom:
-        def fetch_event(self, ticker):
-            raise AssertionError("should not fetch")
+def test_caucus_share_moves_only_races_with_independents():
+    from strategy.estimators import RaceProb
 
-        def fetch_orderbook(self, ticker):
-            raise AssertionError("should not fetch")
-
-    probs = extract_probabilities([_race(event=None)], Boom())
-    assert probs["senate:XX"] == pytest.approx(0.30)
+    race_probs = {"senate:NE": RaceProb(0.0, 0.3), "senate:GA": RaceProb(0.9, 0.0)}
+    assert caucus_probs(race_probs, 0.0) == {"senate:NE": 0.0, "senate:GA": 0.9}
+    assert caucus_probs(race_probs, 1.0) == {"senate:NE": pytest.approx(0.3), "senate:GA": 0.9}
 
 
-def test_single_sided_book_uses_that_side():
-    # Only a YES bid exists on the D leg; R leg absent -> P(D) = that bid.
-    client = StubClient({"SENATEXX-26-D": book(yes=0.63)})
-    assert extract_probabilities([_race()], client)["senate:XX"] == pytest.approx(0.63)
-
-
-def test_every_race_gets_a_probability(fixture_client):
-    races = discover_races()
-    probs = extract_probabilities(races, fixture_client)
-    assert set(probs) == {r.race_id for r in races}
+def test_kentucky_priced_from_the_la_ticker_louisiana_from_its_prior():
+    probs = extract_probabilities(discover_races(), SnapshotClient(committed_snapshot()))
+    assert probs["senate:LA"] == pytest.approx(0.03)  # no market: prior
+    assert probs["senate:KY"] != pytest.approx(0.08)  # SENATELA-26 is priced
     assert all(0.0 <= p <= 1.0 for p in probs.values())
-
-
-def test_prices_come_from_the_live_book_not_priors(fixture_client):
-    # Georgia's book prices Ossoff far above the seat's 0.55 prior.
-    probs = extract_probabilities(discover_races(), fixture_client)
-    assert probs["senate:GA"] > 0.85
-
-
-def test_louisiana_uses_its_prior(fixture_client):
-    probs = extract_probabilities(discover_races(), fixture_client)
-    assert probs["senate:LA"] == pytest.approx(0.03)
-
-
-def test_combo_prices_read_from_snapshot(fixture_client):
-    prices = read_combo_prices(fixture_client)
-    assert set(prices) == {"DD", "DR", "RD", "RR"}
-    assert all(0.0 <= p <= 1.0 for p in prices.values())
-    # The four mutually-exclusive legs price close to a full book.
-    assert sum(prices.values()) == pytest.approx(1.0, abs=0.05)

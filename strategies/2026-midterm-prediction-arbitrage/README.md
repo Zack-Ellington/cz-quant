@@ -1,8 +1,9 @@
 # 2026-midterm-prediction-arbitrage
 
-Price the four ways the 2026 U.S. midterms can split control of Congress, and
-compare those model probabilities to Kalshi's combo market. The four outcomes
-are mutually exclusive and exhaustive:
+Price the four ways the 2026 U.S. midterms can split control of Congress by
+drawing every House and Senate race **independently** from its Kalshi market,
+compare them to Kalshi's combo market, and paper-trade the differences. The four
+outcomes:
 
 | Code | Meaning            |
 | ---- | ------------------ |
@@ -11,125 +12,160 @@ are mutually exclusive and exhaustive:
 | RD   | Republican House, Democratic Senate |
 | RR   | Republicans sweep  |
 
-Kalshi lists a single combo market, `KXBALANCEPOWERCOMBO`, with one leg for each
-outcome. The edge, if any, is the gap between that market and a bottom-up
-simulation built from the individual House and Senate races.
+Its sibling, `2026-midterm-dependence-arbitrage`, runs the same machinery with
+a latent-swing model in which races move together. The two are separate
+strategies with separate ledgers, so their paper performance can be compared.
 
-## Method
+**What to expect from this model.** Independent races concentrate the seat
+count: on the committed snapshot it gives a Democratic House 100% (control
+market: 91.3%) and a Republican sweep 0% (market: 8.6%). It therefore wants to
+sell RR and buy DR, trades the dependence model rejects. See
+`2026-midterm-dependence-arbitrage/reports/dependence.md` for why the market's
+seat-count prices contradict independence. The paper ledger is how this
+strategy's bets get scored.
 
-1. **Discover the races.** 35 Senate seats are on the 2026 ballot (33 Class II
-   seats plus the Florida and Ohio special elections) and all 435 House seats.
-   See the ticker traps below.
-2. **Read a probability per race.** For each race with a Kalshi market, take the
-   Democratic and Republican leg prices from the **order book** and normalize
-   them against each other (the two legs rarely sum to exactly 100¢). Races with
-   no market or an empty book fall back to a prior. Prices must come from the
-   order book: Kalshi leaves the `yes_bid` / `yes_ask` summary fields on these
-   markets empty even when a full book of resting orders exists, so reading the
-   summary alone makes every market look unquoted.
-3. **Simulate.** Draw every race independently, add the seats not on the ballot
-   (the Senate baseline) and the safe House seats, apply the control rules, and
-   bucket each run into DD / DR / RD / RR. 100,000 runs by default.
-4. **Compare.** Print the model probability, the Kalshi combo price, and the edge
-   (model − market, in percentage points) for each outcome.
+## Pipeline
 
-### Control rules
+1. **Acquire quotes**: every leg of every race (35 Senate, 67 priced House
+   districts), the combo, House and Senate control, the same-party market, the
+   seat-count buckets, and each traded series' fees and contract terms. Prices
+   come from order books. With `--snapshot-out`, the snapshot is saved **now,
+   before the model runs**.
+2. **Model-free checks** over the nine settlement states (each chamber leader
+   D, R, or neither). `ARB` only if the basket profits after fees in all nine;
+   `cond` if only while both leaders are D or R.
+3. **Independent model**: each race's legs (D, R, independents) become a
+   probability with the chosen estimator; each race is drawn on its own
+   (100,000 Monte Carlo runs); independent candidates count as non-Democratic.
+4. **Report** the model against the market, with the EV after fees at the
+   quantity the book offers.
+5. **Paper trade** (issue #7): settle resolved positions, confirm candidates on
+   a second scan, fill on paper, value the open book under the model.
 
-- **House:** Democrats need an outright 218 of 435. 217 leaves Republicans in
-  control.
-- **Senate:** a 50-50 tie is broken by the Vice President, who is a Republican in
-  the Senate seated in January 2027, so Democrats need **51** and 50 is not
-  enough. This is the single most common way a naive model misprices Senate
-  control.
+### Control rules and settlement
 
-### Ticker traps handled in `races.py` / `constants.py`
+- **House:** Democrats need 218 of 435. **Senate:** 51, since the Republican VP
+  breaks a 50-50 tie.
+- The combo, control, and same-party markets settle on Kalshi's **CONTROL**
+  rules: the party of the Speaker and of the President pro tempore. An
+  independent or vacant leader is neither party, so every D/R leg loses; that is
+  why baskets are checked over nine states.
+- Expected expiration Feb 1, 2027; the combo's metadata allows Feb 8, and early
+  determination or a review can move it. Holding periods are assumptions.
 
-Kalshi's per-state Senate tickers have two traps that a suffix-to-state map gets
-wrong:
+### Data traps handled in code
 
-- **Kentucky is filed under `SENATELA-26`** (its event is titled "Kentucky Senate
-  winner?"). There is no `SENATEKY-26`.
-- **Louisiana has no market at all**, so it is scored from its prior.
-- The Florida and Ohio special elections use an `S` suffix: `SENATEFLS-26`,
-  `SENATEOHS-26`.
+- Kentucky's Senate race is filed under `SENATELA-26`; Louisiana has no market;
+  the FL and OH specials are `SENATEFLS-26` and `SENATEOHS-26`.
+- Independent candidates (Osborn NE, Bodnar MT, Achilles ID, Bengs SD, Hill
+  AK-AL) have their own legs; every leg is normalized together.
+- 368 House districts have no market; they are held at their 2024 holder.
+- Prices are snapped to Kalshi's four-decimal grid and all money is `Decimal`.
 
-### Baselines and the independence assumption
+## Fees
 
-Kalshi prices only the competitive House districts (67 at the snapshot below).
-The other 368 seats are treated as safe at their 2024 result: the safe counts
-(`HOUSE_SAFE_DEM` = 177, `HOUSE_SAFE_REP` = 191) are the 2024 chamber result
-(D 215 / R 220) minus the market districts counted by their current holder, so a
-currently-Democratic seat that happens to have a market is not double-counted in
-the safe pool. The Senate starts from the 65 seats not on the ballot (34
-Democratic-caucus, 31 Republican).
+Kalshi's quadratic trade fee (`0.07 · C · P · (1 − P)`, times the series
+multiplier) is rounded up to $0.000001, and then the balance change is floored
+to the account's precision: **$0.01 for a non-direct (retail) account**, the one
+paper results assume. One contract at $0.055 costs $0.06 all in (fee $0.005,
+Kalshi's published example). Fees are computed at the quantity actually filled.
 
-Races are drawn **independently**. That is the model's main simplification: a
-real national swing correlates races, so the true probability of a sweep (DD or
-RR) is higher than independence implies. Read the table as a test of the
-market's implied correlation, not as a calibrated forecast.
+## Paper trading and the ledger
 
-## Sample output
+Every `uv run strategy` creates `runs/2026-midterm-prediction-arbitrage/<UTC time>/`
+at the repository root (gitignored) with `run.json`, an append-only
+`ledger.jsonl`, and `run.log`. **Paper mode is the default and the only mode:
+nothing is ever sent.** Live orders are issue #5.
 
-Snapshot date: **2026-09-22** · repo commit `a612666` · `--seed 12345` ·
-100,000 simulations. Produced from the committed order-book snapshot in
-`tests/fixtures/`, which was captured from live Kalshi data.
+- **Signals**: guaranteed arbitrage baskets, and combo legs where the model's
+  edge after fees beats `--min-edge` plus three Monte Carlo standard errors.
+  Conditional baskets, near-identities, and thin books are recorded and
+  rejected with the reason.
+- **Sizing**: capped by resting depth, free cash (cost plus entry fees
+  reserved), and `--max-position`; one open position per basket; overlapping
+  baskets never reuse the same depth. Edges and fees are evaluated at the
+  quantity that fills.
+- **Confirmation**: candidates are re-priced on a second scan of their legs'
+  books and filled at that scan's prices.
+- **Settlement**: a later run settles any position whose markets have resolved,
+  at $1 per winning contract.
+- **Simulated P&L**: each run values the open book under the model by drawing
+  settlement states from the model's outcome probabilities; the ledger report
+  does the same with the latest scan's model. A valuation, kept apart from
+  earned P&L and from the worst-case projected minimum.
 
+```bash
+uv run strategy ledger
+uv run strategy ledger --since 2026-10-01 --until 2026-11-30
 ```
-2026 Midterm - Congress balance of power
-100,000 simulations - snapshot fixtures
 
-Outcome               Model   Market      Edge
-----------------------------------------------
-Democrats sweep       62.8%    60.5%    +2.3pp
-D House / R Senate    37.2%    29.5%    +7.7pp
-R House / D Senate     0.0%     0.8%    -0.8pp
-Republicans sweep      0.0%     8.5%    -8.5pp
-----------------------------------------------
-Democratic control:  House 100.0%  Senate 62.8%
-Monte Carlo SE <= 0.15pp
-```
-
-These are real market prices. The **Senate** model (62.8% Democratic control)
-tracks the market's implied 61.3% closely, because Senate control turns on a
-handful of decisive races the market prices directly.
-
-The **House** shows the model's headline limitation. Kalshi's competitive
-district books price Democrats to win about 229 of 435 seats, so an *independent*
-draw of those districts makes a Democratic House all but certain (≈100%). The
-combo market instead prices a Democratic House at ~90%, holding back ~9% for
-Republicans. That gap is the independence assumption: a correlated national swing
-could flip many districts together (a red wave), which the market prices and this
-model cannot produce. Read the House edges (DR +7.7pp, RR −8.5pp) as a flag that
-the model and market disagree about correlation, not as a clean trade.
+The report joins runs by position id and prints, per entry run and in total:
+volume, capital committed (open / settled), projected minimum profit on open
+positions, settled net P&L, return on committed capital, each position's status,
+and the simulated P&L of the open positions.
 
 ## Install
 
 ```bash
 uv sync
-cp .env.example .env
 ```
 
-No API key is needed. The market-data endpoints this strategy reads are public,
-and `.env.example` carries no required variables for this MVP. `KALSHI_API_BASE_URL`
-is read from the environment if set, and otherwise defaults to Kalshi's public
-elections host.
+No API key is needed. If the repository lives in OneDrive, set
+`export UV_LINK_MODE=copy` first: OneDrive rejects the hardlinks uv uses by
+default, which leaves a half-built `.venv`.
 
 ## Run
 
-Live (reads current Kalshi order books; shows `n/a` only where a book is empty):
-
 ```bash
-uv run strategy --seed 12345
+uv run strategy                                          # live quotes, paper trading
+uv run strategy --snapshot-out snapshots/2026-09-29.json # record what the run reads
+uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 ```
 
-Reproducible (reads the committed snapshot instead of the network):
+| Option | Default | |
+| --- | --- | --- |
+| `--estimator` | `midpoint` | `midpoint`, `width`, `last`, `shrunk` |
+| `--snapshot-in FILE` | live API | replay a saved snapshot |
+| `--snapshot-out FILE` | none | save every quote read (before the model, and again at the end) |
+| `--mode` | `paper` | `live` is refused (issue #5) |
+| `--no-trade` | off | scan and report only |
+| `--bankroll` | 1000 | paper bankroll, dollars |
+| `--max-position` | 100 | entry capital cap per position, dollars |
+| `--min-edge` | 0.01 | edge per set after fees, dollars |
+| `--contracts` | 100 | largest order shown in checks and EV |
+| `--runs-dir` | `<repo>/runs` | where run directories go (`STRATEGY_RUNS_DIR` too) |
+| `--confirm-delay` | 5 live, 0 replay | seconds before the confirmation scan |
+| `--simulations`, `--seed` | 100000, none | Monte Carlo runs and seed |
 
-```bash
-uv run strategy --snapshot tests/fixtures --seed 12345
+`--model` accepts only `independent`. The paper limits are placeholders until
+the capital and position limits in issue #5 are decided.
+
+## Sample output
+
+`uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345` (the
+golden output in `tests/expected_output.txt` fixes the clock):
+
 ```
+Outcome              Model  Market      Bid/Ask     Edge      EV after fees
+---------------------------------------------------------------------------
+Democrats sweep      66.8%   63.5%    63.0/64.0   +3.3pp     buy +1.2c x100
+D House / R Senate   33.2%   26.5%    26.0/27.0   +6.7pp     buy +4.8c x100
+R House / D Senate    0.0%    0.7%      0.6/0.7   -0.6pp    sell +0.5c x100
+Republicans sweep     0.0%    8.6%      8.5/8.7   -8.6pp     sell +7.9c x37
+---------------------------------------------------------------------------
+D House control     100.0%   91.3%    91.2/91.3
+D Senate control     66.8%   64.5%    64.0/65.0
 
-Options: `--simulations` (default 100000), `--seed` (default unseeded),
-`--snapshot DIR` (read saved Kalshi responses instead of the live API).
+Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
+Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96
+Signals: 2 accepted, 3 rejected
+  + 20260923T170000Z-01 model:sell RR: 37 x, edge +7.9c/set > threshold +1.0c
+  + 20260923T170000Z-02 model:buy DR: 352 x, edge +4.8c/set > threshold +1.4c
+  - model:buy DD: edge +1.17c/set at 152 sets does not exceed threshold 1.45c
+  ...
+Open book: projected minimum profit -$133.96 (worst settlement state)
+Simulated P&L of the open book under independent model (100,000 draws, seed 12345): mean $20.12, 5%-95% -$96.96 to $255.04, P(loss) 66.7%
+```
 
 ## Test
 
@@ -137,42 +173,31 @@ Options: `--simulations` (default 100000), `--seed` (default unseeded),
 uv run --group dev pytest
 ```
 
-The suite covers the seat arithmetic, the control tie-breaks, the KY/LA ticker
-mapping, price normalization and fallbacks, the simulator (determinism, a valid
-distribution, Monte Carlo error under 0.002 at 100k runs), and a byte-for-byte
-end-to-end check of the printed table against `tests/fixtures/expected_output.txt`.
+Unit tests run on small synthetic files in `tests/fixtures/` (an aggregate-market
+snapshot and a two-run fixture ledger). The integration test replays the
+committed snapshot: golden output, the run directory, live mode refused, a
+replayable snapshot after a forced failure, and a position opened in one run and
+settled in the next (issue #7's acceptance test).
 
-## Refreshing the snapshot
+## Layout
 
-The fixtures are three saved order-book snapshots keyed by market ticker:
-`senate_snapshot.json`, `house_snapshot.json`, and `combo_snapshot.json`, plus
-the golden `expected_output.txt`. To rebuild them from live data, fetch the `-D`
-and `-R` order book for each event in `constants.SENATE_RACES` and
-`constants.HOUSE_MARKET_DISTRICTS`, and each leg in `constants.COMBO_MARKETS`,
-through `api.KalshiClient.fetch_orderbook`, write the normalized books into the
-three files, and regenerate `expected_output.txt` from a seeded run. Order books
-move continuously, so a refreshed snapshot changes the golden table.
+| Module | |
+| --- | --- |
+| `api.py`, `snapshot.py` | public Kalshi client; record and strictly replay every quote |
+| `races.py`, `constants.py`, `control.py` | races, tickers, seat baselines, control rules |
+| `markets.py`, `estimators.py`, `probabilities.py` | aggregate markets; race books to probabilities |
+| `money.py`, `fees.py`, `checks.py` | exact money; Kalshi fees; nine-state checks |
+| `ledger.py`, `trading.py`, `pnl.py` | run directories; paper trading; aggregates and simulated P&L |
+| `output.py` | shared rendering: checks, EV, paper section, ledger report |
+| `simulation.py` | the independent model |
+| `report.py`, `runner.py`, `cli.py` | this strategy's report, pipeline, command line |
 
-## Risks and limitations
-
-- **Independence.** The single biggest one. Races are drawn independently, so a
-  correlated national swing (a wave in either direction) is invisible to the
-  model. This is why the model prints a near-certain Democratic House while the
-  combo market holds back ~9% for Republicans. A correlated-error model would
-  close most of that gap.
-- **Safe-seat baseline.** The House safe counts are the 2024 result outside the
-  market districts; a wave that puts currently-safe seats in play is not captured
-  until Kalshi opens markets for them.
-- **Thin books.** Prices are the best bid/ask midpoint. A wide or one-sided book
-  (a few districts have no NO-side orders) makes that midpoint noisy, and empty
-  books fall back to priors.
-- **No fees or execution.** The table is a raw probability comparison. Kalshi
-  fees, the bid/ask spread, and combo-leg liquidity are not modeled, so a
-  positive edge is necessary but not sufficient to trade.
+Every module except `report.py` and `runner.py` is shared with
+`2026-midterm-dependence-arbitrage` and kept identical (the repository copies
+code between strategies instead of sharing a library).
 
 ## References
 
-- Kalshi API documentation: https://docs.kalshi.com
-- Public market data (no auth): `https://api.elections.kalshi.com/trade-api/v2`
-- Combo market: `KXBALANCEPOWERCOMBO`; single-chamber controls: `CONTROLH-2026`,
-  `CONTROLS-2026`.
+- Kalshi API: https://docs.kalshi.com; fee rounding:
+  https://docs.kalshi.com/getting_started/fee_rounding
+- CONTROL contract terms: https://assets.kalshi.com/contract_terms/CONTROL.pdf
