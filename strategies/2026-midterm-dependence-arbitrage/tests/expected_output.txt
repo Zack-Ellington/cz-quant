@@ -1,0 +1,50 @@
+2026 Midterm - Congress balance of power
+snapshot 2026-09-23.json (captured 2026-09-23T16:25:13Z) - estimator midpoint - model one factor
+
+Model-free checks (taker; edge per set in cents after fees on up to 100 sets; size = sets available at these prices)
+Check                                     Cost      Raw      Net     Size  Verdict
+----------------------------------------------------------------------------------
+combo: buy all four legs                 1.004    -0.4c    -4.0c   10,464  ok
+combo: sell all four legs                3.019    -1.9c    -5.5c       37  ok
+House control: D + R                     1.000    +0.0c    -1.1c    5,779  ok
+Senate control: D + R                    1.000    +0.0c    -3.2c      315  ok
+DD + DR vs House-D (short)               0.997    +0.3c    -3.3c    5,779  fees
+DD + DR vs House-D (long)                1.007    -0.7c    -1.9c   10,068  ok
+DD + RD vs Senate-D (short)              1.007    -0.7c    -4.0c      315  ok
+DD + RD vs Senate-D (long)               0.997    +0.3c    -3.3c      478  fees
+DD + RR vs same-party (short)            1.137   -13.7c   -17.6c      200  ok
+DD + RR vs same-party (long)             0.937    +6.3c    +3.3c      200  ARB
+DD >= House-D + Senate-D - 1             1.087    -8.7c   -12.5c      315  ok
+RR >= House-R + Senate-R - 1             1.640   -64.0c   -66.7c      478  ok
+DR >= House-D - Senate-D                 0.997    +0.3c    -3.3c      478  fees
+RD >= Senate-D - House-D                 1.280   -28.0c   -30.2c      315  ok
+House seats: buy all buckets             1.044    -4.4c   -16.4c        1  ok
+House seats: sell all buckets           11.026    -2.6c   -14.6c        1  ok
+House seats >= 218 vs House-D (short)    1.038    -3.8c   -13.8c        1  ok
+House seats >= 218 vs House-D (long)     1.006    -0.6c    -3.1c        2  ok
+Senate seats: buy all buckets            1.014    -1.4c   -12.4c     0.15  ok
+Senate seats: sell all buckets           9.077    -7.7c   -15.7c        2  ok
+Senate seats >= 51 vs Senate-D (short)   1.030    -3.0c    -8.1c      315  ok
+Senate seats >= 51 vs Senate-D (long)    0.984    +1.6c    -7.4c     0.15  fees
+1 arbitrage(s) survive fees; largest: DD + RR vs same-party (long), +3.3c on 200 sets.
+
+Calibration: seat-count and control markets (combo held out)
+Model            sigma H sigma S  caucus     flip R/D    loss   House  Senate
+-----------------------------------------------------------------------------
+no swing           0.000   0.000    0.42  25.0%/24.6%  0.5486   96.4%   71.2%
+one factor         0.560   0.560    0.77    3.5%/0.2%  0.0211   91.1%   64.4%
+two factor         0.384   0.607    0.74    4.3%/1.1%  0.0170   91.2%   63.7%
+control markets                                                 91.3%   63.9%
+Selected one factor: one factor matches both control markets within 0.005 <= 0.01
+
+Outcome              Indep  Factor  Market      Bid/Ask     Edge  EV after fees
+-------------------------------------------------------------------------------
+Democrats sweep      74.4%   64.0%   63.5%    63.0/64.0   +0.5pp              -
+D House / R Senate   25.6%   27.1%   26.5%    26.0/27.0   +0.6pp              -
+R House / D Senate    0.0%    0.4%    0.7%      0.6/0.7   -0.3pp     sell +0.2c
+Republicans sweep     0.0%    8.5%    8.6%      8.5/8.7   -0.1pp              -
+-------------------------------------------------------------------------------
+D House control     100.0%   91.1%   91.3%    91.2/91.3
+D Senate control     74.4%   64.4%   64.5%    64.0/65.0
+Factor model Democratic seats: House 235.5 +/- 15.6, Senate 51.6 +/- 3.1
+Independent: 100,000 simulations, SE <= 0.14pp
