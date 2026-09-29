@@ -18,6 +18,7 @@ import pytest
 
 from strategy.ledger import read_events
 from strategy.output import ledger_report
+from strategy.runner import STRATEGY_ID
 from strategy.pnl import (
     free_cash,
     latest_model,
@@ -29,7 +30,7 @@ from strategy.pnl import (
 from tests.conftest import FIXTURES
 
 RUNS = FIXTURES / "runs"
-ME = "2026-midterm-dependence-arbitrage"
+ME = STRATEGY_ID
 A = "20260923T170000Z"
 
 
