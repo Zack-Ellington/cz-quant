@@ -1,65 +1,80 @@
 """Model-free arbitrage checks.
 
-These need no model at all. Each check is a basket of contracts whose combined
-payout is at least ``payout`` dollars in *every* possible outcome; if buying the
-basket costs less than that, the difference is locked in. The guaranteed payout
-is computed by enumerating the settlement states, not asserted by hand, so a
-mis-specified basket cannot report a free lunch.
+These need no model. Each check is a basket of contracts; its payout in every
+settlement state is computed by enumerating the states, not asserted by hand, so
+a mis-specified basket cannot report a free lunch.
 
+Settlement states
+-----------------
 The combo legs, the control markets, and the same-party market all settle on
-Kalshi's CONTROL rules, so over the four states DD / DR / RD / RR (House winner,
-Senate winner) these identities hold exactly:
+Kalshi's CONTROL rules, whose payout criterion is the *party membership of the
+chamber's leader*: the Speaker of the House and the President pro tempore of the
+Senate (https://assets.kalshi.com/contract_terms/CONTROL.pdf). A leader is a
+Democrat (D), a Republican (R), or neither (O): an independent, or an office
+still vacant at expiration. The rules map O to neither party, so every D- or
+R-conditioned leg pays nothing in it. That gives nine states per chamber pair:
 
-    DD + DR + RD + RR = 1                  (sums)
+    DD DR DO   RD RR RO   OD OR OO     (House leader, Senate leader)
+
+Over the four D/R states these identities hold exactly:
+
+    DD + DR + RD + RR = 1                                          (sums)
     DD + DR = House-D,  DD + RD = Senate-D,  DD + RR = Same-party   (marginals)
-    DD >= House-D + Senate-D - 1, DR >= House-D - Senate-D, ...     (Frechet)
+    DD >= House-D + Senate-D - 1,  DR >= House-D - Senate-D, ...    (Frechet)
 
-The Fréchet lower bounds are the only restriction the control markets place on
-the joint: any combo price below one is a mispricing no matter how the chambers
-are correlated.
+Each check reports its payout over the D/R states and its worst payout over all
+nine. A basket that is profitable after fees in every state is an arbitrage
+(``ARB``). One that is profitable only while both leaders are D or R -- the
+same-party basket, for instance, pays nothing if the Speaker is an independent
+-- is labeled conditional (``cond``), never guaranteed.
 
-The seat-count checks compare "Democrats hold >= 218 seats" with House control
-(and >= 51 with the Senate). Those are near-identities, not settlement
-identities -- a vacancy on Feb 1 or a failed Speaker vote could separate them --
-so they are reported with ``exact=False`` and never labeled an arbitrage.
+The seat-count checks live in their own state space (which bucket the seat
+total lands in; caucusing independents count with their party). Bucket sums are
+exact. "Democrats hold >= 218 seats" vs House control is only a near-identity --
+a vacancy or a failed leadership vote could separate them -- so those checks
+have ``exact=False`` and are never labeled arbitrage.
 
-Every leg is bought as a taker: YES at the ask, or NO at one minus the bid. A
-check also reports its size: how many full sets can be bought at the quoted
-prices, the smallest resting size across its legs. Fees are charged for an
-order of ``min(contracts, size)`` sets, rounding up to the cent per order as
-Kalshi does, so a thin book pays the rounding it would really pay. A check is
-labeled an arbitrage only if it is exact, positive after fees, and at least one
-full set is available. Capital is locked until the markets settle on Feb 1,
-2027, so even a real arbitrage must clear the cost of carry to be worth taking.
+Money and size
+--------------
+Every price, cost, fee, and edge is an exact ``Decimal`` (see ``money.py``). Each
+leg is bought as a taker: YES at the ask, NO at one minus the bid. A check's size
+is the smallest resting size across its legs, and its fees are computed for an
+order of ``min(contracts, size)`` sets -- the quantity that could actually fill.
+``ARB`` also requires at least one full set.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Mapping
 
+from strategy import money
 from strategy.constants import HOUSE_MAJORITY, SENATE_DEM_CONTROL
 from strategy.fees import DEFAULT_CONTRACTS, FeeSchedule
 from strategy.markets import AggregateMarkets, Quote, SeatMarket
 
-STATES = ("DD", "DR", "RD", "RR")  # (House winner, Senate winner)
+LEADERS = ("D", "R", "O")
+STATES = tuple(h + s for h in LEADERS for s in LEADERS)  # all nine
+DR_STATES = ("DD", "DR", "RD", "RR")  # both leaders a Democrat or Republican
 
-HOUSE_D = frozenset({"DD", "DR"})
-HOUSE_R = frozenset({"RD", "RR"})
-SENATE_D = frozenset({"DD", "RD"})
-SENATE_R = frozenset({"DR", "RR"})
-SAME = frozenset({"DD", "RR"})
-SPLIT = frozenset({"DR", "RD"})
+HOUSE_D = frozenset(s for s in STATES if s[0] == "D")
+HOUSE_R = frozenset(s for s in STATES if s[0] == "R")
+SENATE_D = frozenset(s for s in STATES if s[1] == "D")
+SENATE_R = frozenset(s for s in STATES if s[1] == "R")
+SAME = frozenset({"DD", "RR"})  # an independent leader is no party
 
 
 @dataclass(frozen=True)
 class Leg:
     ticker: str
     side: str  # "yes" or "no"
-    price: float  # dollars paid per contract
+    price: Decimal  # dollars paid per contract
     size: float  # contracts available at that price
     schedule: FeeSchedule
     pays: frozenset  # states in which this leg pays $1
+    event_ticker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,12 +83,26 @@ class Check:
     kind: str  # "sum", "marginal", "frechet", "seats"
     exact: bool  # True: settlement identity. False: near-identity with basis risk.
     legs: tuple[Leg, ...]
-    payout: int  # guaranteed payout per set, in the worst state
-    contracts: int = DEFAULT_CONTRACTS  # order size the fees assume, at most
+    states: tuple  # every settlement state of this basket's state space
+    normal_states: tuple  # the states the identity assumes (D/R leaders)
+    contracts: int = DEFAULT_CONTRACTS  # largest order the fees assume
+
+    def payout_in(self, state) -> int:
+        return sum(1 for leg in self.legs if state in leg.pays)
 
     @property
-    def cost(self) -> float:
-        return sum(leg.price for leg in self.legs)
+    def payout(self) -> int:
+        """Guaranteed payout per set over the normal (D/R) states."""
+        return min(self.payout_in(s) for s in self.normal_states)
+
+    @property
+    def worst_payout(self) -> int:
+        """Guaranteed payout per set over every settlement state."""
+        return min(self.payout_in(s) for s in self.states)
+
+    @property
+    def cost(self) -> Decimal:
+        return sum((leg.price for leg in self.legs), money.ZERO)
 
     @property
     def size(self) -> float:
@@ -82,31 +111,46 @@ class Check:
 
     @property
     def order(self) -> int:
-        """Sets the fee is charged on: the notional order, capped by size."""
-        return max(1, min(self.contracts, int(self.size)))
+        """Sets the fees are charged on: the notional order, capped by size."""
+        return max(1, min(self.contracts, math.floor(self.size)))
 
     @property
-    def fees(self) -> float:
-        """Taker fees per set for an order of ``order`` sets."""
-        return sum(leg.schedule.taker_per_contract(leg.price, self.order) for leg in self.legs)
+    def fees(self) -> Decimal:
+        """Fees per set for an order of ``order`` sets, each leg its own order."""
+        n = self.order
+        return sum((leg.schedule.fee(leg.price, n) for leg in self.legs), money.ZERO) / n
 
     @property
-    def raw_edge(self) -> float:
+    def raw_edge(self) -> Decimal:
         return self.payout - self.cost
 
     @property
-    def net_edge(self) -> float:
+    def net_edge(self) -> Decimal:
         return self.raw_edge - self.fees
 
     @property
+    def worst_net_edge(self) -> Decimal:
+        return self.worst_payout - self.cost - self.fees
+
+    @property
     def verdict(self) -> str:
-        if self.net_edge > 0:
-            if not self.exact:
-                return "basis"
-            return "ARB" if self.size >= 1 else "thin"
-        if self.raw_edge > 0:
-            return "fees"
-        return "ok"
+        if self.net_edge <= 0:
+            return "fees" if self.raw_edge > 0 else "ok"
+        if not self.exact:
+            return "basis"
+        if self.size < 1:
+            return "thin"
+        return "ARB" if self.worst_net_edge > 0 else "cond"
+
+    def payout_by_control_state(self) -> dict[str, int]:
+        """Payout per set in each of the nine leadership states.
+
+        A seat-bucket sum pays the same whatever the leadership, so it maps to
+        its constant payout.
+        """
+        if set(self.states) == set(STATES):
+            return {s: self.payout_in(s) for s in STATES}
+        return {s: self.worst_payout for s in STATES}
 
 
 @dataclass(frozen=True)
@@ -135,17 +179,30 @@ def run_checks(
         return fees.get(quote.series, FeeSchedule())
 
     def exposure(states: frozenset) -> Leg | None:
-        """Cheapest single contract paying $1 in exactly ``states``."""
+        """Cheapest single open contract paying $1 in at least ``states``.
+
+        A contract that also pays in other states is at least as good for a long
+        basket; the leg keeps its true payout set, so the enumeration credits
+        those extra payouts (e.g. Senate-R NO also pays if the leader is an
+        independent, which Senate-D YES does not).
+        """
         options = []
         for inst in instruments:
             q = inst.quote
-            if inst.yes_pays == states and q.ask is not None:
-                options.append(Leg(q.ticker, "yes", q.ask, q.ask_size, schedule(q), states))
-            if frozenset(STATES) - inst.yes_pays == states and q.bid is not None:
-                options.append(Leg(q.ticker, "no", 1.0 - q.bid, q.bid_size, schedule(q), states))
+            if not q.is_open:
+                continue
+            no_pays = frozenset(STATES) - inst.yes_pays
+            if states <= inst.yes_pays and q.ask is not None:
+                options.append(
+                    Leg(q.ticker, "yes", money.price(q.ask), q.ask_size, schedule(q), inst.yes_pays, q.event_ticker)
+                )
+            if states <= no_pays and q.bid is not None:
+                options.append(
+                    Leg(q.ticker, "no", 1 - money.price(q.bid), q.bid_size, schedule(q), no_pays, q.event_ticker)
+                )
         return min(
             options,
-            key=lambda leg: leg.price + leg.schedule.taker_per_contract(leg.price, contracts),
+            key=lambda leg: leg.price + leg.schedule.fee(leg.price, contracts) / contracts,
             default=None,
         )
 
@@ -153,21 +210,20 @@ def run_checks(
         legs = [exposure(s) for s in exposures]
         if any(leg is None for leg in legs):
             return None
-        payout = min(sum(1 for leg in legs if s in leg.pays) for s in STATES)
-        return Check(name, kind, True, tuple(legs), payout, contracts)
+        return Check(name, kind, True, tuple(legs), STATES, DR_STATES, contracts)
 
     one = lambda code: frozenset({code})  # noqa: E731
     not_ = lambda code: frozenset(STATES) - {code}  # noqa: E731
     specs = [
-        ("combo: buy all four legs", "sum", [one(c) for c in STATES]),
-        ("combo: sell all four legs", "sum", [not_(c) for c in STATES]),
+        ("combo: buy all four legs", "sum", [one(c) for c in DR_STATES]),
+        ("combo: sell all four legs", "sum", [not_(c) for c in DR_STATES]),
         ("House control: D + R", "sum", [HOUSE_D, HOUSE_R]),
         ("Senate control: D + R", "sum", [SENATE_D, SENATE_R]),
         ("DD + DR vs House-D (short)", "marginal", [one("DD"), one("DR"), HOUSE_R]),
         ("DD + DR vs House-D (long)", "marginal", [one("RD"), one("RR"), HOUSE_D]),
         ("DD + RD vs Senate-D (short)", "marginal", [one("DD"), one("RD"), SENATE_R]),
         ("DD + RD vs Senate-D (long)", "marginal", [one("DR"), one("RR"), SENATE_D]),
-        ("DD + RR vs same-party (short)", "marginal", [one("DD"), one("RR"), SPLIT]),
+        ("DD + RR vs same-party (short)", "marginal", [one("DD"), one("RR"), frozenset(STATES) - SAME]),
         ("DD + RR vs same-party (long)", "marginal", [one("DR"), one("RD"), SAME]),
         ("DD >= House-D + Senate-D - 1", "frechet", [one("DD"), HOUSE_R, SENATE_R]),
         ("RR >= House-R + Senate-R - 1", "frechet", [one("RR"), HOUSE_D, SENATE_D]),
@@ -194,25 +250,23 @@ def _seat_checks(label, market: SeatMarket, threshold, dem_leg, rep_leg, schedul
     yes_legs, no_legs = [], []
     for i, b in enumerate(market.buckets):
         q = b.quote
+        if not q.is_open:
+            continue
         if q.ask is not None:
-            yes_legs.append(Leg(q.ticker, "yes", q.ask, q.ask_size, schedule(q), frozenset({i})))
+            yes_legs.append(
+                Leg(q.ticker, "yes", money.price(q.ask), q.ask_size, schedule(q), frozenset({i}), q.event_ticker)
+            )
         if q.bid is not None:
             no_legs.append(
-                Leg(q.ticker, "no", 1.0 - q.bid, q.bid_size, schedule(q), frozenset(states) - {i})
+                Leg(q.ticker, "no", 1 - money.price(q.bid), q.bid_size, schedule(q),
+                    frozenset(states) - {i}, q.event_ticker)
             )
-
-    def payout(legs):
-        return min(sum(1 for leg in legs if s in leg.pays) for s in states)
 
     checks = []
     if len(yes_legs) == len(states):
-        checks.append(
-            Check(f"{label} seats: buy all buckets", "sum", True, tuple(yes_legs), payout(yes_legs), contracts)
-        )
+        checks.append(Check(f"{label} seats: buy all buckets", "sum", True, tuple(yes_legs), states, states, contracts))
     if len(no_legs) == len(states):
-        checks.append(
-            Check(f"{label} seats: sell all buckets", "sum", True, tuple(no_legs), payout(no_legs), contracts)
-        )
+        checks.append(Check(f"{label} seats: sell all buckets", "sum", True, tuple(no_legs), states, states, contracts))
 
     # Buckets at or above the majority line pay exactly when that party would
     # control -- assuming the seat count decides control on Feb 1.
@@ -228,7 +282,7 @@ def _seat_checks(label, market: SeatMarket, threshold, dem_leg, rep_leg, schedul
         legs = [by_bucket[i] for i in sorted(side_buckets)]
         legs.append(
             Leg(control_leg.ticker, control_leg.side, control_leg.price, control_leg.size,
-                control_leg.schedule, control_states)
+                control_leg.schedule, control_states, control_leg.event_ticker)
         )
-        checks.append(Check(name, "seats", False, tuple(legs), payout(legs), contracts))
+        checks.append(Check(name, "seats", False, tuple(legs), states, states, contracts))
     return checks

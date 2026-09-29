@@ -8,13 +8,17 @@ it. That keeps the rest of the strategy independent of Kalshi's wire format, and
 it is what makes a run replayable: ``snapshot.RecordingClient`` saves exactly
 these normalized payloads and ``snapshot.SnapshotClient`` serves them back.
 
-* ``fetch_event``  -> ``{"event_ticker", "title", "mutually_exclusive",
-  "markets": [{"ticker", "yes_sub_title", "strike_type", "floor_strike",
-  "cap_strike", "last_price", "volume"}]}``
+* ``fetch_event``  -> ``{"event_ticker", "series_ticker", "title",
+  "mutually_exclusive", "markets": [{"ticker", "yes_sub_title", "strike_type",
+  "floor_strike", "cap_strike", "last_price", "volume", "status", "result",
+  "latest_expiration_time", "rules_primary", "rules_secondary"}]}``. The rules
+  text is kept so a snapshot records the settlement terms its checks relied on,
+  and ``status`` / ``result`` let a later run settle a paper position.
 * ``fetch_orderbook`` -> ``{"yes": [[price, size], ...], "no": [...]}``, prices
   as 0-1 probabilities, ascending, best price last, at most ``BOOK_DEPTH``
   levels per side.
-* ``fetch_series`` -> ``{"fee_type", "fee_multiplier"}``
+* ``fetch_series`` -> ``{"fee_type", "fee_multiplier", "contract_terms_url",
+  "contract_url"}``
 
 Prices come from the order book. Kalshi's legacy integer-cent summary fields
 (``yes_bid``, ``yes_ask``, ``last_price``) are null on these markets; the book is
@@ -125,6 +129,7 @@ def normalize_event(payload: dict) -> dict:
     markets = payload.get("markets") or event.get("markets") or []
     return {
         "event_ticker": event.get("event_ticker"),
+        "series_ticker": event.get("series_ticker"),
         "title": event.get("title"),
         "mutually_exclusive": bool(event.get("mutually_exclusive")),
         "markets": [
@@ -136,6 +141,11 @@ def normalize_event(payload: dict) -> dict:
                 "cap_strike": m.get("cap_strike"),
                 "last_price": _to_float(m.get("last_price_dollars")),
                 "volume": _to_float(m.get("volume_fp")) or 0.0,
+                "status": m.get("status"),
+                "result": m.get("result") or None,
+                "latest_expiration_time": m.get("latest_expiration_time"),
+                "rules_primary": m.get("rules_primary"),
+                "rules_secondary": m.get("rules_secondary"),
             }
             for m in markets
         ],
@@ -164,6 +174,8 @@ def normalize_series(payload: dict) -> dict:
     return {
         "fee_type": series.get("fee_type") or "quadratic",
         "fee_multiplier": float(series.get("fee_multiplier") or 1.0),
+        "contract_terms_url": series.get("contract_terms_url"),
+        "contract_url": series.get("contract_url"),
     }
 
 

@@ -113,3 +113,25 @@ def test_unknown_model_rejected(truth):
     race_probs, markets, _ = truth
     with pytest.raises(ValueError, match="unknown"):
         calibrate(race_probs, markets, model="three-factor")
+
+
+def test_bernoulli_kl_is_finite_at_both_endpoints():
+    # 1.0 - 1e-300 == 1.0, so the old version divided by zero at p = 1.
+    from strategy.calibration import bernoulli_kl
+
+    for p in (0.0, 1.0):
+        value = bernoulli_kl(0.9, p)
+        assert value > 0 and value == value and value != float("inf")
+    assert bernoulli_kl(0.9, 1.0, 0.0) == bernoulli_kl(0.9, 1.0)
+    assert bernoulli_kl(0.9, 0.9) == 0.0
+    assert bernoulli_kl(1.0, 1.0) == 0.0 and bernoulli_kl(0.0, 0.0) == 0.0
+
+
+def test_control_loss_survives_a_distribution_all_on_one_side():
+    # A seat pmf with nothing below the majority line: P(control) is exactly 1.
+    import numpy as np
+
+    target = ChamberTarget(((0, 217), (218, 435)), (0.1, 0.9), 0.9)
+    pmf = np.zeros(436)
+    pmf[300] = 1.0
+    assert np.isfinite(chamber_loss(pmf, 218, target))

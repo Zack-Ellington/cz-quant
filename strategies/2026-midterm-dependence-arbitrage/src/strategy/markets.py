@@ -10,7 +10,9 @@ These are the markets the race-level model is tested against:
   distribution of seats and so reveal how much races move together.
 
 A ``Quote`` is the YES side of one binary market: best bid, best ask (one minus
-the best NO bid), the contracts resting at each, last trade, and traded volume. Seat buckets are parsed from
+the best NO bid), the contracts resting at each, last trade, traded volume, and
+the market's status and result. Bid and ask are snapped to Kalshi's four-decimal
+price grid, so ``1 - 0.34`` is ``0.66`` and not ``0.6599999999999999``. Seat buckets are parsed from
 their titles ("Below 210", "210-213", "51", "Above 52") and checked against the
 strike fields, then validated to tile the chamber with no gaps or overlaps.
 """
@@ -35,6 +37,18 @@ class Quote:
     volume: float = 0.0
     bid_size: float = 0.0  # contracts bid at ``bid``
     ask_size: float = 0.0  # contracts offered at ``ask`` (NO bids at 1 - ask)
+    status: str | None = None  # Kalshi market status, e.g. "active", "finalized"
+    result: str | None = None  # "yes" or "no" once the market has resolved
+    event_ticker: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        """Tradable: not closed, settled, or resolved."""
+        return self.result is None and self.status in (None, "active", "open", "initialized")
+
+    @property
+    def is_settled(self) -> bool:
+        return self.result in ("yes", "no")
 
     @property
     def series(self) -> str:
@@ -65,13 +79,20 @@ def quote_from_book(ticker: str, book: Book | None, summary: dict | None = None)
     last = summary.get("last_price")
     return Quote(
         ticker=ticker,
-        bid=best_yes,
-        ask=1.0 - best_no if best_no is not None else None,
+        bid=_snap(best_yes),
+        ask=_snap(1.0 - best_no) if best_no is not None else None,
         last=last if last else None,
         volume=float(summary.get("volume") or 0.0),
         bid_size=sum(s for p, s in yes if p == best_yes),
         ask_size=sum(s for p, s in no if p == best_no),
+        status=summary.get("status"),
+        result=summary.get("result") or None,
+        event_ticker=summary.get("event_ticker"),
     )
+
+
+def _snap(price: float | None) -> float | None:
+    return None if price is None else round(price, 4)
 
 
 def load_quote(client: Client, ticker: str, event: dict | None) -> Quote:
@@ -79,6 +100,8 @@ def load_quote(client: Client, ticker: str, event: dict | None) -> Quote:
     summary = None
     if event is not None:
         summary = next((m for m in event["markets"] if m["ticker"] == ticker), None)
+        if summary is not None:
+            summary = {**summary, "event_ticker": event.get("event_ticker")}
     return quote_from_book(ticker, client.fetch_orderbook(ticker), summary)
 
 
@@ -260,6 +283,11 @@ def _seats(client: Client, event_ticker: str, size: int) -> SeatMarket | None:
 
 def traded_series(markets: AggregateMarkets) -> set[str]:
     """Series tickers of every market the checks can trade."""
+    return {q.series for q in all_quotes(markets)}
+
+
+def all_quotes(markets: AggregateMarkets) -> list[Quote]:
+    """Every tradable quote among the aggregate markets."""
     quotes = list(markets.combo.values())
     quotes += [markets.house_control.dem, markets.house_control.rep]
     quotes += [markets.senate_control.dem, markets.senate_control.rep]
@@ -268,4 +296,4 @@ def traded_series(markets: AggregateMarkets) -> set[str]:
     for seats in (markets.house_seats, markets.senate_seats):
         if seats is not None:
             quotes += [b.quote for b in seats.buckets]
-    return {q.series for q in quotes}
+    return quotes

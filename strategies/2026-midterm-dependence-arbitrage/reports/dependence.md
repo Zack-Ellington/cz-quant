@@ -7,6 +7,11 @@ fetched over about 16 seconds). Every number below comes from replaying it:
 uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345
 ```
 
+Fees assume a non-direct (retail) Kalshi account: the quadratic trade fee rounded
+up to $0.000001, then the balance change floored to the cent
+(https://docs.kalshi.com/getting_started/fee_rounding), always at the quantity
+named.
+
 ## Summary
 
 - **Independence is wrong, and the markets say so directly.** The Democratic
@@ -31,10 +36,13 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345
 - **No model trade survives.** After the spread and taker fees, the model's only
   positive-expectation trade is selling RD for +0.2¢, and that is the one leg
   where one and two factors disagree in sign. It is not a robust edge.
-- **One small model-free arbitrage exists.** DR + RD + "same party" YES costs
-  93.7¢ and pays $1 in every outcome: +3.3¢ per set after fees, on 200 sets
-  ($6.58 total, 3.4% over the 131 days to settlement). It is limited entirely by
-  the same-party book, which has traded 190 contracts in its life.
+- **No guaranteed arbitrage; one conditional one.** DR + RD + "same party" YES
+  costs 93.7¢ and pays $1 whenever both chamber leaders are Democrats or
+  Republicans: $6.59 after fees on the 200 sets offered. But Kalshi's CONTROL
+  rules pay on the leader's party, and an independent Speaker or president pro
+  tempore (or a vacancy at expiration) makes all three legs lose. It is a bet
+  that both leaders are D or R, not an arbitrage, and the paper trader rejects
+  it.
 
 ## 1. Why the independent model fails
 
@@ -201,29 +209,37 @@ likely. Trading on it would have meant selling RR at 8.5¢ believing it was
 worth zero.
 
 After the spread and the taker fee, the one-factor model shows positive
-expected value only on RD (sell at 0.6¢ against a model 0.4%: +0.2¢). That is
-the leg where the factor assumption matters most. Two factors put RD at 2.2%,
-the opposite side of the market. There is no model trade here that survives
-the model's own uncertainty.
+expected value only on RD (sell at 0.6¢ against a model 0.4%: +0.2¢ at the 100
+contracts the book offers, fees at that quantity). That is the leg where the
+factor assumption matters most. Two factors put RD at 2.2%, the opposite side of
+the market. There is no model trade here that survives the model's own
+uncertainty: the paper trader requires the edge to beat 1¢ plus the gap between
+the one- and two-factor prices, 2.81¢ for RD.
 
 ## 6. Model-free checks
 
-These need no model. Each is a basket of contracts guaranteed to pay at least
-$1 (or $n) in every outcome; the payout is computed by enumerating the
-settlement states. The combo, the control markets, and the same-party market
-settle on the same CONTROL rules, so their identities are exact. Legs are bought
-as a taker. Fees are charged on the executable order size, up to 100 sets.
+These need no model. Each is a basket of contracts whose payout is computed by
+enumerating the settlement states. The combo, the control markets, and the
+same-party market settle on the same CONTROL rules, whose payout criterion is
+the party of the chamber's leader: the Speaker and the president pro tempore
+(https://assets.kalshi.com/contract_terms/CONTROL.pdf). A leader can be a
+Democrat, a Republican, or neither (an independent, or an office still vacant at
+expiration), so each check is enumerated over nine states. "Raw" and "After
+fees" assume both leaders are D or R; "Worst" is the after-fee edge in the worst
+of all nine. A check is an arbitrage only if Worst is positive; if only the D/R
+edge is, it is *conditional*. Legs are bought as a taker; fees are charged at
+the executable order size, up to 100 sets.
 
-| Check | Kind | Cost | Raw edge | After fees | Sets available | Verdict |
-| --- | --- | ---: | ---: | ---: | ---: | --- |
-| combo: buy all four legs | sum | 1.004 | -0.4¢ | -4.0¢ | 10,464 | ok |
-| combo: sell all four legs | sum | 3.019 | -1.9¢ | -5.5¢ | 37 | ok |
-| DD + DR vs House-D (short) | marginal | 0.997 | +0.3¢ | -3.3¢ | 5,779 | fees |
-| DD + RD vs Senate-D (long) | marginal | 0.997 | +0.3¢ | -3.3¢ | 478 | fees |
-| **DD + RR vs same-party (long)** | **marginal** | **0.937** | **+6.3¢** | **+3.3¢** | **200** | **ARB** |
-| DD ≥ House-D + Senate-D − 1 | Fréchet | 1.087 | -8.7¢ | -12.5¢ | 315 | ok |
-| DR ≥ House-D − Senate-D | Fréchet | 0.997 | +0.3¢ | -3.3¢ | 478 | fees |
-| Senate seats ≥ 51 vs Senate-D (long) | seats* | 0.984 | +1.6¢ | -7.4¢ | 0.15 | fees |
+| Check | Kind | Cost | Raw edge | After fees | Worst | Sets available | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| combo: buy all four legs | sum | 1.004 | -0.4¢ | -4.0¢ | -104.0¢ | 10,464 | ok |
+| combo: sell all four legs | sum | 3.019 | -1.9¢ | -5.5¢ | -5.5¢ | 37 | ok |
+| DD + DR vs House-D (short) | marginal | 0.997 | +0.3¢ | -3.3¢ | -103.3¢ | 5,779 | fees |
+| DD + RD vs Senate-D (long) | marginal | 0.997 | +0.3¢ | -3.3¢ | -103.3¢ | 478 | fees |
+| **DD + RR vs same-party (long)** | **marginal** | **0.937** | **+6.3¢** | **+3.3¢** | **-96.7¢** | **200** | **cond** |
+| DD ≥ House-D + Senate-D − 1 | Fréchet | 1.087 | -8.7¢ | -12.5¢ | -112.5¢ | 315 | ok |
+| DR ≥ House-D − Senate-D | Fréchet | 0.997 | +0.3¢ | -3.3¢ | -103.3¢ | 478 | fees |
+| Senate seats ≥ 51 vs Senate-D (long) | seats* | 0.984 | +1.6¢ | -6.0¢ | -6.0¢ | 0.15 | fees |
 
 (22 checks run; the full list prints with every run. \*Seat-count vs control
 checks are near-identities: a vacancy on Feb 1 or a failed leadership vote could
@@ -233,19 +249,46 @@ separate them, so they are never labeled arbitrage.)
   positive by 0.3¢ before fees, and roughly 3.6¢ of fees turns each negative.
   The combo, House control, and Senate control are priced consistently with one
   another.
-- **The same-party market is the outlier.** It bids 59¢ and offers 66¢ for
-  "same party controls both chambers", while the combo prices DD + RR at 72.1%.
-  Buying DR at 27¢, RD at 0.7¢ and same-party YES at 66¢ costs 93.7¢ and pays $1
-  in all four outcomes. After 3.0¢ of fees that is +3.3¢ per set on the 200 sets
-  offered: $6.58, or 3.4% on the capital (9.5% annualized, simple) locked until
-  settlement on Feb 1, 2027. The quotes were read about 16 seconds apart, so the
-  prices should be re-checked before trading.
+- **The same-party market is the outlier, and the gap is conditional.** It bids
+  59¢ and offers 66¢ for "same party controls both chambers", while the combo
+  prices DD + RR at 72.1%. Buying DR at 27¢, RD at 0.7¢ and same-party YES at 66¢
+  costs 93.7¢ and pays $1 whenever both leaders are Democrats or Republicans. For
+  the 200 sets offered, fees computed at 200 are $6.01, the outlay $193.41, and
+  the profit $6.59 (3.4% of the outlay) -- *if* both leaders are D or R. If the
+  Speaker or the president pro tempore is an independent, or the office is
+  vacant at expiration, all three legs lose and the basket returns nothing. The
+  quotes were also read about 16 seconds apart. This is not an arbitrage.
+- **Settlement timing is an assumption.** The combo's expected expiration is
+  Feb 1, 2027 at 15:00 UTC, but its metadata allows expiration through Feb 8,
+  the terms allow earlier determination on media calls, and settlement can be
+  delayed while an outcome is under review
+  (https://assets.kalshi.com/contract_terms/POLITICALECONOMICEVENTS.pdf). A
+  holding period of 131 days (to Feb 1) gives 9.5% simple annualized on the
+  conditional profit above; 138 days (to Feb 8) gives 9.0%. Both are
+  assumptions, not contract terms.
 - **The Senate seat buckets are more Democratic than the control market.** They
   imply 67.6% for 51 or more, against 63.9%. But their midpoints sum to only
   96.9%, and the tail buckets have a fraction of a contract behind them. Not
   tradable.
 
-## 7. Robustness
+## 7. Paper trading on this snapshot
+
+The paper trader (issue #7) ran on this snapshot with the integration test's
+fixed clock, which writes its ledger to
+`runs/2026-midterm-dependence-arbitrage/20260923T170000Z` (run directories are
+not committed; the test reproduces this one). It accepted nothing and recorded
+two rejected signals:
+
+- `model:sell RD`: edge +0.20¢ per set at 100 sets does not exceed the 2.81¢
+  threshold (1¢ plus the one- vs two-factor disagreement on RD);
+- `arbitrage:DD + RR vs same-party (long)`: conditional, pays nothing if a
+  chamber leader is an independent or the office is vacant.
+
+Paper performance -- volume, committed capital, settled P&L, return on
+committed capital, and the simulated P&L of open positions under the model --
+comes only from ledgers: `uv run strategy ledger`.
+
+## 8. Robustness
 
 **Estimators.** How the race books become probabilities (see
 `src/strategy/estimators.py`):
@@ -268,7 +311,7 @@ normalization, pulls the Senate mean down: one factor then misses Senate control
 by 0.030 (60.9% vs 63.9%), neither model meets the criterion, and DD falls to
 60.6%. Counting them with a fitted caucus share closes that gap.
 
-## 8. Limitations
+## 9. Limitations
 
 - **Gaussian swing.** One normal factor fits the House well but not the Senate's
   shape: the market is more concentrated on 51-52 seats. A fatter-tailed or
@@ -281,14 +324,16 @@ by 0.030 (60.9% vs 63.9%), neither model meets the criterion, and DD falls to
   average, not a statement about any candidate.
 - **Quotes are not simultaneous.** A snapshot is read over about 16 seconds.
   Cross-market checks can show edges that were never available at one instant.
-- **Carry and execution.** Everything settles Feb 1, 2027. A few cents of edge
-  on capital locked for four months has to beat the cost of that capital, and
-  taker fills on thin books will move prices.
+- **Carry and execution.** Capital is locked until the markets resolve: at the
+  media calls after Nov 3, 2026 at the earliest, Feb 1-8, 2027 by the listed
+  expiration, later if an outcome is under review. Any holding period in this
+  report is an assumption. A few cents of edge has to beat the cost of that
+  capital, and taker fills on thin books will move prices.
 
 ## Reproduce
 
 ```bash
-cd strategies/2026-midterm-prediction-arbitrage
+cd strategies/2026-midterm-dependence-arbitrage
 uv sync
 uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345
 uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345 --model two-factor
@@ -297,4 +342,5 @@ uv run --group dev pytest
 ```
 
 A fresh live run with `--snapshot-out snapshots/<date>.json` records a new
-snapshot; replaying it gives the same report every time.
+snapshot, saved before calibration so even a failed run can be replayed; with a
+fixed clock, replaying it gives the same report every time.

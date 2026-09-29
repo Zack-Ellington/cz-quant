@@ -119,17 +119,29 @@ def chamber_loss(pmf: np.ndarray, threshold: int, target: ChamberTarget) -> floa
     mask = q > 0
     loss = float(np.sum(q[mask] * np.log(q[mask] / p[mask])))
     if target.control is not None:
-        loss += _bernoulli_kl(target.control, float(pmf[threshold:].sum()))
+        loss += bernoulli_kl(target.control, float(pmf[threshold:].sum()), float(pmf[:threshold].sum()))
     return loss
 
 
-def _bernoulli_kl(q: float, p: float) -> float:
-    p = min(max(p, _FLOOR), 1.0 - _FLOOR)
+def bernoulli_kl(q: float, p: float, p_not: float | None = None) -> float:
+    """KL(Bernoulli(q) || Bernoulli(p)), finite at p = 0 and p = 1.
+
+    ``p_not`` is P(not event). Pass it when it is known separately -- the
+    calibration sums it from the lower tail of the seat distribution -- because
+    ``1 - p`` loses it entirely once p is within 1e-16 of 1 (``1.0 - 1e-300`` is
+    ``1.0``, which made the old version divide by zero). Both probabilities are
+    floored at a tiny positive number, never computed by subtraction, so a model
+    that puts everything on one side gets a large finite loss and the optimizer
+    can still move away from it.
+    """
+    if p_not is None:
+        p_not = 1.0 - p
+    p, p_not = max(p, _FLOOR), max(p_not, _FLOOR)
     total = 0.0
     if q > 0:
         total += q * math.log(q / p)
     if q < 1:
-        total += (1.0 - q) * math.log((1.0 - q) / (1.0 - p))
+        total += (1.0 - q) * math.log((1.0 - q) / p_not)
     return total
 
 
