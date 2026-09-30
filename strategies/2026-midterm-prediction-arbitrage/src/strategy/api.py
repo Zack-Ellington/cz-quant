@@ -23,6 +23,11 @@ these normalized payloads and ``snapshot.SnapshotClient`` serves them back.
 Prices come from the order book. Kalshi's legacy integer-cent summary fields
 (``yes_bid``, ``yes_ask``, ``last_price``) are null on these markets; the book is
 the authoritative source for the best bid and ask and also carries depth.
+
+Transport errors and 5xx responses are retried with exponential backoff. A 429
+(rate limited) is waited out -- ``Retry-After`` if Kalshi sends it -- up to
+``RATE_LIMIT_WAITS`` times without using up a retry, since back-to-back runs
+(``--duration``) read the API as fast as it allows.
 """
 
 from __future__ import annotations
@@ -41,6 +46,9 @@ Book = dict[str, list[list[float]]]
 # Levels kept per side. Every estimator reads the top of book; the extra levels
 # are kept for inspection and make a saved snapshot self-describing.
 BOOK_DEPTH = 5
+
+RATE_LIMIT_WAITS = 10  # 429s waited out per request before giving up
+MAX_RATE_LIMIT_WAIT = 60.0  # seconds, the longest single wait on a 429
 
 
 class Client(Protocol):
@@ -69,9 +77,10 @@ class KalshiClient:
         retries: int = 3,
         backoff: float = 0.5,
         timeout: float = 20.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._client = httpx.Client(
-            base_url=base_url, timeout=timeout, follow_redirects=True
+            base_url=base_url, timeout=timeout, follow_redirects=True, transport=transport
         )
         self._retries = retries
         self._backoff = backoff
@@ -100,7 +109,8 @@ class KalshiClient:
     def _get(self, path: str, params: dict | None) -> dict | None:
         """GET with retries. Returns parsed JSON, or ``None`` on a 404."""
         last_exc: Exception | None = None
-        for attempt in range(self._retries):
+        attempt = waits = 0
+        while attempt < self._retries:
             try:
                 resp = self._client.get(path, params=params)
             except httpx.HTTPError as exc:  # transport-level failure
@@ -108,6 +118,10 @@ class KalshiClient:
             else:
                 if resp.status_code == 404:
                     return None
+                if resp.status_code == 429 and waits < RATE_LIMIT_WAITS:
+                    waits += 1
+                    time.sleep(_retry_after(resp) or min(self._backoff * 2**waits, MAX_RATE_LIMIT_WAIT))
+                    continue
                 if resp.status_code < 500:
                     resp.raise_for_status()
                     return resp.json()
@@ -117,8 +131,18 @@ class KalshiClient:
                     response=resp,
                 )
             time.sleep(self._backoff * (2**attempt))
+            attempt += 1
         assert last_exc is not None
         raise last_exc
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Seconds from a ``Retry-After`` header, capped; None if absent or a date."""
+    try:
+        seconds = float(resp.headers.get("Retry-After", ""))
+    except ValueError:
+        return None
+    return min(max(seconds, 0.0), MAX_RATE_LIMIT_WAIT)
 
 
 def normalize_event(payload: dict) -> dict:

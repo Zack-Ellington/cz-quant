@@ -72,6 +72,7 @@ class Position:
     received_at: str | None = None
     settled_run: str | None = None
     later_costs: Decimal = ZERO
+    session: str | None = None  # the --duration session of the entry run, if any
 
     @property
     def is_open(self) -> bool:
@@ -111,6 +112,7 @@ def positions_from_events(events: list[dict]) -> dict[str, Position]:
                 kind=e["kind"],
                 quantity=int(e["quantity"]),
                 payout_by_state={s: int(v) for s, v in e["payout_by_state"].items()},
+                session=e.get("session"),
             )
         elif e["type"] == "fill" and pid in positions:
             p = positions[pid]
@@ -281,15 +283,20 @@ def _probs(raw: dict) -> dict[str, float]:
 
 
 def select_positions(
-    positions: dict[str, Position], since: date | None, until: date | None
+    positions: dict[str, Position],
+    since: date | None,
+    until: date | None,
+    session: str | None = None,
 ) -> list[Position]:
-    """Positions whose entry date is within [since, until], by entry time."""
+    """Positions entered within [since, until] (and in ``session``), by entry time."""
     chosen = []
     for p in positions.values():
         entered = date.fromisoformat(p.entry_time[:10])
         if since is not None and entered < since:
             continue
         if until is not None and entered > until:
+            continue
+        if session is not None and p.session != session:
             continue
         chosen.append(p)
     return sorted(chosen, key=lambda p: (p.entry_time, p.position_id))

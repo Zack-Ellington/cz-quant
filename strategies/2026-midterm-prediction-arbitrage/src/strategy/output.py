@@ -226,6 +226,7 @@ def ledger_report(
     n: int = SIMULATIONS,
     seed: int = 0,
     siblings: Sequence[str] = (),
+    session: str | None = None,
 ) -> str:
     """Per-run and total aggregates for ``strategy``, joined across runs.
 
@@ -234,8 +235,12 @@ def ledger_report(
     """
     events = read_events(runs_dir, strategy)
     runs = {m["run_id"]: m for m in read_runs(runs_dir, strategy)}
-    chosen = select_positions(positions_from_events(events), since, until)
+    if session is not None:
+        runs = {k: m for k, m in runs.items() if (m.get("session") or {}).get("id") == session}
+    chosen = select_positions(positions_from_events(events), since, until, session)
     window = f"{since or 'start'} to {until or 'now'}"
+    if session is not None:
+        window += f", session {session}"
     lines = [
         f"Paper ledger - {strategy} - {Path(runs_dir).name}/{strategy} - positions entered {window}",
         f"{len(runs)} run(s) on disk; {len(chosen)} position(s) selected",
