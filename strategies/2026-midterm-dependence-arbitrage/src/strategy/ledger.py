@@ -16,7 +16,11 @@ Types: ``scan`` (model and market prices), ``signal`` (a basket or trade the
 strategy wants, accepted or rejected with a reason), ``fill`` (one leg: ticker,
 side, price, quantity, fee, cash delta; ``simulated`` in paper mode),
 ``settlement`` (position, receipt, date of cash receipt), ``valuation`` (the
-simulated P&L of the open book under the strategy's model), and ``note``.
+simulated P&L of the open book under one view), and ``note``.
+
+A run can carry tags that are written into every one of its events: a run that
+is one pass of a ``--duration`` session has ``session`` (the session id), and
+its ``run.json`` records the session, the pass number, and the deadline.
 
 Money is written as decimal strings and read back as ``Decimal``, so the ledger
 never rounds. ``runs/`` is gitignored. The directory is found by walking up
@@ -98,6 +102,7 @@ class Run:
     directory: Path
     clock: Callable[[], datetime] = utc_now
     meta: dict = field(default_factory=dict)
+    tags: dict = field(default_factory=dict)  # written into every event, e.g. {"session": id}
 
     @property
     def ledger_path(self) -> Path:
@@ -119,6 +124,7 @@ class Run:
         strategy: str,
         meta: dict,
         clock: Callable[[], datetime] = utc_now,
+        tags: dict | None = None,
     ) -> "Run":
         started = clock()
         base = started.strftime("%Y%m%dT%H%M%SZ")
@@ -132,7 +138,7 @@ class Run:
             except FileExistsError:
                 n += 1
                 run_id = f"{base}-{n}"
-        run = cls(strategy, run_id, parent / run_id, clock)
+        run = cls(strategy, run_id, parent / run_id, clock, tags=dict(tags or {}))
         run.meta = {
             "strategy": strategy,
             "run_id": run_id,
@@ -157,6 +163,7 @@ class Run:
             "strategy": self.strategy,
             "type": type,
             "position_id": position_id,
+            **self.tags,
             **fields,
         }
         line = json.dumps(record, default=_encode, sort_keys=True)
@@ -176,7 +183,7 @@ class Run:
 
 
 class Tee:
-    """Write to a stream and to ``run.log`` at once."""
+    """Write to a stream and to ``run.log`` at once; to ``run.log`` only if the stream is None."""
 
     def __init__(self, stream, path: Path) -> None:
         self._stream = stream
@@ -185,11 +192,12 @@ class Tee:
     def write(self, text: str) -> int:
         self._file.write(text)
         self._file.flush()
-        return self._stream.write(text)
+        return len(text) if self._stream is None else self._stream.write(text)
 
     def flush(self) -> None:
         self._file.flush()
-        self._stream.flush()
+        if self._stream is not None:
+            self._stream.flush()
 
     def close(self) -> None:
         self._file.close()

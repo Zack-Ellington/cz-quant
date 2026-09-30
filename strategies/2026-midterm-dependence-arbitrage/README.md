@@ -135,6 +135,34 @@ positions, settled net P&L, return on committed capital, each position's status,
 and the simulated P&L of the open positions under the model, the market, and
 the sibling strategy's model.
 
+### Paper sessions (`--duration`)
+
+`uv run strategy --duration H:MM` runs the whole pipeline back to back, as
+often as it can, until the time is up: `--duration 24:00` for a day,
+`--duration 1:30` for an hour and a half. Each pass is an ordinary run with its
+own run directory, so positions opened in one pass are settled or held by the
+next, and cash carries over. Every event a pass writes is marked with the
+session id (the session's start time, e.g. `20260930T020000Z`), and each
+`run.json` records the session, the pass number, and the deadline.
+
+- Each pass prints one line (opened, settled, rejected, open positions, free
+  cash, time left); its full report goes to its `run.log`. At the end the
+  session's ledger report is printed.
+- The only waits are the confirmation scan's delay (5 s) and Kalshi's rate
+  limit: a 429 is waited out, `Retry-After` when sent. A pass that starts before
+  the deadline finishes, so the last one can end slightly after it.
+- A failed pass is recorded as a failed run and retried after 15 s, doubling
+  to 5 min; ten failures in a row stop the session (exit status 1). Ctrl-C
+  stops it cleanly and still prints the summary.
+- Sessions read live quotes; `--snapshot-in` is refused (every pass would read
+  the same quotes). `--snapshot-out FILE` saves one snapshot per pass,
+  `FILE-<session>-<pass>`.
+
+```bash
+uv run strategy --duration 24:00
+uv run strategy ledger --session 20260930T020000Z
+```
+
 ## Install
 
 ```bash
@@ -162,6 +190,7 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 | `--snapshot-out FILE` | none | save every quote read (before fitting, and again at the end) |
 | `--mode` | `paper` | `live` is refused (issue #5) |
 | `--no-trade` | off | scan and report only |
+| `--duration H:MM` | one run | run back to back until the time is up, e.g. `24:00`, `1:30` (live quotes only) |
 | `--bankroll` | 1000 | paper bankroll, dollars |
 | `--max-position` | 100 | entry capital cap per position, dollars |
 | `--min-edge` | 0.01 | edge per set after fees, dollars |
@@ -240,12 +269,13 @@ one run and settled in the next (issue #7's acceptance test).
 | `markets.py`, `estimators.py`, `probabilities.py` | aggregate markets; race books to probabilities |
 | `money.py`, `fees.py`, `checks.py` | exact money; Kalshi fees; nine-state checks |
 | `ledger.py`, `trading.py`, `pnl.py` | run directories; paper trading; aggregates and simulated P&L |
+| `session.py` | `--duration`: back-to-back passes until a deadline |
 | `output.py` | shared rendering: checks, EV, paper section, ledger report |
 | `simulation.py`, `factor.py`, `calibration.py` | independent model; latent swing; fit |
 | `report.py`, `runner.py`, `cli.py` | this strategy's report, pipeline, command line |
 
 `api.py`, `snapshot.py`, `money.py`, `fees.py`, `markets.py`, `checks.py`,
-`ledger.py`, `trading.py`, `pnl.py`, `output.py` and the race modules are shared
+`ledger.py`, `trading.py`, `pnl.py`, `session.py`, `output.py`, `cli.py` and the race modules are shared
 with `2026-midterm-prediction-arbitrage` and kept identical (the repository
 copies code between strategies instead of sharing a library).
 

@@ -137,8 +137,15 @@ def run(
     runs_dir: str | Path | None = None,
     confirm_delay: float | None = None,
     clock=utc_now,
+    session: dict | None = None,
+    quiet: bool = False,
 ) -> Path:
-    """Run the pipeline, print the report and paper section; return the run dir."""
+    """Run the pipeline, print the report and paper section; return the run dir.
+
+    ``session`` marks the run as one pass of a ``--duration`` session (see
+    ``session.py``): it goes into ``run.json`` and its id into every event.
+    ``quiet`` sends the report to ``run.log`` only.
+    """
     if model not in MODELS:
         raise ValueError(f"model must be one of {MODELS}, got {model!r}")
     if mode != "paper":
@@ -179,10 +186,12 @@ def run(
             "policy": {"bankroll": policy.bankroll, "max_position": policy.max_position,
                        "min_edge": policy.min_edge, "kelly_fraction": policy.kelly_fraction,
                        "trading": trading},
+            **({"session": session} if session is not None else {}),
         },
         clock,
+        tags={"session": session["id"]} if session is not None else None,
     )
-    stdout, tee = sys.stdout, Tee(sys.stdout, run_.log_path)
+    stdout, tee = sys.stdout, Tee(None if quiet else sys.stdout, run_.log_path)
     sys.stdout = tee
     try:
         acquired = acquire(client, estimator)
