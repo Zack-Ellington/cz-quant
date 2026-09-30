@@ -12,8 +12,10 @@ paper trade -> paper section.
    own from its market probability, independent candidates counted as
    non-Democratic.
 4. Print the report, then trade on paper: settle positions whose markets have
-   resolved, confirm candidates on a second scan, fill, and value the open book
-   under the model. The paper section is read back from the ledger.
+   resolved, confirm candidates on a second scan, size them by fractional Kelly
+   within the caps, fill, and value the open book under the model, the market,
+   and the sibling strategy's model. The paper section is read back from the
+   ledger.
 
 Every run writes ``runs/<strategy-id>/<UTC timestamp>/`` (see ``ledger.py``).
 Paper mode is the only mode; nothing can send an order (issue #5).
@@ -48,6 +50,8 @@ from strategy.trading import ModelView, Policy, record_scan, trade
 STRATEGY_ID = "2026-midterm-prediction-arbitrage"
 MODELS = ("independent",)
 DEFAULT_MODEL = "independent"
+# Strategies whose models also value this one's open book, read from their ledgers.
+SIBLINGS = ("2026-midterm-dependence-arbitrage",)
 LIVE_CONFIRM_DELAY = 5.0  # seconds between the scan and its confirmation, live
 
 
@@ -113,6 +117,7 @@ def run(
     bankroll: Decimal = Policy.bankroll,
     max_position: Decimal = Policy.max_position,
     min_edge: Decimal = Policy.min_edge,
+    kelly_fraction: Decimal = Policy.kelly_fraction,
     runs_dir: str | Path | None = None,
     confirm_delay: float | None = None,
     clock=utc_now,
@@ -122,7 +127,7 @@ def run(
         raise ValueError(f"model must be one of {MODELS}, got {model!r}")
     if mode != "paper":
         raise SystemExit("Only paper mode exists; live orders are issue #5. Nothing was sent.")
-    policy = Policy(Decimal(bankroll), Decimal(max_position), Decimal(min_edge))
+    policy = Policy(Decimal(bankroll), Decimal(max_position), Decimal(min_edge), Decimal(kelly_fraction))
 
     live: KalshiClient | None = None
     if snapshot_in is not None:
@@ -156,7 +161,8 @@ def run(
             "contracts": contracts,
             "account": DEFAULT_ACCOUNT,
             "policy": {"bankroll": policy.bankroll, "max_position": policy.max_position,
-                       "min_edge": policy.min_edge, "trading": trading},
+                       "min_edge": policy.min_edge, "kelly_fraction": policy.kelly_fraction,
+                       "trading": trading},
         },
         clock,
     )
@@ -173,7 +179,7 @@ def run(
         print()
         if trading:
             trade(run_, client, acquired.markets, report.checks, view, acquired.fees, policy,
-                  contracts, confirm_delay, seed or 0)
+                  contracts, confirm_delay, seed or 0, SIBLINGS)
         events = read_events(runs_dir, STRATEGY_ID)
         print("\n".join(paper_section(run_.label, run_.run_id, events, policy.bankroll)))
         if recorder is not None:

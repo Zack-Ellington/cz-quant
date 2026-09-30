@@ -28,6 +28,13 @@ the model's probability of each leadership state (recorded in the ``scan``
 event), and each draw's P&L is the book's payout in that state minus its entry
 capital. The draws give the expected P&L, its spread, and the probability of a
 loss. It is a model valuation, labeled as such, and never mixed into earned P&L.
+
+A model valuing the trades it chose itself always finds them worth taking, so
+the book is valued under three views (``View``): the strategy's model, the
+market (the combo's midpoints, normalized), and each sibling strategy's model,
+read from the latest scan in that strategy's own ledger -- data, not code, so
+strategies still share nothing but files on disk. A trade that is only good
+under its own model shows up as a gap between the rows.
 """
 
 from __future__ import annotations
@@ -35,10 +42,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
 from strategy.checks import STATES
+from strategy.ledger import read_events
 from strategy.money import ZERO
 
 SIMULATIONS = 100_000
@@ -213,12 +223,61 @@ def simulate_pnl(
     )
 
 
+def latest_scan(events: list[dict], source: str | None = None) -> dict | None:
+    """The most recent scan with model probabilities, preferring one of ``source``."""
+    scans = [e for e in events if e["type"] == "scan" and e.get("state_probs")]
+    same = [e for e in scans if source is not None and e.get("source") == source]
+    pool = same or scans
+    return max(pool, key=lambda e: e["ts"]) if pool else None
+
+
 def latest_model(events: list[dict]) -> tuple[str, dict[str, float], str] | None:
     """(model name, state probabilities, run id) of the most recent scan."""
-    for e in reversed(events):
-        if e["type"] == "scan" and e.get("state_probs"):
-            return e["model"], {s: float(v) for s, v in e["state_probs"].items()}, e["run_id"]
-    return None
+    scan = latest_scan(events)
+    if scan is None:
+        return None
+    return scan["model"], _probs(scan["state_probs"]), scan["run_id"]
+
+
+@dataclass(frozen=True)
+class View:
+    """Probabilities of the nine settlement states to value the open book under."""
+
+    kind: str  # "model", "market", or "sibling"
+    name: str
+    state_probs: dict[str, float] | None  # None when not available; ``note`` says why
+    note: str = ""
+
+
+def scan_views(scan: dict) -> list[View]:
+    """The model and market views recorded in one of a strategy's scans."""
+    run_id = scan["run_id"]
+    market = scan.get("market_state_probs")
+    return [
+        View("model", scan["model"], _probs(scan["state_probs"]), f"scan of run {run_id}"),
+        View("market", "the market", None if market is None else _probs(market),
+             f"combo midpoints of run {run_id}, normalized" if market is not None
+             else f"no market probabilities in the scan of run {run_id}"),
+    ]
+
+
+def sibling_views(runs_dir: Path, siblings: Sequence[str], source: str | None = None) -> list[View]:
+    """Each sibling's model, from its latest scan (preferring one of ``source``)."""
+    views = []
+    for sibling in siblings:
+        scan = latest_scan(read_events(runs_dir, sibling), source)
+        if scan is None:
+            views.append(View("sibling", sibling, None, f"no scan in {Path(runs_dir).name}/{sibling}"))
+            continue
+        note = f"run {scan['run_id']}"
+        if source is not None and scan.get("source") != source:
+            note += f", {scan.get('source')}: not the same quotes"
+        views.append(View("sibling", f"{scan['model']} of {sibling}", _probs(scan["state_probs"]), note))
+    return views
+
+
+def _probs(raw: dict) -> dict[str, float]:
+    return {s: float(v) for s, v in raw.items()}
 
 
 def select_positions(

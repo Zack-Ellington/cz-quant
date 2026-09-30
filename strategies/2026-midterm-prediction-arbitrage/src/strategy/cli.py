@@ -14,7 +14,7 @@ from strategy.fees import DEFAULT_CONTRACTS
 from strategy.ledger import default_runs_dir
 from strategy.output import ledger_report
 from strategy.pnl import SIMULATIONS
-from strategy.runner import DEFAULT_MODEL, MODELS, STRATEGY_ID, run
+from strategy.runner import DEFAULT_MODEL, MODELS, SIBLINGS, STRATEGY_ID, run
 from strategy.trading import Policy
 
 
@@ -57,6 +57,9 @@ def run_main(argv: list[str]) -> None:
                         help=f"entry capital cap per position (default: {Policy.max_position})")
     parser.add_argument("--min-edge", type=Decimal, default=Policy.min_edge,
                         help=f"minimum edge per set after fees, in dollars (default: {Policy.min_edge})")
+    parser.add_argument("--kelly-fraction", type=Decimal, default=Policy.kelly_fraction,
+                        help="fraction of the Kelly stake, on the model's edge after its uncertainty; "
+                        f"1 is full Kelly (default: {Policy.kelly_fraction})")
     parser.add_argument("--runs-dir", default=None,
                         help=f"where run directories go (default: {default_runs_dir()})")
     parser.add_argument("--confirm-delay", type=float, default=None,
@@ -76,6 +79,7 @@ def run_main(argv: list[str]) -> None:
         bankroll=args.bankroll,
         max_position=args.max_position,
         min_edge=args.min_edge,
+        kelly_fraction=args.kelly_fraction,
         runs_dir=args.runs_dir,
         confirm_delay=args.confirm_delay,
     )
@@ -85,7 +89,8 @@ def ledger_main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(
         prog="strategy ledger",
         description="Volume, capital, P&L, and return on committed capital, joined "
-        "across runs by position id, plus the simulated P&L of open positions.",
+        "across runs by position id, plus the simulated P&L of open positions under "
+        "the model, the market, and the sibling strategy's model.",
     )
     parser.add_argument("--strategy", default=STRATEGY_ID,
                         help=f"strategy id (default: {STRATEGY_ID})")
@@ -100,4 +105,6 @@ def ledger_main(argv: list[str]) -> None:
     parser.add_argument("--seed", type=int, default=0, help="seed for the simulated P&L (default: 0)")
     args = parser.parse_args(argv)
     runs_dir = args.runs_dir if args.runs_dir is not None else default_runs_dir()
-    print(ledger_report(runs_dir, args.strategy, args.since, args.until, args.simulations, args.seed))
+    siblings = [s for s in (STRATEGY_ID, *SIBLINGS) if s != args.strategy]
+    print(ledger_report(runs_dir, args.strategy, args.since, args.until, args.simulations, args.seed,
+                        siblings))

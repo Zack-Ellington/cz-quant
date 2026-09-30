@@ -22,7 +22,9 @@ market: 91.3%) and a Republican sweep 0% (market: 8.6%). It therefore wants to
 sell RR and buy DR, trades the dependence model rejects. See
 `2026-midterm-dependence-arbitrage/reports/dependence.md` for why the market's
 seat-count prices contradict independence. The paper ledger is how this
-strategy's bets get scored.
+strategy's bets get scored. On that snapshot the book it opens is worth +$5.23
+under its own model but -$1.21 under the market's prices and -$0.98 under the
+dependence model: the edge exists only if independence is right.
 
 ## Pipeline
 
@@ -40,7 +42,8 @@ strategy's bets get scored.
 4. **Report** the model against the market, with the EV after fees at the
    quantity the book offers.
 5. **Paper trade** (issue #7): settle resolved positions, confirm candidates on
-   a second scan, fill on paper, value the open book under the model.
+   a second scan, size by fractional Kelly within the caps, fill on paper,
+   value the open book under the model, the market, and the sibling's model.
 
 ### Control rules and settlement
 
@@ -81,18 +84,31 @@ nothing is ever sent.** Live orders are issue #5.
   edge after fees beats `--min-edge` plus three Monte Carlo standard errors.
   Conditional baskets, near-identities, and thin books are recorded and
   rejected with the reason.
-- **Sizing**: capped by resting depth, free cash (cost plus entry fees
-  reserved), and `--max-position`; one open position per basket; overlapping
-  baskets never reuse the same depth. Edges and fees are evaluated at the
-  quantity that fills.
+- **Sizing**: fractional Kelly within hard caps. The caps are resting depth,
+  free cash (cost plus entry fees reserved), and `--max-position`; one open
+  position per basket; overlapping baskets never reuse the same depth. Within
+  them, the quantity maximizes expected CRRA utility of terminal wealth with
+  risk aversion `1 / --kelly-fraction` (0.25 by default: about a quarter of the
+  Kelly stake), across the nine settlement states and counting every open
+  position, so a trade correlated with the book is sized against it. The
+  model's probability of the trade paying is first lowered by the model's
+  uncertainty on that outcome, so Kelly is applied to the edge left after the
+  uncertainty. A guaranteed basket has no losing state, so only the caps limit
+  it. Each signal records what set its quantity (`kelly`, `depth`, `cash`, or
+  `max position`). Edges and fees are evaluated at the quantity that fills.
 - **Confirmation**: candidates are re-priced on a second scan of their legs'
   books and filled at that scan's prices.
 - **Settlement**: a later run settles any position whose markets have resolved,
   at $1 per winning contract.
-- **Simulated P&L**: each run values the open book under the model by drawing
-  settlement states from the model's outcome probabilities; the ledger report
-  does the same with the latest scan's model. A valuation, kept apart from
-  earned P&L and from the worst-case projected minimum.
+- **Simulated P&L under three views**: each run values the open book by
+  drawing settlement states from (1) the strategy's model, (2) the market -- the
+  combo's midpoints, normalized to sum to one -- and (3) the sibling strategy's
+  model (`2026-midterm-dependence-arbitrage`), read from the latest scan in its own
+  ledger, preferring a scan of the same quotes and labeled when it is not. A
+  model always likes the trades it chose, so a book that is only worth money
+  under its own model shows up as a gap between the rows. The ledger report
+  does the same with the latest scan. It is a valuation, kept apart from earned
+  P&L and from the worst-case projected minimum.
 
 ```bash
 uv run strategy ledger
@@ -102,7 +118,8 @@ uv run strategy ledger --since 2026-10-01 --until 2026-11-30
 The report joins runs by position id and prints, per entry run and in total:
 volume, capital committed (open / settled), projected minimum profit on open
 positions, settled net P&L, return on committed capital, each position's status,
-and the simulated P&L of the open positions.
+and the simulated P&L of the open positions under the model, the market, and
+the sibling strategy's model.
 
 ## Install
 
@@ -133,6 +150,7 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 | `--bankroll` | 1000 | paper bankroll, dollars |
 | `--max-position` | 100 | entry capital cap per position, dollars |
 | `--min-edge` | 0.01 | edge per set after fees, dollars |
+| `--kelly-fraction` | 0.25 | fraction of the Kelly stake, in (0, 1]; 1 is full Kelly |
 | `--contracts` | 100 | largest order shown in checks and EV |
 | `--runs-dir` | `<repo>/runs` | where run directories go (`STRATEGY_RUNS_DIR` too) |
 | `--confirm-delay` | 5 live, 0 replay | seconds before the confirmation scan |
@@ -158,15 +176,27 @@ D House control     100.0%   91.3%    91.2/91.3
 D Senate control     66.8%   64.5%    64.0/65.0
 
 Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96
+Bankroll $1,000.00; free cash $952.60 after this run; 2 open position(s), entry capital $47.40
 Signals: 2 accepted, 3 rejected
-  + 20260923T170000Z-01 model:sell RR: 37 x, edge +7.9c/set > threshold +1.0c
-  + 20260923T170000Z-02 model:buy DR: 352 x, edge +4.8c/set > threshold +1.4c
+  + 20260923T170000Z-01 model:sell RR: 37 x (capped by depth), edge +7.9c/set > threshold +1.0c
+  + 20260923T170000Z-02 model:buy DR: 47 x (fractional Kelly; caps allow 352), edge +4.8c/set > threshold +1.4c
   - model:buy DD: edge +1.17c/set at 152 sets does not exceed threshold 1.45c
   ...
-Open book: projected minimum profit -$133.96 (worst settlement state)
-Simulated P&L of the open book under independent model (100,000 draws, seed 12345): mean $20.12, 5%-95% -$96.96 to $255.04, P(loss) 66.7%
+Open book: projected minimum profit -$47.40 (worst settlement state)
+Simulated P&L of the open book (100,000 draws, seed 12345), a valuation, not earned P&L:
+  under independent model (this run): mean $5.23, 5%-95% -$10.40 to $36.60, P(loss) 66.7%
+  under the market (combo midpoints, normalized): mean -$1.21, 5%-95% -$47.40 to $36.60, P(loss) 73.5%
+  under 2026-midterm-dependence-arbitrage: not available (no scan in runs/2026-midterm-dependence-arbitrage)
 ```
+
+The golden run has no sibling ledger. After the dependence strategy has run on
+the same snapshot, the last row reads `under one factor model of
+2026-midterm-dependence-arbitrage (run ...): mean -$0.98, ..., P(loss) 73.1%`.
+
+The RR sale stays at the book's depth: this model puts exactly 0% on a
+Republican sweep, with no Monte Carlo error at 0, so Kelly sees no losing state
+to size against. Only a model uncertainty that reflects model error, not just
+simulation noise, would limit it.
 
 ## Test
 
