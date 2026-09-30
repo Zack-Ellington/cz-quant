@@ -110,9 +110,10 @@ and the simulated P&L of the open positions.
 uv sync
 ```
 
-No API key is needed. If the repository lives in OneDrive, set
-`export UV_LINK_MODE=copy` first: OneDrive rejects the hardlinks uv uses by
-default, which leaves a half-built `.venv`.
+No API key is needed. uv installs by copying (`link-mode = "copy"` in
+`pyproject.toml`): OneDrive rejects the hardlinks uv uses by default, which
+leaves a half-built `.venv`. If a `.venv` is already broken, delete it and run
+`uv sync` again.
 
 ## Run
 
