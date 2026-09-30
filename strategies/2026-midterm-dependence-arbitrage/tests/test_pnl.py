@@ -113,6 +113,15 @@ def test_ledger_report_joins_runs_and_excludes_other_strategies():
     assert "Simulated P&L of the 1 open position(s)" in text
 
 
+def test_ledger_report_values_open_positions_under_every_view():
+    text = ledger_report(RUNS, ME, n=10_000, seed=0, siblings=("some-other-strategy",))
+    lines = text.splitlines()
+    assert f"  under one factor model (scan of run {A}): mean $0.68" in "\n".join(lines)
+    assert any(line.startswith(f"  under the market (combo midpoints of run {A}, normalized): mean $0.68")
+               for line in lines)  # a riskless basket is worth its minimum under any view
+    assert "  under some-other-strategy (no scan in runs/some-other-strategy): not available" in lines
+
+
 def test_ledger_report_date_window():
     text = ledger_report(RUNS, ME, since=date(2026, 10, 1), n=1000)
     assert "0 position(s) selected" in text

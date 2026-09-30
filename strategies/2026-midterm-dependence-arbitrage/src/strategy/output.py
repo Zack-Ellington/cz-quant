@@ -13,7 +13,7 @@ import math
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from strategy import money
 from strategy.checks import Check
@@ -23,10 +23,13 @@ from strategy.markets import Quote
 from strategy.pnl import (
     SIMULATIONS,
     SimulatedPnL,
+    View,
     free_cash,
-    latest_model,
+    latest_scan,
     positions_from_events,
+    scan_views,
     select_positions,
+    sibling_views,
     simulate_pnl,
     summarize,
 )
@@ -164,7 +167,7 @@ def paper_section(run_label: str, run_id: str, events: list[dict], bankroll: Dec
     for e in signals:
         if e["accepted"]:
             lines.append(
-                f"  + {e['position_id']} {e['basket']}: {e['quantity']} x, "
+                f"  + {e['position_id']} {e['basket']}: {e['quantity']} x{_sizing_text(e.get('sizing'))}, "
                 f"edge {cents(Decimal(e['edge']))}/set > threshold {cents(Decimal(e['threshold']))}"
             )
         else:
@@ -176,20 +179,40 @@ def paper_section(run_label: str, run_id: str, events: list[dict], bankroll: Dec
                 f"{Decimal(e['price']):.4f}, fee {usd(Decimal(e['fee']))}, cash {usd(Decimal(e['cash_delta']))}"
                 + (" (simulated)" if e.get("simulated") else "")
             )
-    valuation = next((e for e in reversed(mine) if e["type"] == "valuation"), None)
     if open_:
         summary = summarize(open_)
         lines.append(f"Open book: projected minimum profit {usd(summary.projected_min_profit)} (worst settlement state)")
-    if valuation is not None:
-        lines.append(_valuation_line(valuation))
+    lines += _valuation_lines([e for e in mine if e["type"] == "valuation"])
     return lines
 
 
-def _valuation_line(v: Mapping) -> str:
-    return (
-        f"Simulated P&L of the open book under {v['model']} ({v['n']:,} draws, seed {v['seed']}): "
-        f"mean {usd(v['mean'])}, 5%-95% {usd(v['p05'])} to {usd(v['p95'])}, P(loss) {v['prob_loss'] * 100:.1f}%"
-    )
+def _sizing_text(sizing: Mapping | None) -> str:
+    if not sizing or not sizing.get("limit"):
+        return ""
+    if sizing["limit"] == "kelly":
+        return f" (fractional Kelly; caps allow {sizing['cap']})"
+    return f" (capped by {sizing['limit']})"
+
+
+def _valuation_lines(valuations: list[Mapping]) -> list[str]:
+    """One line per view; valuations written before views existed are the model's."""
+    if not valuations:
+        return []
+    drawn = next((v for v in valuations if "mean" in v), None)
+    head = "Simulated P&L of the open book"
+    if drawn is not None:
+        head += f" ({drawn['n']:,} draws, seed {drawn['seed']})"
+    lines = [head + ", a valuation, not earned P&L:"]
+    for v in valuations:
+        note = f" ({v['note']})" if v.get("note") else ""
+        if "mean" not in v:
+            lines.append(f"  under {v['model']}: not available{note}")
+            continue
+        lines.append(
+            f"  under {v['model']}{note}: mean {usd(v['mean'])}, 5%-95% {usd(v['p05'])} to "
+            f"{usd(v['p95'])}, P(loss) {v['prob_loss'] * 100:.1f}%"
+        )
+    return lines
 
 
 # --- The ledger subcommand --------------------------------------------------------
@@ -202,8 +225,13 @@ def ledger_report(
     until: date | None = None,
     n: int = SIMULATIONS,
     seed: int = 0,
+    siblings: Sequence[str] = (),
 ) -> str:
-    """Per-run and total aggregates for ``strategy``, joined across runs."""
+    """Per-run and total aggregates for ``strategy``, joined across runs.
+
+    Open positions are valued under the model and the market of the latest scan
+    and under each sibling's latest scan (preferring one of the same quotes).
+    """
     events = read_events(runs_dir, strategy)
     runs = {m["run_id"]: m for m in read_runs(runs_dir, strategy)}
     chosen = select_positions(positions_from_events(events), since, until)
@@ -237,12 +265,15 @@ def ledger_report(
                 f"(runs/{strategy}/{p.run_id}): capital {usd(p.entry_capital)}; {status}"
             )
 
-    latest = latest_model(events)
-    if latest is not None:
-        name, probs, source_run = latest
-        sim = simulate_pnl(chosen, probs, name, n, seed)
-        if sim is not None:
-            lines += ["", _simulated_line(sim, source_run)]
+    scan = latest_scan(events)
+    open_ = [p for p in chosen if p.is_open]
+    if scan is not None and open_:
+        views = scan_views(scan) + sibling_views(runs_dir, siblings, scan.get("source"))
+        lines += ["", f"Simulated P&L of the {len(open_)} open position(s) ({n:,} draws, seed {seed}), "
+                      "a valuation, not earned P&L:"]
+        for view in views:
+            sim = None if view.state_probs is None else simulate_pnl(chosen, view.state_probs, view.name, n, seed)
+            lines.append(_simulated_line(view, sim))
     return "\n".join(lines)
 
 
@@ -254,10 +285,11 @@ def _summary_row(label: str, s) -> str:
     )
 
 
-def _simulated_line(sim: SimulatedPnL, source_run: str) -> str:
+def _simulated_line(view: View, sim: SimulatedPnL | None) -> str:
+    label = f"  under {view.name} ({view.note})"
+    if sim is None:
+        return f"{label}: not available"
     return (
-        f"Simulated P&L of the {sim.positions} open position(s) under {sim.model} "
-        f"(model of run {source_run}; {sim.n:,} draws, seed {sim.seed}): mean {usd(sim.mean)}, "
-        f"sd {usd(sim.sd)}, 5%/50%/95% {usd(sim.p05)} / {usd(sim.p50)} / {usd(sim.p95)}, "
-        f"P(loss) {sim.prob_loss * 100:.1f}%. A model valuation, not earned P&L."
+        f"{label}: mean {usd(sim.mean)}, sd {usd(sim.sd)}, 5%/50%/95% {usd(sim.p05)} / "
+        f"{usd(sim.p50)} / {usd(sim.p95)}, P(loss) {sim.prob_loss * 100:.1f}%"
     )

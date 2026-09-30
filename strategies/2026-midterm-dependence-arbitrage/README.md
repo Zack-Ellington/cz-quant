@@ -42,7 +42,8 @@ one mispriced basket is conditional on both chamber leaders being D or R.
 5. **Report** the independent model, the factor model, and the market side by
    side.
 6. **Paper trade** (issue #7): settle resolved positions, confirm candidates on
-   a second scan, fill on paper, value the open book under the model.
+   a second scan, size by fractional Kelly within the caps, fill on paper,
+   value the open book under the model, the market, and the sibling's model.
 
 ### The dependence model
 
@@ -96,19 +97,32 @@ nothing is ever sent.** Live orders are issue #5.
   edge after fees beats `--min-edge` plus the model's own uncertainty (the gap
   between the one- and two-factor prices). Conditional baskets, near-identities,
   and thin books are recorded and rejected with the reason.
-- **Sizing**: capped by resting depth, free cash (cost plus entry fees
-  reserved), and `--max-position`; one open position per basket; overlapping
-  baskets never reuse the same depth. Edges and fees are evaluated at the
-  quantity that fills.
+- **Sizing**: fractional Kelly within hard caps. The caps are resting depth,
+  free cash (cost plus entry fees reserved), and `--max-position`; one open
+  position per basket; overlapping baskets never reuse the same depth. Within
+  them, the quantity maximizes expected CRRA utility of terminal wealth with
+  risk aversion `1 / --kelly-fraction` (0.25 by default: about a quarter of the
+  Kelly stake), across the nine settlement states and counting every open
+  position, so a trade correlated with the book is sized against it. The
+  model's probability of the trade paying is first lowered by the model's
+  uncertainty on that outcome, so Kelly is applied to the edge left after the
+  uncertainty. A guaranteed basket has no losing state, so only the caps limit
+  it. Each signal records what set its quantity (`kelly`, `depth`, `cash`, or
+  `max position`). Edges and fees are evaluated at the quantity that fills.
 - **Confirmation**: candidates are re-priced on a second scan of their legs'
   books and filled at that scan's prices (recorded under `confirm:` in a
   snapshot).
 - **Settlement**: a later run settles any position whose markets have resolved,
   at $1 per winning contract, with the run's date as the date of cash receipt.
-- **Simulated P&L**: each run values the open book under the model, drawing
-  settlement states from the model's outcome probabilities; the ledger report
-  does the same with the latest scan's model. It is a valuation, kept apart from
-  earned P&L and from the worst-case projected minimum.
+- **Simulated P&L under three views**: each run values the open book by
+  drawing settlement states from (1) the strategy's model, (2) the market -- the
+  combo's midpoints, normalized to sum to one -- and (3) the sibling strategy's
+  model (`2026-midterm-prediction-arbitrage`), read from the latest scan in its own
+  ledger, preferring a scan of the same quotes and labeled when it is not. A
+  model always likes the trades it chose, so a book that is only worth money
+  under its own model shows up as a gap between the rows. The ledger report
+  does the same with the latest scan. It is a valuation, kept apart from earned
+  P&L and from the worst-case projected minimum.
 
 ```bash
 uv run strategy ledger                                 # this strategy, all runs
@@ -118,7 +132,8 @@ uv run strategy ledger --since 2026-10-01 --until 2026-11-30
 The report joins runs by position id and prints, per entry run and in total:
 volume, capital committed (open / settled), projected minimum profit on open
 positions, settled net P&L, return on committed capital, each position's status,
-and the simulated P&L of the open positions.
+and the simulated P&L of the open positions under the model, the market, and
+the sibling strategy's model.
 
 ## Install
 
@@ -150,6 +165,7 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 | `--bankroll` | 1000 | paper bankroll, dollars |
 | `--max-position` | 100 | entry capital cap per position, dollars |
 | `--min-edge` | 0.01 | edge per set after fees, dollars |
+| `--kelly-fraction` | 0.25 | fraction of the Kelly stake, in (0, 1]; 1 is full Kelly |
 | `--contracts` | 100 | largest order shown in checks and EV |
 | `--runs-dir` | `<repo>/runs` | where run directories go (`STRATEGY_RUNS_DIR` too) |
 | `--confirm-delay` | 5 live, 0 replay | seconds before the confirmation scan |
