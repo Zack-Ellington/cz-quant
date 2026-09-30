@@ -15,7 +15,9 @@ Slicing: ``--strategies`` keeps the listed strategy ids (default: all).
 time**, the time of their first fill; every later row of a selected position
 (marks, settlement) is kept, and the series stops at the end of ``--until``.
 
-Transforms, all from the sliced rows, evaluated at the end of every run:
+Transforms, all from the sliced rows, evaluated at the end of every run in
+the window (a run that opened nothing is a point at zero, so a strategy that
+never traded still shows):
 
 * capital committed = -sum of fill cash deltas (cost plus entry fees);
 * cash = sum of fill and settlement cash deltas;
@@ -35,6 +37,7 @@ import argparse
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -57,34 +60,72 @@ def repo_root() -> Path:
         return Path(__file__).resolve().parents[1]
 
 
-def load(runs_dir: Path) -> pd.DataFrame:
-    """Every ledger row under ``runs_dir``, one DataFrame, sorted by time."""
-    records = []
+@dataclass(frozen=True)
+class Ledger:
+    """The ledger rows of a runs tree, and one line per run (strategy, run_id, ts at the end)."""
+
+    rows: pd.DataFrame
+    runs: pd.DataFrame
+
+    def select(self, strategies: list[str] | None = None, since: date | None = None,
+               until: date | None = None) -> "Ledger":
+        """Runs of the chosen strategies in [since, until], and the rows of every
+        position entered in that window."""
+        rows, runs = self.rows, self.runs
+        if strategies:
+            rows, runs = rows[rows["strategy"].isin(strategies)], runs[runs["strategy"].isin(strategies)]
+        entered = rows[rows["type"] == "fill"].groupby("position_id")["ts"].min()
+        if since is not None:
+            entered = entered[entered >= _start(since)]
+            runs = runs[runs["ts"] >= _start(since)]
+        if until is not None:
+            end = _start(until) + timedelta(days=1)
+            entered = entered[entered < end]
+            runs = runs[runs["ts"] < end]
+            rows = rows[rows["ts"] < end]
+        rows = rows[rows["position_id"].isin(entered.index)]
+        return Ledger(rows.reset_index(drop=True), runs.reset_index(drop=True))
+
+    def series(self) -> pd.DataFrame:
+        """One point per run per strategy, at the run's end."""
+        out = []
+        for strategy, runs in self.runs.groupby("strategy", sort=True):
+            rows = self.rows[self.rows["strategy"] == strategy]
+            for run in runs.sort_values("ts").itertuples():
+                out.append({"strategy": strategy, "ts": run.ts, "run_id": run.run_id,
+                            **point(rows[rows["ts"] <= run.ts])})
+        return pd.DataFrame(out, columns=SERIES)
+
+    def report(self) -> pd.DataFrame:
+        """The latest point per strategy."""
+        s = self.series()
+        if s.empty:
+            return s
+        return s.sort_values("ts").groupby("strategy").tail(1).sort_values("strategy").reset_index(drop=True)
+
+
+def load(runs_dir: Path) -> Ledger:
+    """Every ledger row and every run under ``runs_dir``."""
+    records, runs = [], []
     for path in sorted(Path(runs_dir).glob("*/*/ledger.jsonl")):
         with path.open(encoding="utf-8") as handle:
             records.extend(json.loads(line) for line in handle if line.strip())
-    df = pd.DataFrame.from_records(records, columns=COLUMNS)
-    df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601")
+        meta = json.loads((path.parent / "run.json").read_text(encoding="utf-8"))
+        runs.append({"strategy": meta["strategy"], "run_id": meta["run_id"],
+                     "ts": meta.get("ended_at") or meta["started_at"]})
+    rows = pd.DataFrame.from_records(records, columns=COLUMNS)
+    rows["ts"] = pd.to_datetime(rows["ts"], utc=True, format="ISO8601")
     for col in ("price", "fee", "cash_delta"):
-        df[col] = pd.to_numeric(df[col])
-    df["quantity"] = df["quantity"].astype("int64")
-    return df.sort_values(["ts", "run_id"], kind="stable").reset_index(drop=True)
-
-
-def select(df: pd.DataFrame, strategies: list[str] | None = None, since: date | None = None,
-           until: date | None = None) -> pd.DataFrame:
-    """Rows of the chosen strategies whose position was entered in [since, until]."""
-    if strategies:
-        df = df[df["strategy"].isin(strategies)]
-    entered = df[df["type"] == "fill"].groupby("position_id")["ts"].min()
-    if since is not None:
-        entered = entered[entered >= _start(since)]
-    if until is not None:
-        entered = entered[entered < _start(until) + timedelta(days=1)]
-    df = df[df["position_id"].isin(entered.index)]
-    if until is not None:
-        df = df[df["ts"] < _start(until) + timedelta(days=1)]
-    return df.reset_index(drop=True)
+        rows[col] = pd.to_numeric(rows[col])
+    rows["quantity"] = rows["quantity"].astype("int64")
+    rows = rows.sort_values(["ts", "run_id"], kind="stable").reset_index(drop=True)
+    runs = pd.DataFrame(runs, columns=["strategy", "run_id", "ts"])
+    runs["ts"] = pd.to_datetime(runs["ts"], utc=True, format="ISO8601")
+    # A run ends no earlier than its last row (a fixture's run.json may say otherwise).
+    last = rows.groupby(["strategy", "run_id"])["ts"].max().rename("last_row")
+    runs = runs.merge(last, left_on=["strategy", "run_id"], right_index=True, how="left")
+    runs["ts"] = runs[["ts", "last_row"]].max(axis=1)
+    return Ledger(rows, runs.drop(columns="last_row").sort_values(["ts", "run_id"]).reset_index(drop=True))
 
 
 def _start(day: date) -> datetime:
@@ -98,8 +139,8 @@ def point(rows: pd.DataFrame) -> dict:
     """Capital, cash, value, P&L, and return of one strategy's rows up to a time."""
     fills = rows[rows["type"] == "fill"]
     settled = set(rows.loc[rows["type"] == "settlement", "position_id"])
-    capital = -fills["cash_delta"].sum()
-    cash = rows.loc[rows["type"] != "mark", "cash_delta"].sum()
+    capital = float(-fills["cash_delta"].sum()) or 0.0  # no fills: 0.0, not -0.0
+    cash = float(rows.loc[rows["type"] != "mark", "cash_delta"].sum())
     open_legs = fills[~fills["position_id"].isin(settled)][["position_id", "ticker", "side", "quantity"]]
     marks = (rows[rows["type"] == "mark"]
              .drop_duplicates(["position_id", "ticker", "side"], keep="last")[["position_id", "ticker", "side", "price"]])
@@ -115,24 +156,6 @@ def point(rows: pd.DataFrame) -> dict:
         "pnl": float(pnl),
         "return": float(pnl / capital) if capital else float("nan"),
     }
-
-
-def series(df: pd.DataFrame) -> pd.DataFrame:
-    """One point per strategy per run, at the run's last row."""
-    out = []
-    for strategy, rows in df.groupby("strategy", sort=True):
-        ends = rows.groupby("run_id")["ts"].max().sort_values()
-        for run_id, ts in ends.items():
-            out.append({"strategy": strategy, "ts": ts, "run_id": run_id, **point(rows[rows["ts"] <= ts])})
-    return pd.DataFrame(out, columns=SERIES)
-
-
-def report(df: pd.DataFrame) -> pd.DataFrame:
-    """The latest point per strategy."""
-    s = series(df)
-    if s.empty:
-        return s
-    return s.sort_values("ts").groupby("strategy").tail(1).sort_values("strategy").reset_index(drop=True)
 
 
 # --- Plot -----------------------------------------------------------------------
@@ -207,23 +230,23 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     runs_dir = Path(args.runs_dir) if args.runs_dir else repo_root() / "runs"
-    df = load(runs_dir)
+    ledger = load(runs_dir)
     if args.command == "csv":
-        df.to_csv(args.output or sys.stdout, index=False)
+        ledger.rows.to_csv(args.output or sys.stdout, index=False)
         return
     strategies = args.strategies.split(",") if args.strategies else None
-    chosen = select(df, strategies, args.since, args.until)
+    chosen = ledger.select(strategies, args.since, args.until)
     if args.command == "report":
-        table = report(chosen)
+        table = chosen.report()
         if table.empty:
-            print("no positions selected")
+            print("no runs selected")
             return
         with pd.option_context("display.float_format", "{:,.4f}".format, "display.width", 200):
             print(table.to_string(index=False))
         return
-    s = series(chosen)
+    s = chosen.series()
     out = Path(args.output)
-    names = strategies or sorted(df["strategy"].unique())
+    names = strategies or sorted(ledger.runs["strategy"].unique())
     window_text = f"{args.since or 'start'} to {args.until or 'now'}"
     out.write_text(plot(s, names, f"Paper P&L by strategy, positions entered {window_text}"), encoding="utf-8")
     s.to_csv(out.with_suffix(".csv"), index=False)

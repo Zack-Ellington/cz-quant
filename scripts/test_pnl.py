@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pnl import load, main, report, select, series
+from pnl import load, main
 
 RUNS = Path(__file__).resolve().parents[1] / "strategies/2026-midterm-prediction-arbitrage/tests/fixtures/runs"
 ME = "2026-midterm-prediction-arbitrage"
@@ -22,18 +22,20 @@ OTHER = "some-other-strategy"
 
 
 @pytest.fixture(scope="module")
-def df():
+def ledger():
     return load(RUNS)
 
 
-def test_every_row_of_every_strategy_loads(df):
+def test_every_row_and_run_loads(ledger):
+    df = ledger.rows
     assert len(df) == 11 and set(df["strategy"]) == {ME, OTHER}
     assert list(df.columns)[:5] == ["ts", "run_id", "strategy", "type", "position_id"]
     assert df["ts"].is_monotonic_increasing
+    assert len(ledger.runs) == 3 and (ledger.runs["ts"] >= df.groupby("run_id")["ts"].max().min()).all()
 
 
-def test_series_one_point_per_run(df):
-    s = series(select(df, [ME]))
+def test_series_one_point_per_run(ledger):
+    s = ledger.select([ME]).series()
     assert list(s["run_id"]) == ["20260923T170000Z", "20261105T120000Z"]
     a, b = s.iloc[0], s.iloc[1]
     assert (a["capital"], a["cash"], a["value"]) == pytest.approx((19.67, -19.67, 18.60))
@@ -43,25 +45,38 @@ def test_series_one_point_per_run(df):
     assert b["open"] == 1 and b["positions"] == 2
 
 
-def test_report_is_the_latest_point_per_strategy(df):
-    table = report(select(df))
+def test_report_is_the_latest_point_per_strategy(ledger):
+    table = ledger.select().report()
     assert list(table["strategy"]) == [ME, OTHER]
     other = table.set_index("strategy").loc[OTHER]
     assert other["capital"] == pytest.approx(0.54) and other["value"] == pytest.approx(0.45)
     assert other["pnl"] == pytest.approx(-0.09)
 
 
-def test_window_selects_positions_by_entry_time(df):
-    assert select(df, [ME], since=date(2026, 10, 1)).empty
-    s = series(select(df, [ME], until=date(2026, 9, 30)))
+def test_window_selects_positions_by_entry_time(ledger):
+    november = ledger.select([ME], since=date(2026, 10, 1))
+    assert november.rows.empty  # the position was entered in September
+    s = november.series()
+    assert list(s["run_id"]) == ["20261105T120000Z"] and s["capital"].iloc[0] == 0  # a run, at zero
+    s = ledger.select([ME], until=date(2026, 9, 30)).series()
     assert list(s["run_id"]) == ["20260923T170000Z"]  # the November run is after the window
-    assert series(select(df, [OTHER], since=date(2026, 9, 24), until=date(2026, 9, 24)))["capital"].iloc[0] == pytest.approx(0.54)
+    s = ledger.select([OTHER], since=date(2026, 9, 24), until=date(2026, 9, 24)).series()
+    assert s["capital"].iloc[0] == pytest.approx(0.54)
 
 
-def test_an_unmarked_open_leg_has_no_value(df):
-    rows = select(df, [ME])
-    rows = rows[~((rows["type"] == "mark") & (rows["ticker"] == "CONTROLS-2026-D"))]
-    last = series(rows).iloc[-1]
+def test_a_strategy_that_never_traded_is_a_line_at_zero(ledger):
+    from pnl import Ledger
+    quiet = Ledger(ledger.rows.iloc[0:0], ledger.runs[ledger.runs["strategy"] == ME])
+    s = quiet.series()
+    assert len(s) == 2 and (s["pnl"] == 0).all() and (s["capital"] == 0).all()
+    assert s["return"].isna().all()
+
+
+def test_an_unmarked_open_leg_has_no_value(ledger):
+    from pnl import Ledger
+    chosen = ledger.select([ME])
+    rows = chosen.rows[~((chosen.rows["type"] == "mark") & (chosen.rows["ticker"] == "CONTROLS-2026-D"))]
+    last = Ledger(rows, chosen.runs).series().iloc[-1]
     assert math.isnan(last["value"]) and math.isnan(last["pnl"])
 
 
