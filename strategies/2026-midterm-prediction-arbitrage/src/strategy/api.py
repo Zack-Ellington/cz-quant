@@ -27,7 +27,7 @@ the authoritative source for the best bid and ask and also carries depth.
 Transport errors and 5xx responses are retried with exponential backoff. A 429
 (rate limited) is waited out -- ``Retry-After`` if Kalshi sends it -- up to
 ``RATE_LIMIT_WAITS`` times without using up a retry, since back-to-back runs
-(``--duration``) read the API as fast as it allows.
+read the API as fast as it allows.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""The five ledger aggregates and the simulated P&L, on a small fixture ledger.
+"""The five ledger aggregates on a small fixture ledger.
 
 ``tests/fixtures/runs`` holds two runs of this strategy -- one opens an
 arbitrage basket (left open) and a DD position, the other settles the DD
@@ -11,22 +11,13 @@ position weeks later -- and one run of another strategy that must be excluded.
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal as D
 
 import pytest
 
 from strategy.ledger import read_events
-from strategy.output import ledger_report
+from strategy.pnl import free_cash, positions_from_events, summarize
 from strategy.runner import STRATEGY_ID
-from strategy.pnl import (
-    free_cash,
-    latest_model,
-    positions_from_events,
-    select_positions,
-    simulate_pnl,
-    summarize,
-)
 from tests.conftest import FIXTURES
 
 RUNS = FIXTURES / "runs"
@@ -68,62 +59,6 @@ def test_free_cash_follows_fills_and_receipts():
     assert free_cash(read_events(RUNS, ME), D("1000")) == D("1000.33")  # -9.32 - 10.35 + 20
 
 
-def test_simulated_pnl_of_a_riskless_basket_is_its_minimum(positions):
-    open_ = [p for p in positions.values() if p.is_open]
-    sim = simulate_pnl(open_, {"DD": 0.6, "DR": 0.3, "RD": 0.02, "RR": 0.08}, "test model", 10_000, seed=1)
-    assert sim.mean == pytest.approx(0.68) and sim.sd == pytest.approx(0.0, abs=1e-9)
-    assert sim.prob_loss == 0.0
-
-
-def test_simulated_pnl_of_a_directional_position():
-    positions = positions_from_events(read_events(RUNS, ME))
-    dd = positions[f"{A}-02"]
-    dd.receipt = None  # value it as if still open
-    sim = simulate_pnl([dd], {"DD": 0.6, "DR": 0.3, "RD": 0.02, "RR": 0.08}, "test model", 200_000, seed=2)
-    assert sim.mean == pytest.approx(0.6 * 20 - 10.35, abs=0.05)
-    assert sim.prob_loss == pytest.approx(0.4, abs=0.01)
-    assert (sim.p05, sim.p95) == (pytest.approx(-10.35), pytest.approx(9.65))
-
-
-def test_simulation_is_reproducible(positions):
-    open_ = [p for p in positions.values() if p.is_open]
-    probs = {"DD": 0.5, "RR": 0.5}
-    assert simulate_pnl(open_, probs, "m", 1000, 7) == simulate_pnl(open_, probs, "m", 1000, 7)
-
-
-def test_latest_model_comes_from_the_last_scan():
-    name, probs, run_id = latest_model(read_events(RUNS, ME))
-    assert (name, run_id, probs["DD"]) == ("one factor model", A, 0.6)
-
-
-def test_positions_selected_by_entry_date(positions):
-    assert len(select_positions(positions, date(2026, 9, 23), date(2026, 9, 23))) == 2
-    assert select_positions(positions, date(2026, 10, 1), None) == []
-    assert select_positions(positions, None, date(2026, 9, 22)) == []
-
-
-def test_ledger_report_joins_runs_and_excludes_other_strategies():
-    text = ledger_report(RUNS, ME, n=10_000, seed=0)
-    assert text.count(f"{A}-02") == 1  # reported once, though it spans two runs
-    assert "settled in 20261105T120000Z" in text and "P&L $9.65" in text
-    assert "OTHER-01" not in text
-    assert "+93.2%" in text  # return on the settled position's entry capital
-    total = next(line for line in text.splitlines() if line.startswith("Total"))
-    assert "$19.00" in total and "$9.32" in total and "$10.35" in total and "$9.65" in total
-    assert "Simulated P&L of the 1 open position(s)" in text
-
-
-def test_ledger_report_values_open_positions_under_every_view():
-    text = ledger_report(RUNS, ME, n=10_000, seed=0, siblings=("some-other-strategy",))
-    lines = text.splitlines()
-    assert f"  under one factor model (scan of run {A}): mean $0.68" in "\n".join(lines)
-    assert any(line.startswith(f"  under the market (combo midpoints of run {A}, normalized): mean $0.68")
-               for line in lines)  # a riskless basket is worth its minimum under any view
-    assert "  under some-other-strategy (no scan in runs/some-other-strategy): not available" in lines
-
-
-def test_ledger_report_date_window():
-    text = ledger_report(RUNS, ME, since=date(2026, 10, 1), n=1000)
-    assert "0 position(s) selected" in text
-    other = ledger_report(RUNS, "some-other-strategy", n=1000)
-    assert "OTHER-01" in other and f"{A}-01" not in other
+def test_other_strategies_are_separate_ledgers():
+    other = positions_from_events(read_events(RUNS, "some-other-strategy"))
+    assert set(other) == {"OTHER-01"} and f"{A}-01" not in other

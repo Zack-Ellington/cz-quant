@@ -105,16 +105,5 @@ def test_a_quiet_tee_writes_the_log_only(tmp_path):
     assert (tmp_path / "run.log").read_text(encoding="utf-8") == "hello\n"
 
 
-def test_tags_are_written_into_every_event(tmp_path):
-    run = Run.start(tmp_path, "s", {"session": {"id": "S1", "pass": 3}}, clock_at(T0), tags={"session": "S1"})
-    run.event("note", message="a")
-    run.event("fill", "P1", price=D("0.5"))
-    events = read_events(tmp_path, "s")
-    assert [e["session"] for e in events] == ["S1", "S1"]
-    assert read_runs(tmp_path, "s")[0]["session"] == {"id": "S1", "pass": 3}
-    untagged = Run.start(tmp_path, "t", {}, clock_at(T0))
-    assert "session" not in untagged.event("note", message="b")
-
-
 def test_repo_root_is_found():
     assert (repo_root() / ".git").exists()
