@@ -1,5 +1,5 @@
-"""Paper trading: quantity-capped edges, Kelly sizing within caps, confirmation,
-settlement, and the valuation of the open book under three views."""
+"""Paper trading: quantity-capped edges, sizing by the caps, confirmation, and
+settlement."""
 
 from __future__ import annotations
 
@@ -20,8 +20,6 @@ from strategy.trading import (
     ModelView,
     Policy,
     arbitrage_candidates,
-    kelly_probs,
-    kelly_quantity,
     market_state_probs,
     model_candidates,
     record_scan,
@@ -105,10 +103,10 @@ def test_model_edge_is_value_minus_cost_minus_fees():
     assert buy_dd.threshold == Policy().min_edge
 
 
-def _cand(price="0.50", depth=1000.0, value="0.70", schedule=FeeSchedule(), uncertainty="0"):
+def _cand(price="0.50", depth=1000.0, value="0.70", schedule=FeeSchedule()):
     leg = Leg(f"{COMBO}-DD", "yes", D(price), depth, schedule, frozenset({"DD"}), COMBO)
     pays = {s: int(s == "DD") for s in STATES}
-    return Candidate("model:buy DD", "model", (leg,), pays, D(value), D("0.01"), uncertainty=D(uncertainty))
+    return Candidate("model:buy DD", "model", (leg,), pays, D(value), D("0.01"))
 
 
 def test_size_is_capped_by_depth_cash_and_the_position_limit():
@@ -133,44 +131,7 @@ def test_size_rejects_with_a_reason():
     assert n == 0 and "does not exceed threshold" in reason
 
 
-# --- Fractional Kelly ------------------------------------------------------------------
-# No fees, a 50c contract, P(DD) = 0.7: the bet doubles the stake or loses it.
-
 FREE = FeeSchedule(multiplier=0.0)
-P70 = {"DD": 0.7, "DR": 0.2, "RD": 0.02, "RR": 0.08}
-
-
-def test_full_kelly_matches_the_binary_formula():
-    # f* = (p - c) / (1 - c) = (0.7 - 0.5) / 0.5 = 40% of $1,000 = $400 = 800 contracts.
-    q = kelly_quantity(_cand(schedule=FREE), 2000, D("1000"), None, P70, D("1"))
-    assert abs(q - 800) <= 1
-
-
-def test_fractional_kelly_is_the_crra_optimum():
-    # Risk aversion 4: p (1 + x)^-4 = (1 - p) (1 - x)^-4, so (1 + x) / (1 - x) = (7/3)^(1/4).
-    r = (0.7 / 0.3) ** 0.25
-    stake = (r - 1) / (r + 1) * 1000  # $105.49, close to a quarter of Kelly's $400
-    q = kelly_quantity(_cand(schedule=FREE), 2000, D("1000"), None, P70, D("0.25"))
-    assert abs(q * 0.5 - stake) <= 0.5
-
-
-def test_kelly_uses_the_edge_left_after_the_uncertainty():
-    # Uncertainty 0.1 shades P(DD) to 0.6: f* = (0.6 - 0.5) / 0.5 = 20%, 400 contracts.
-    cand = _cand(schedule=FREE, uncertainty="0.1")
-    shaded = kelly_probs(cand, P70)
-    assert shaded["DD"] == pytest.approx(0.6) and sum(shaded.values()) == pytest.approx(1.0)
-    assert shaded["DR"] / shaded["RR"] == pytest.approx(0.2 / 0.08)  # losers keep their ratios
-    assert abs(kelly_quantity(cand, 2000, D("1000"), None, shaded, D("1")) - 400) <= 1
-
-
-def test_uncertainty_on_an_outcome_the_model_calls_impossible():
-    # Selling RR when the model says P(RR) = 0: the shaded mass goes to RR itself.
-    leg = Leg(f"{COMBO}-RR", "no", D("0.90"), 100.0, FREE, frozenset(STATES) - {"RR"}, COMBO)
-    pays = {s: int(s != "RR") for s in STATES}
-    cand = Candidate("model:sell RR", "model", (leg,), pays, D("1"), D("0.01"), uncertainty=D("0.05"))
-    shaded = kelly_probs(cand, {"DD": 0.7, "DR": 0.3})
-    assert shaded["RR"] == pytest.approx(0.05)
-    assert shaded["DD"] + shaded["DR"] == pytest.approx(0.95)
 
 
 def test_a_guaranteed_basket_is_sized_by_the_caps_alone():
@@ -178,37 +139,18 @@ def test_a_guaranteed_basket_is_sized_by_the_caps_alone():
     other = Leg("CONTROLS-2026-R", "no", D("0.45"), 5000.0, FREE, frozenset(STATES), "CONTROLS-2026")
     cand = Candidate("arbitrage:x", "arbitrage", (leg, other), {s: 1 for s in STATES}, D("1"), D("0"))
     depth = {("CONTROLS-2026-D", "no"): 5000.0, ("CONTROLS-2026-R", "no"): 5000.0}
-    sizing = size(cand, depth, D("1000"), Policy(), P70)
-    assert sizing.quantity == sizing.cap == 111 and sizing.limit == "max position"  # $99.90 of $100
-
-
-def test_an_open_position_on_the_same_outcome_shrinks_the_stake():
-    cand = _cand(schedule=FREE)
-    alone = kelly_quantity(cand, 2000, D("1000"), None, P70, D("0.25"))
-    book = {s: D(200 if s == "DD" else 0) for s in STATES}  # already long 200 DD
-    assert kelly_quantity(cand, 2000, D("800"), book, P70, D("0.25")) < alone
+    sizing = size(cand, depth, D("1000"), Policy())
+    assert sizing.quantity == 111 and sizing.limit == "max position"  # $99.90 of $100
 
 
 def test_size_reports_what_set_the_quantity():
-    depth = {(f"{COMBO}-DD", "yes"): 10_000.0}
-    rich = Policy(max_position=D("10000"))
-    sizing = size(_cand(schedule=FREE), depth, D("1000"), rich, P70)
-    assert sizing.limit == "kelly" and sizing.quantity == sizing.kelly < sizing.cap
-    capped = size(_cand(schedule=FREE), depth, D("1000"), Policy(), P70)  # Kelly wants $105
-    assert capped.limit == "max position" and capped.quantity == capped.cap == 200
-
-
-def test_kelly_that_stakes_nothing_is_a_rejection():
-    # Uncertainty wipes out the edge: P(DD) 0.7 - 0.25 = 0.45 < 0.50.
-    depth = {(f"{COMBO}-DD", "yes"): 1000.0}
-    sizing = size(_cand(schedule=FREE, uncertainty="0.25"), depth, D("1000"), Policy(), P70)
-    assert sizing.quantity == 0 and "Kelly" in sizing.reason and sizing.kelly == 0
-
-
-@pytest.mark.parametrize("fraction", ["0", "-0.5", "1.5"])
-def test_the_kelly_fraction_must_be_in_zero_one(fraction):
-    with pytest.raises(ValueError, match="kelly_fraction"):
-        Policy(kelly_fraction=D(fraction))
+    deep = {(f"{COMBO}-DD", "yes"): 10_000.0}
+    capped = size(_cand(schedule=FREE), deep, D("1000"), Policy())
+    assert capped.limit == "max position" and capped.quantity == 200  # $100 of 50c contracts
+    poor = size(_cand(schedule=FREE), deep, D("50"), Policy())
+    assert poor.limit == "cash" and poor.quantity == 100
+    thin = size(_cand(schedule=FREE), {(f"{COMBO}-DD", "yes"): 20.0}, D("1000"), Policy())
+    assert thin.limit == "depth" and thin.quantity == 20
 
 
 def test_only_guaranteed_arbitrage_is_unblocked():
@@ -221,12 +163,11 @@ def test_only_guaranteed_arbitrage_is_unblocked():
     assert cands["arbitrage:DD + RR vs same-party (long)"].blocked.startswith("conditional")
 
 
-def _trade(tmp_path, book=None, confirm_book=None, model=MODEL, policy=Policy(), clock=None, siblings=()):
+def _trade(tmp_path, book=None, confirm_book=None, model=MODEL, policy=Policy(), clock=None):
     run = Run.start(tmp_path, "s", {}, clock or (lambda: T0))
     m = markets(book)
     record_scan(run, m, model, "test book")
-    trade(run, BookClient(confirm_book or book or BOOK), m, run_checks(m, {}), model, {}, policy, 100,
-          siblings=siblings)
+    trade(run, BookClient(confirm_book or book or BOOK), m, run_checks(m, {}), model, {}, policy, 100)
     return run, read_events(tmp_path, "s")
 
 
@@ -239,16 +180,14 @@ def test_trade_fills_at_the_confirmed_price_with_fees_at_the_filled_quantity(tmp
     assert D(dd["fee"]) == cost.fee and D(dd["cash_delta"]) == cost.cash_delta
     assert dd["simulated"] is True and dd["mode"] == "paper"
     assert -D(dd["cash_delta"]) <= Policy().max_position
-    assert any(e["type"] == "valuation" for e in events)
 
 
-def test_accepted_signals_record_their_sizing(tmp_path):
+def test_accepted_signals_record_what_capped_them(tmp_path):
     _, events = _trade(tmp_path)
     accepted = [e for e in events if e["type"] == "signal" and e["accepted"]]
     assert accepted
     for e in accepted:
-        assert e["sizing"]["limit"] in ("kelly", "depth", "cash", "max position")
-        assert e["quantity"] <= e["sizing"]["cap"]
+        assert e["limit"] in ("depth", "cash", "max position")
 
 
 def test_market_probabilities_are_normalized_midpoints():
@@ -257,28 +196,6 @@ def test_market_probabilities_are_normalized_midpoints():
     for code, mid in mids.items():
         assert probs[code] == pytest.approx(mid / sum(mids.values()))
     assert sum(probs.values()) == pytest.approx(1.0) and probs["OO"] == 0.0
-
-
-def test_the_open_book_is_valued_under_three_views(tmp_path):
-    sibling = Run.start(tmp_path, "t", {}, lambda: T0)
-    other = ModelView("sibling model", {"DD": 0.5, "DR": 0.3, "RD": 0.05, "RR": 0.15}, {})
-    record_scan(sibling, markets(), other, "test book")
-    _, events = _trade(tmp_path, siblings=("t", "never-ran"))
-    vals = {e["view"] + ":" + e["model"]: e for e in events if e["type"] == "valuation"}
-    assert list(vals) == ["model:test model", "market:the market", "sibling:sibling model of t",
-                          "sibling:never-ran"]
-    assert vals["sibling:sibling model of t"]["note"] == f"run {sibling.run_id}"
-    assert "mean" not in vals["sibling:never-ran"] and "no scan" in vals["sibling:never-ran"]["note"]
-    model, market = vals["model:test model"], vals["market:the market"]
-    assert model["mean"] > market["mean"]  # the model grades its own trades higher
-
-
-def test_a_sibling_scan_of_other_quotes_is_labeled(tmp_path):
-    sibling = Run.start(tmp_path, "t", {}, lambda: T0)
-    record_scan(sibling, markets(), MODEL, "live")
-    _, events = _trade(tmp_path, siblings=("t",))
-    note = next(e["note"] for e in events if e["type"] == "valuation" and e["view"] == "sibling")
-    assert note == f"run {sibling.run_id}, live: not the same quotes"
 
 
 def test_a_candidate_that_worsens_on_the_confirming_scan_is_rejected(tmp_path):

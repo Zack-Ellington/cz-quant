@@ -40,17 +40,13 @@ D Senate control     66.8%   64.5%    64.0/65.0
 Independent model: 100,000 simulations, SE <= 0.15pp
 
 Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $952.60 after this run; 2 open position(s), entry capital $47.40
+Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96
 Signals: 2 accepted, 3 rejected
   + 20260923T170000Z-01 model:sell RR: 37 x (capped by depth), edge +7.9c/set > threshold +1.0c
-  + 20260923T170000Z-02 model:buy DR: 47 x (fractional Kelly; caps allow 352), edge +4.8c/set > threshold +1.4c
+  + 20260923T170000Z-02 model:buy DR: 352 x (capped by max position), edge +4.8c/set > threshold +1.4c
   - model:buy DD: edge +1.17c/set at 152 sets does not exceed threshold 1.45c
   - model:sell RD: edge +0.54c/set at 100 sets does not exceed threshold 1.01c
   - arbitrage:DD + RR vs same-party (long): conditional: pays nothing if a chamber leader is an independent or the office is vacant
   fill 20260923T170000Z-01 KXBALANCEPOWERCOMBO-27FEB-RR NO 37 @ 0.9150, fee $0.20, cash -$34.06 (simulated)
-  fill 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 47 @ 0.2700, fee $0.65, cash -$13.34 (simulated)
-Open book: projected minimum profit -$47.40 (worst settlement state)
-Simulated P&L of the open book (100,000 draws, seed 12345), a valuation, not earned P&L:
-  under independent model (this run): mean $5.23, 5%-95% -$10.40 to $36.60, P(loss) 66.7%
-  under the market (combo midpoints, normalized): mean -$1.21, 5%-95% -$47.40 to $36.60, P(loss) 73.5%
-  under 2026-midterm-dependence-arbitrage: not available (no scan in runs/2026-midterm-dependence-arbitrage)
+  fill 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 352 @ 0.2700, fee $4.86, cash -$99.90 (simulated)
+Open book: projected minimum profit -$133.96 (worst settlement state)

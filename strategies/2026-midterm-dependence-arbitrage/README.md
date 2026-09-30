@@ -42,8 +42,7 @@ one mispriced basket is conditional on both chamber leaders being D or R.
 5. **Report** the independent model, the factor model, and the market side by
    side.
 6. **Paper trade** (issue #7): settle resolved positions, confirm candidates on
-   a second scan, size by fractional Kelly within the caps, fill on paper,
-   value the open book under the model, the market, and the sibling's model.
+   a second scan, size within the caps, and fill on paper.
 
 ### The dependence model
 
@@ -97,71 +96,19 @@ nothing is ever sent.** Live orders are issue #5.
   edge after fees beats `--min-edge` plus the model's own uncertainty (the gap
   between the one- and two-factor prices). Conditional baskets, near-identities,
   and thin books are recorded and rejected with the reason.
-- **Sizing**: fractional Kelly within hard caps. The caps are resting depth,
-  free cash (cost plus entry fees reserved), and `--max-position`; one open
-  position per basket; overlapping baskets never reuse the same depth. Within
-  them, the quantity maximizes expected CRRA utility of terminal wealth with
-  risk aversion `1 / --kelly-fraction` (0.25 by default: about a quarter of the
-  Kelly stake), across the nine settlement states and counting every open
-  position, so a trade correlated with the book is sized against it. The
-  model's probability of the trade paying is first lowered by the model's
-  uncertainty on that outcome, so Kelly is applied to the edge left after the
-  uncertainty. A guaranteed basket has no losing state, so only the caps limit
-  it. Each signal records what set its quantity (`kelly`, `depth`, `cash`, or
-  `max position`). Edges and fees are evaluated at the quantity that fills.
+- **Sizing**: the largest quantity the caps allow: resting depth, free cash
+  (cost plus entry fees reserved), and `--max-position`; one open position per
+  basket; overlapping baskets never reuse the same depth. Each signal records
+  what set its quantity (`depth`, `cash`, or `max position`). Edges and fees
+  are evaluated at the quantity that fills.
 - **Confirmation**: candidates are re-priced on a second scan of their legs'
   books and filled at that scan's prices (recorded under `confirm:` in a
   snapshot).
 - **Settlement**: a later run settles any position whose markets have resolved,
   at $1 per winning contract, with the run's date as the date of cash receipt.
-- **Simulated P&L under three views**: each run values the open book by
-  drawing settlement states from (1) the strategy's model, (2) the market -- the
-  combo's midpoints, normalized to sum to one -- and (3) the sibling strategy's
-  model (`2026-midterm-prediction-arbitrage`), read from the latest scan in its own
-  ledger, preferring a scan of the same quotes and labeled when it is not. A
-  model always likes the trades it chose, so a book that is only worth money
-  under its own model shows up as a gap between the rows. The ledger report
-  does the same with the latest scan. It is a valuation, kept apart from earned
-  P&L and from the worst-case projected minimum.
 
-```bash
-uv run strategy ledger                                 # this strategy, all runs
-uv run strategy ledger --since 2026-10-01 --until 2026-11-30
-```
-
-The report joins runs by position id and prints, per entry run and in total:
-volume, capital committed (open / settled), projected minimum profit on open
-positions, settled net P&L, return on committed capital, each position's status,
-and the simulated P&L of the open positions under the model, the market, and
-the sibling strategy's model.
-
-### Paper sessions (`--duration`)
-
-`uv run strategy --duration H:MM` runs the whole pipeline back to back, as
-often as it can, until the time is up: `--duration 24:00` for a day,
-`--duration 1:30` for an hour and a half. Each pass is an ordinary run with its
-own run directory, so positions opened in one pass are settled or held by the
-next, and cash carries over. Every event a pass writes is marked with the
-session id (the session's start time, e.g. `20260930T020000Z`), and each
-`run.json` records the session, the pass number, and the deadline.
-
-- Each pass prints one line (opened, settled, rejected, open positions, free
-  cash, time left); its full report goes to its `run.log`. At the end the
-  session's ledger report is printed.
-- The only waits are the confirmation scan's delay (5 s) and Kalshi's rate
-  limit: a 429 is waited out, `Retry-After` when sent. A pass that starts before
-  the deadline finishes, so the last one can end slightly after it.
-- A failed pass is recorded as a failed run and retried after 15 s, doubling
-  to 5 min; ten failures in a row stop the session (exit status 1). Ctrl-C
-  stops it cleanly and still prints the summary.
-- Sessions read live quotes; `--snapshot-in` is refused (every pass would read
-  the same quotes). `--snapshot-out FILE` saves one snapshot per pass,
-  `FILE-<session>-<pass>`.
-
-```bash
-uv run strategy --duration 24:00
-uv run strategy ledger --session 20260930T020000Z
-```
+Reporting across runs and strategies reads the `runs/` tree directly; the
+strategy itself does not aggregate.
 
 ## Install
 
@@ -190,11 +137,9 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 | `--snapshot-out FILE` | none | save every quote read (before fitting, and again at the end) |
 | `--mode` | `paper` | `live` is refused (issue #5) |
 | `--no-trade` | off | scan and report only |
-| `--duration H:MM` | one run | run back to back until the time is up, e.g. `24:00`, `1:30` (live quotes only) |
 | `--bankroll` | 1000 | paper bankroll, dollars |
 | `--max-position` | 100 | entry capital cap per position, dollars |
 | `--min-edge` | 0.01 | edge per set after fees, dollars |
-| `--kelly-fraction` | 0.25 | fraction of the Kelly stake, in (0, 1]; 1 is full Kelly |
 | `--contracts` | 100 | largest order shown in checks and EV |
 | `--runs-dir` | `<repo>/runs` | where run directories go (`STRATEGY_RUNS_DIR` too) |
 | `--confirm-delay` | 5 live, 0 replay | seconds before the confirmation scan |
@@ -268,14 +213,13 @@ one run and settled in the next (issue #7's acceptance test).
 | `races.py`, `constants.py`, `control.py` | races, tickers, seat baselines, control rules |
 | `markets.py`, `estimators.py`, `probabilities.py` | aggregate markets; race books to probabilities |
 | `money.py`, `fees.py`, `checks.py` | exact money; Kalshi fees; nine-state checks |
-| `ledger.py`, `trading.py`, `pnl.py` | run directories; paper trading; aggregates and simulated P&L |
-| `session.py` | `--duration`: back-to-back passes until a deadline |
-| `output.py` | shared rendering: checks, EV, paper section, ledger report |
+| `ledger.py`, `trading.py`, `pnl.py` | run directories; paper trading; positions and cash from the ledger |
+| `output.py` | shared rendering: checks, EV, paper section |
 | `simulation.py`, `factor.py`, `calibration.py` | independent model; latent swing; fit |
 | `report.py`, `runner.py`, `cli.py` | this strategy's report, pipeline, command line |
 
 `api.py`, `snapshot.py`, `money.py`, `fees.py`, `markets.py`, `checks.py`,
-`ledger.py`, `trading.py`, `pnl.py`, `session.py`, `output.py`, `cli.py` and the race modules are shared
+`ledger.py`, `trading.py`, `pnl.py`, `output.py`, `cli.py` and the race modules are shared
 with `2026-midterm-prediction-arbitrage` and kept identical (the repository
 copies code between strategies instead of sharing a library).
 

@@ -284,9 +284,8 @@ two rejected signals:
 - `arbitrage:DD + RR vs same-party (long)`: conditional, pays nothing if a
   chamber leader is an independent or the office is vacant.
 
-Paper performance -- volume, committed capital, settled P&L, return on
-committed capital, and the simulated P&L of open positions under the model --
-comes only from ledgers: `uv run strategy ledger`.
+Paper performance -- volume, committed capital, settled P&L, and return on
+committed capital -- comes only from the ledgers in `runs/`.
 
 ## 8. Robustness
 
