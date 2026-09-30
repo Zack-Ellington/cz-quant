@@ -272,7 +272,7 @@ def sibling_views(runs_dir: Path, siblings: Sequence[str], source: str | None = 
         note = f"run {scan['run_id']}"
         if source is not None and scan.get("source") != source:
             note += f", {scan.get('source')}: not the same quotes"
-        views.append(View("sibling", f"{sibling} ({scan['model']})", _probs(scan["state_probs"]), note))
+        views.append(View("sibling", f"{scan['model']} of {sibling}", _probs(scan["state_probs"]), note))
     return views
 
 

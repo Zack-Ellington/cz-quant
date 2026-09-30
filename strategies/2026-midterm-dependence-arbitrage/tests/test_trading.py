@@ -265,9 +265,9 @@ def test_the_open_book_is_valued_under_three_views(tmp_path):
     record_scan(sibling, markets(), other, "test book")
     _, events = _trade(tmp_path, siblings=("t", "never-ran"))
     vals = {e["view"] + ":" + e["model"]: e for e in events if e["type"] == "valuation"}
-    assert list(vals) == ["model:test model", "market:the market", "sibling:t (sibling model)",
+    assert list(vals) == ["model:test model", "market:the market", "sibling:sibling model of t",
                           "sibling:never-ran"]
-    assert vals["sibling:t (sibling model)"]["note"] == f"run {sibling.run_id}"
+    assert vals["sibling:sibling model of t"]["note"] == f"run {sibling.run_id}"
     assert "mean" not in vals["sibling:never-ran"] and "no scan" in vals["sibling:never-ran"]["note"]
     model, market = vals["model:test model"], vals["market:the market"]
     assert model["mean"] > market["mean"]  # the model grades its own trades higher
