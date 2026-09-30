@@ -16,7 +16,7 @@ from strategy import money
 from strategy.checks import Check
 from strategy.fees import FeeSchedule
 from strategy.markets import Quote
-from strategy.pnl import free_cash, positions_from_events, summarize
+from strategy.pnl import free_cash, positions_from_ledger, summarize
 
 LABELS = {
     "DD": "Democrats sweep",
@@ -128,24 +128,27 @@ def checks_section(checks: list[Check], contracts: int) -> list[str]:
 # --- Paper section of a run -------------------------------------------------------
 
 
-def paper_section(run_label: str, run_id: str, events: list[dict], bankroll: Decimal) -> list[str]:
-    """What this run did on paper, read from the ledger of every run so far."""
-    mine = [e for e in events if e["run_id"] == run_id]
-    positions = positions_from_events(events)
-    open_ = [p for p in positions.values() if p.is_open]
+def paper_section(run_label: str, run_id: str, rows: list[dict], events: list[dict],
+                  bankroll: Decimal) -> list[str]:
+    """What this run did on paper, read from the ledger and events of every run so far."""
+    my_rows = [r for r in rows if r["run_id"] == run_id]
+    my_events = [e for e in events if e["run_id"] == run_id]
+    positions = positions_from_ledger(rows)
+    open_ = summarize([p for p in positions.values() if p.is_open])
+    value = "unmarked" if open_.open_value is None else (
+        f"marked at {usd(open_.open_value)} (P&L {usd(open_.open_value - open_.capital_open)})")
     lines = [
         f"Paper trading - {run_label} (paper mode: simulated fills, nothing sent)",
-        f"Bankroll {usd(bankroll)}; free cash {usd(free_cash(events, bankroll))} after this run; "
-        f"{len(open_)} open position(s), entry capital {usd(sum((p.entry_capital for p in open_), money.ZERO))}",
+        f"Bankroll {usd(bankroll)}; free cash {usd(free_cash(rows, bankroll))} after this run; "
+        f"{open_.open} open position(s), entry capital {usd(open_.capital_open)}, {value}",
     ]
-    settled = [e for e in mine if e["type"] == "settlement"]
-    for e in settled:
-        p = positions[e["position_id"]]
+    for pid in sorted({r["position_id"] for r in my_rows if r["type"] == "settlement"}):
+        p = positions[pid]
         lines.append(
-            f"  settled {p.position_id} {p.basket}: receipt {usd(Decimal(e['receipt']))}, "
-            f"P&L {usd(Decimal(e['pnl']))} on {e['received_at'][:10]}"
+            f"  settled {pid} {p.basket}: receipt {usd(p.receipt)}, P&L {usd(p.settled_pnl)} "
+            f"on {p.received_at[:10]}"
         )
-    signals = [e for e in mine if e["type"] == "signal"]
+    signals = [e for e in my_events if e["type"] == "signal"]
     accepted = [e for e in signals if e["accepted"]]
     lines.append(f"Signals: {len(accepted)} accepted, {len(signals) - len(accepted)} rejected")
     for e in signals:
@@ -156,16 +159,18 @@ def paper_section(run_label: str, run_id: str, events: list[dict], bankroll: Dec
             )
         else:
             lines.append(f"  - {e['basket']}: {e['reason']}")
-    for e in mine:
-        if e["type"] == "fill":
+    for r in my_rows:
+        if r["type"] == "fill":
             lines.append(
-                f"  fill {e['position_id']} {e['ticker']} {e['side'].upper()} {e['quantity']} @ "
-                f"{Decimal(e['price']):.4f}, fee {usd(Decimal(e['fee']))}, cash {usd(Decimal(e['cash_delta']))}"
-                + (" (simulated)" if e.get("simulated") else "")
+                f"  fill {r['position_id']} {r['ticker']} {r['side'].upper()} {r['quantity']} @ "
+                f"{Decimal(r['price']):.4f}, fee {usd(Decimal(r['fee']))}, cash {usd(Decimal(r['cash_delta']))}"
+                + (" (simulated)" if r.get("simulated") else "")
             )
-    if open_:
-        summary = summarize(open_)
-        lines.append(f"Open book: projected minimum profit {usd(summary.projected_min_profit)} (worst settlement state)")
+        elif r["type"] == "mark":
+            lines.append(
+                f"  mark {r['position_id']} {r['ticker']} {r['side'].upper()} {r['quantity']} @ "
+                f"{Decimal(r['price']):.4f}"
+            )
     return lines
 
 

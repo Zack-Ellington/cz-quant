@@ -88,9 +88,12 @@ filled; they are not proportional to quantity and are never scaled.
 ## Paper trading and the ledger
 
 Every `uv run strategy` creates `runs/2026-midterm-dependence-arbitrage/<UTC time>/`
-at the repository root (gitignored) with `run.json`, an append-only
-`ledger.jsonl`, and `run.log`. **Paper mode is the default and the only mode:
-nothing is ever sent.** Live orders are issue #5.
+at the repository root (gitignored) with `ledger.jsonl` (the accounting record:
+one flat row per fill, settlement, or mark, the same thirteen columns in every
+row), `events.jsonl` (scans and signals, diagnostics), `run.json`, and
+`run.log`. The schema is in `src/strategy/ledger.py` and the root README.
+**Paper mode is the default and the only mode: nothing is ever sent.** Live
+orders are issue #5.
 
 - **Signals**: guaranteed arbitrage baskets, and combo legs where the model's
   edge after fees beats `--min-edge` plus the model's own uncertainty (the gap
@@ -106,9 +109,12 @@ nothing is ever sent.** Live orders are issue #5.
   snapshot).
 - **Settlement**: a later run settles any position whose markets have resolved,
   at $1 per winning contract, with the run's date as the date of cash receipt.
+- **Marks**: at the end of each run every open leg gets a `mark` row at what a
+  buyer pays for it now (the bid for a YES, one minus the ask for a NO), so the
+  ledger carries a value series for the open book.
 
-Reporting across runs and strategies reads the `runs/` tree directly; the
-strategy itself does not aggregate.
+Reporting across runs and strategies is `scripts/` at the repo root
+(`uv run pnl csv | report | plot`); the strategy itself does not aggregate.
 
 ## Install
 
@@ -186,7 +192,7 @@ Republicans sweep     0.0%    8.5%    8.6%      8.5/8.7   -0.1pp                
 ...
 
 Paper trading - runs/2026-midterm-dependence-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $1,000.00 after this run; 0 open position(s), entry capital $0.00
+Bankroll $1,000.00; free cash $1,000.00 after this run; 0 open position(s), entry capital $0.00, marked at $0.00 (P&L $0.00)
 Signals: 0 accepted, 2 rejected
   - model:sell RD: edge +0.20c/set at 100 sets does not exceed threshold 2.81c
   - arbitrage:DD + RR vs same-party (long): conditional: pays nothing if a chamber leader is an independent or the office is vacant
@@ -213,7 +219,7 @@ one run and settled in the next (issue #7's acceptance test).
 | `races.py`, `constants.py`, `control.py` | races, tickers, seat baselines, control rules |
 | `markets.py`, `estimators.py`, `probabilities.py` | aggregate markets; race books to probabilities |
 | `money.py`, `fees.py`, `checks.py` | exact money; Kalshi fees; nine-state checks |
-| `ledger.py`, `trading.py`, `pnl.py` | run directories; paper trading; positions and cash from the ledger |
+| `ledger.py`, `trading.py`, `pnl.py` | run directories and the ledger schema; paper trading; positions and cash from the ledger |
 | `output.py` | shared rendering: checks, EV, paper section |
 | `simulation.py`, `factor.py`, `calibration.py` | independent model; latent swing; fit |
 | `report.py`, `runner.py`, `cli.py` | this strategy's report, pipeline, command line |
