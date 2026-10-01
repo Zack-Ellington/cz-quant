@@ -32,8 +32,13 @@ free cash, and the position cap -- and each accepted signal records which one
 set it (``limit``). The edge must still beat the threshold at that quantity.
 
 Settlement: at the start of each run, every open position whose markets have
-all resolved is settled at $1 per winning contract, and the receipt is
-recorded with the run's date as the date of cash receipt.
+all resolved is settled at $1 per winning contract, one ``settlement`` row per
+leg, dated by the run.
+
+Marks: at the end of each run, every open leg gets a ``mark`` row at what a
+buyer pays for it now (the bid for a YES, one minus the ask for a NO), so the
+ledger carries a value series for the open book. A leg with no quote is left
+unmarked for that run.
 """
 
 from __future__ import annotations
@@ -48,10 +53,10 @@ from strategy import money
 from strategy.api import Client
 from strategy.checks import DR_STATES, STATES, Check, Leg
 from strategy.fees import FeeSchedule
-from strategy.ledger import Run, iso, read_events
+from strategy.ledger import Run, read_ledger
 from strategy.markets import AggregateMarkets, Quote, all_quotes, quote_from_book
 from strategy.money import ZERO
-from strategy.pnl import free_cash, positions_from_events
+from strategy.pnl import free_cash, positions_from_ledger
 from strategy.snapshot import scan_view
 
 CONFIRM_TAG = "confirm"
@@ -261,10 +266,10 @@ def record_scan(run: Run, markets: AggregateMarkets, model: ModelView, source: s
 
 
 def settle(run: Run, markets: AggregateMarkets, client: Client) -> None:
-    """Settle every open position whose markets have all resolved."""
-    events = read_events(run.directory.parent.parent, run.strategy)
+    """Settle every open position whose markets have all resolved, one row per leg."""
+    rows = read_ledger(run.directory.parent.parent, run.strategy)
     lookup = {q.ticker: q for q in all_quotes(markets)}
-    for pos in positions_from_events(events).values():
+    for pos in positions_from_ledger(rows).values():
         if not pos.is_open:
             continue
         results = {}
@@ -273,17 +278,28 @@ def settle(run: Run, markets: AggregateMarkets, client: Client) -> None:
             results[fill["ticker"]] = None if quote is None else quote.result
         if not results or not all(r in ("yes", "no") for r in results.values()):
             continue
-        receipt = Decimal(sum(int(f["quantity"]) for f in pos.legs if results[f["ticker"]] == f["side"]))
-        run.event(
-            "settlement",
-            pos.position_id,
-            receipt=receipt,
-            received_at=iso(run.clock()),
-            results=results,
-            entry_capital=pos.entry_capital,
-            later_costs=ZERO,
-            pnl=receipt - pos.entry_capital,
-        )
+        for fill in pos.legs:
+            price = Decimal(1 if results[fill["ticker"]] == fill["side"] else 0)
+            run.ledger("settlement", pos.position_id, pos.basket, fill["ticker"], fill["side"],
+                       int(fill["quantity"]), price, ZERO, Decimal(fill["quantity"]) * price)
+
+
+def mark(run: Run, markets: AggregateMarkets) -> None:
+    """Write a mark row for every open leg at what a buyer pays for it now."""
+    rows = read_ledger(run.directory.parent.parent, run.strategy)
+    lookup = {q.ticker: q for q in all_quotes(markets)}
+    for pos in positions_from_ledger(rows).values():
+        if not pos.is_open:
+            continue
+        for fill in pos.legs:
+            q = lookup.get(fill["ticker"])
+            if q is None:
+                continue
+            price = q.bid if fill["side"] == "yes" else (None if q.ask is None else 1 - money.price(q.ask))
+            if price is None:
+                continue
+            run.ledger("mark", pos.position_id, pos.basket, fill["ticker"], fill["side"],
+                       int(fill["quantity"]), money.price(price), ZERO, ZERO)
 
 
 def trade(
@@ -297,13 +313,12 @@ def trade(
     contracts: int,
     confirm_delay: float = 0.0,
 ) -> None:
-    """Settle, generate signals, confirm, and fill."""
+    """Settle, generate signals, confirm, fill, and mark the open book."""
     settle(run, markets, client)
-    runs_dir = run.directory.parent.parent
-    events = read_events(runs_dir, run.strategy)
-    positions = positions_from_events(events)
+    rows = read_ledger(run.directory.parent.parent, run.strategy)
+    positions = positions_from_ledger(rows)
     open_baskets = {p.basket: p.position_id for p in positions.values() if p.is_open}
-    cash = free_cash(events, policy.bankroll)
+    cash = free_cash(rows, policy.bankroll)
 
     cands = arbitrage_candidates(checks) + model_candidates(markets, model, fees, policy, contracts)
     cands.sort(key=lambda c: (c.blocked is not None, -_scan_edge(c, contracts), c.basket))
@@ -354,24 +369,11 @@ def trade(
         )
         for leg in cc.legs:
             cost = leg.schedule.order(leg.price, quantity, "buy")
-            run.event(
-                "fill",
-                pid,
-                simulated=True,
-                mode="paper",
-                scan=CONFIRM_TAG,
-                ticker=leg.ticker,
-                event_ticker=leg.event_ticker,
-                side=leg.side,
-                price=cost.price,
-                quantity=quantity,
-                trade_fee=cost.trade_fee,
-                rounding_fee=cost.rounding_fee,
-                fee=cost.fee,
-                cash_delta=cost.cash_delta,
-            )
+            run.ledger("fill", pid, c.basket, leg.ticker, leg.side, quantity, cost.price, cost.fee,
+                       cost.cash_delta)
             depth[(leg.ticker, leg.side)] -= quantity
             cash += cost.cash_delta
+    mark(run, markets)
 
 
 def _scan_edge(c: Candidate, contracts: int) -> Decimal:
@@ -385,8 +387,8 @@ def _quote_fields(q: Quote) -> dict:
 
 
 def _fetch_quote(client: Client, fill: dict) -> Quote | None:
-    """Status of a leg's market that the scan did not read."""
-    event = client.fetch_event(fill["event_ticker"]) if fill.get("event_ticker") else None
+    """Status of a leg's market that the scan did not read (event = ticker minus its last part)."""
+    event = client.fetch_event(fill["ticker"].rsplit("-", 1)[0])
     if event is None:
         return None
     summary = next((m for m in event["markets"] if m["ticker"] == fill["ticker"]), None)

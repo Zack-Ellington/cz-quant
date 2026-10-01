@@ -73,9 +73,12 @@ Kalshi's published example). Fees are computed at the quantity actually filled.
 ## Paper trading and the ledger
 
 Every `uv run strategy` creates `runs/2026-midterm-prediction-arbitrage/<UTC time>/`
-at the repository root (gitignored) with `run.json`, an append-only
-`ledger.jsonl`, and `run.log`. **Paper mode is the default and the only mode:
-nothing is ever sent.** Live orders are issue #5.
+at the repository root (gitignored) with `ledger.jsonl` (the accounting record:
+one flat row per fill, settlement, or mark, the same thirteen columns in every
+row), `events.jsonl` (scans and signals, diagnostics), `run.json`, and
+`run.log`. The schema is in `src/strategy/ledger.py` and the root README.
+**Paper mode is the default and the only mode: nothing is ever sent.** Live
+orders are issue #5.
 
 - **Signals**: guaranteed arbitrage baskets, and combo legs where the model's
   edge after fees beats `--min-edge` plus three Monte Carlo standard errors.
@@ -90,9 +93,12 @@ nothing is ever sent.** Live orders are issue #5.
   books and filled at that scan's prices.
 - **Settlement**: a later run settles any position whose markets have resolved,
   at $1 per winning contract.
+- **Marks**: at the end of each run every open leg gets a `mark` row at what a
+  buyer pays for it now (the bid for a YES, one minus the ask for a NO), so the
+  ledger carries a value series for the open book.
 
-Reporting across runs and strategies reads the `runs/` tree directly; the
-strategy itself does not aggregate.
+Reporting across runs and strategies is `scripts/` at the repo root
+(`uv run pnl csv | report | plot`); the strategy itself does not aggregate.
 
 ## Install
 
@@ -148,14 +154,18 @@ D House control     100.0%   91.3%    91.2/91.3
 D Senate control     66.8%   64.5%    64.0/65.0
 
 Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96
+Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96, marked at $125.30 (P&L -$8.66)
 Signals: 2 accepted, 3 rejected
   + 20260923T170000Z-01 model:sell RR: 37 x (capped by depth), edge +7.9c/set > threshold +1.0c
   + 20260923T170000Z-02 model:buy DR: 352 x (capped by max position), edge +4.8c/set > threshold +1.4c
   - model:buy DD: edge +1.17c/set at 152 sets does not exceed threshold 1.45c
   ...
-Open book: projected minimum profit -$133.96 (worst settlement state)
+  mark 20260923T170000Z-01 KXBALANCEPOWERCOMBO-27FEB-RR NO 37 @ 0.9130
+  mark 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 352 @ 0.2600
 ```
+
+The book is marked at the bid right after it was bought at the ask, so the
+first mark shows the spread and fees as a loss.
 
 The RR sale is capped by the book's depth (37 contracts resting at the bid);
 the DR purchase by `--max-position`.
@@ -180,7 +190,7 @@ settled in the next (issue #7's acceptance test).
 | `races.py`, `constants.py`, `control.py` | races, tickers, seat baselines, control rules |
 | `markets.py`, `estimators.py`, `probabilities.py` | aggregate markets; race books to probabilities |
 | `money.py`, `fees.py`, `checks.py` | exact money; Kalshi fees; nine-state checks |
-| `ledger.py`, `trading.py`, `pnl.py` | run directories; paper trading; positions and cash from the ledger |
+| `ledger.py`, `trading.py`, `pnl.py` | run directories and the ledger schema; paper trading; positions and cash from the ledger |
 | `output.py` | shared rendering: checks, EV, paper section |
 | `simulation.py` | the independent model |
 | `report.py`, `runner.py`, `cli.py` | this strategy's report, pipeline, command line |

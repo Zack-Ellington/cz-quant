@@ -33,7 +33,7 @@ from strategy.calibration import calibrate
 from strategy.checks import run_checks
 from strategy.estimators import RaceProb
 from strategy.fees import DEFAULT_ACCOUNT, DEFAULT_CONTRACTS, FeeSchedule, fee_schedules
-from strategy.ledger import Run, Tee, default_runs_dir, read_events, utc_now
+from strategy.ledger import Run, Tee, default_runs_dir, read_events, read_ledger, utc_now
 from strategy.markets import AggregateMarkets, fetch_markets, traded_series
 from strategy.output import paper_section
 from strategy.probabilities import apply_estimator, caucus_probs, load_race_quotes
@@ -190,8 +190,8 @@ def run(
         if trading:
             trade(run_, client, acquired.markets, report.checks, view, acquired.fees, policy,
                   contracts, confirm_delay)
-        events = read_events(runs_dir, STRATEGY_ID)
-        print("\n".join(paper_section(run_.label, run_.run_id, events, policy.bankroll)))
+        rows, events = read_ledger(runs_dir, STRATEGY_ID), read_events(runs_dir, STRATEGY_ID)
+        print("\n".join(paper_section(run_.label, run_.run_id, rows, events, policy.bankroll)))
         if recorder is not None:
             path = recorder.save(snapshot_out)  # adds the confirmation scan
             print(f"Saved {len(recorder.records)} quotes to {path}", file=sys.stderr)
