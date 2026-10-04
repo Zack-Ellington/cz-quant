@@ -1,0 +1,56 @@
+2026 Midterm - Congress balance of power
+snapshot 2026-09-23.json (captured 2026-09-23T16:25:13Z) - estimator midpoint - model independent
+
+Model-free checks (taker; per set, in cents; fees at min(100, size) sets; Raw/Net assume D or R leaders, Worst covers independent or vacant leaders)
+Check                                      Cost      Raw      Net     Worst     Size  Verdict
+---------------------------------------------------------------------------------------------
+combo: buy all four legs                 1.0040    -0.4c    -4.0c   -104.0c   10,464  ok
+combo: sell all four legs                3.0190    -1.9c    -5.5c     -5.5c       37  ok
+House control: D + R                     1.0000    +0.0c    -1.1c   -101.1c    5,779  ok
+Senate control: D + R                    1.0000    +0.0c    -3.2c     -3.2c      315  ok
+DD + DR vs House-D (short)               0.9970    +0.3c    -3.3c   -103.3c    5,779  fees
+DD + DR vs House-D (long)                1.0070    -0.7c    -1.9c   -101.9c   10,068  ok
+DD + RD vs Senate-D (short)              1.0070    -0.7c    -4.0c   -104.0c      315  ok
+DD + RD vs Senate-D (long)               0.9970    +0.3c    -3.3c   -103.3c      478  fees
+DD + RR vs same-party (short)            1.0970    -9.7c   -13.5c    -13.5c   10,464  ok
+DD + RR vs same-party (long)             0.9370    +6.3c    +3.3c    -96.7c      200  cond
+DD >= House-D + Senate-D - 1             1.0870    -8.7c   -12.5c   -112.5c      315  ok
+RR >= House-R + Senate-R - 1             1.6400   -64.0c   -66.7c   -166.7c      478  ok
+DR >= House-D - Senate-D                 0.9970    +0.3c    -3.3c   -103.3c      478  fees
+RD >= Senate-D - House-D                 1.2800   -28.0c   -30.2c   -130.2c      315  ok
+House seats: buy all buckets             1.0440    -4.4c   -16.0c    -16.0c        1  ok
+House seats: sell all buckets           11.0260    -2.6c   -14.0c    -14.0c        1  ok
+House seats >= 218 vs House-D (short)    1.0380    -3.8c   -14.0c    -14.0c        1  ok
+House seats >= 218 vs House-D (long)     1.0060    -0.6c    -3.0c     -3.0c        2  ok
+Senate seats: buy all buckets            1.0140    -1.4c   -11.0c    -11.0c     0.15  ok
+Senate seats: sell all buckets           9.0770    -7.7c   -15.5c    -15.5c        2  ok
+Senate seats >= 51 vs Senate-D (short)   1.0300    -3.0c    -8.1c     -8.1c      315  ok
+Senate seats >= 51 vs Senate-D (long)    0.9840    +1.6c    -6.0c     -6.0c     0.15  fees
+0 arbitrage(s) in every settlement state; 1 conditional on D/R leaders; 4 positive only before fees.
+
+Outcome              Model  Market      Bid/Ask     Edge      EV after fees
+---------------------------------------------------------------------------
+Democrats sweep      66.8%   63.5%    63.0/64.0   +3.3pp     buy +1.2c x100
+D House / R Senate   33.2%   26.5%    26.0/27.0   +6.7pp     buy +4.8c x100
+R House / D Senate    0.0%    0.7%      0.6/0.7   -0.6pp    sell +0.5c x100
+Republicans sweep     0.0%    8.6%      8.5/8.7   -8.6pp     sell +7.9c x37
+---------------------------------------------------------------------------
+D House control     100.0%   91.3%    91.2/91.3
+D Senate control     66.8%   64.5%    64.0/65.0
+Independent model: 100,000 simulations, SE <= 0.15pp
+
+Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
+Bankroll $1,000.00; free cash $952.60 after this run; 2 open position(s), entry capital $47.40
+Signals: 2 accepted, 3 rejected
+  + 20260923T170000Z-01 model:sell RR: 37 x (capped by depth), edge +7.9c/set > threshold +1.0c
+  + 20260923T170000Z-02 model:buy DR: 47 x (fractional Kelly; caps allow 352), edge +4.8c/set > threshold +1.4c
+  - model:buy DD: edge +1.17c/set at 152 sets does not exceed threshold 1.45c
+  - model:sell RD: edge +0.54c/set at 100 sets does not exceed threshold 1.01c
+  - arbitrage:DD + RR vs same-party (long): conditional: pays nothing if a chamber leader is an independent or the office is vacant
+  fill 20260923T170000Z-01 KXBALANCEPOWERCOMBO-27FEB-RR NO 37 @ 0.9150, fee $0.20, cash -$34.06 (simulated)
+  fill 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 47 @ 0.2700, fee $0.65, cash -$13.34 (simulated)
+Open book: projected minimum profit -$47.40 (worst settlement state)
+Simulated P&L of the open book (100,000 draws, seed 12345), a valuation, not earned P&L:
+  under independent model (this run): mean $5.23, 5%-95% -$10.40 to $36.60, P(loss) 66.7%
+  under the market (combo midpoints, normalized): mean -$1.21, 5%-95% -$47.40 to $36.60, P(loss) 73.5%
+  under 2026-midterm-dependence-arbitrage: not available (no scan in runs/2026-midterm-dependence-arbitrage)

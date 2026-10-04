@@ -10,7 +10,7 @@ or retired without an effect on the others.
 
 ## Strategies
 
-- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): arbitrage on Kalshi markets for the 2026 US midterm elections. Scaffold only.
+- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets drawn independently, nine-state model-free checks, and a paper-trading ledger (`uv run strategy ledger`), against the `KXBALANCEPOWERCOMBO` combo market.
 
 ## Quickstart
 
@@ -58,8 +58,12 @@ cd cz-quant
    uv run strategy
    ```
 
-The strategy is a scaffold, so the command exits with no output. The strategy
-logic goes in `src/strategy/runner.py`.
+This strategy is implemented: the command reads the live Kalshi markets, runs
+the model-free checks and the independent Monte Carlo, prints the
+model-vs-market table, and paper-trades into `runs/` (nothing is ever sent).
+`uv run strategy ledger` aggregates the paper ledger. See its
+[README](strategies/2026-midterm-prediction-arbitrage/README.md) for the method,
+a sample report, and the reproducible `--snapshot-in` run.
 
 ### Create a new strategy
 
