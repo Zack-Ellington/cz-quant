@@ -12,6 +12,8 @@ or retired without an effect on the others.
 
 - [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets drawn independently, nine-state model-free checks, and a paper-trading ledger (`uv run strategy ledger`), against the `KXBALANCEPOWERCOMBO` combo market.
 
+- [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and a paper-trading ledger (`uv run strategy ledger`), against the `KXBALANCEPOWERCOMBO` combo market.
+
 ## Quickstart
 
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct
