@@ -4,7 +4,8 @@ The snapshot replays every quote the run read, the simulation is seeded, and the
 clock is fixed, so a whole run -- report and paper section -- reduces to one
 golden string. Beyond that:
 
-* a run writes ``run.json``, ``ledger.jsonl``, and ``run.log`` and sends nothing;
+* a run writes ``run.json``, ``ledger.jsonl``, ``events.jsonl``, and ``run.log`` and
+  sends nothing;
 * the snapshot is saved before the model runs, so a failed run is replayable;
 * issue #7's acceptance: two runs on two snapshots, the first opens a paper
   position and the second settles it.
@@ -21,8 +22,8 @@ import pytest
 
 from strategy import runner
 from strategy.estimators import ESTIMATORS
-from strategy.ledger import read_events, read_runs
-from strategy.pnl import positions_from_events
+from strategy.ledger import read_events, read_ledger, read_runs
+from strategy.pnl import positions_from_ledger
 from strategy.runner import STRATEGY_ID, acquire, build_report, run
 from strategy.snapshot import SnapshotClient
 from tests.conftest import committed_snapshot
@@ -57,7 +58,9 @@ def test_a_run_writes_its_directory_and_sends_nothing(tmp_path, capsys, monkeypa
     assert (directory / "run.log").read_text(encoding="utf-8") == printed
     events = read_events(tmp_path / "runs", STRATEGY_ID)
     assert events[0]["type"] == "scan" and events[0]["model"] == "independent model"
-    assert all(e["simulated"] for e in events if e["type"] == "fill")
+    rows = read_ledger(tmp_path / "runs", STRATEGY_ID)
+    assert rows and all(r["simulated"] for r in rows)
+    assert {r["type"] for r in rows} == {"fill", "mark"}
 
 
 def test_live_mode_is_refused(tmp_path):
@@ -107,15 +110,15 @@ def test_a_position_opened_in_one_run_settles_in_the_next(tmp_path, capsys):
     day1, day2 = _derived_snapshots(tmp_path)
     runs = tmp_path / "runs"
     run(seed=SEED, snapshot_in=str(day1), runs_dir=runs, clock=at(DAY1))
-    opened = positions_from_events(read_events(runs, STRATEGY_ID))
+    opened = positions_from_ledger(read_ledger(runs, STRATEGY_ID))
     dd = next(p for p in opened.values() if p.basket == "model:buy DD")
-    assert dd.is_open and dd.quantity > 0
+    assert dd.is_open and dd.quantity > 0 and dd.value == D("0.49") * dd.quantity  # marked at the bid
 
     run(seed=SEED, snapshot_in=str(day2), runs_dir=runs, clock=at(DAY2))
-    settled = positions_from_events(read_events(runs, STRATEGY_ID))[dd.position_id]
+    settled = positions_from_ledger(read_ledger(runs, STRATEGY_ID))[dd.position_id]
     assert settled.receipt == D(dd.quantity)
     assert settled.settled_pnl == D(dd.quantity) - dd.entry_capital
-    assert not [p for p in positions_from_events(read_events(runs, "another-strategy"))]
+    assert not positions_from_ledger(read_ledger(runs, "another-strategy"))
 
 
 @pytest.mark.parametrize("estimator", sorted(ESTIMATORS))

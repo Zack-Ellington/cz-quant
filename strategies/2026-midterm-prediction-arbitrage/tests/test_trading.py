@@ -1,5 +1,5 @@
-"""Paper trading: quantity-capped edges, sizing by the caps, confirmation, and
-settlement."""
+"""Paper trading: quantity-capped edges, sizing by the caps, confirmation,
+marks, and settlement."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import pytest
 from strategy.checks import run_checks
 from strategy.fees import FeeSchedule
 from strategy.checks import STATES, Leg
-from strategy.ledger import Run, read_events
+from strategy.ledger import Run, read_events, read_ledger
 from strategy.markets import AggregateMarkets, ControlMarket, Quote
 from strategy.output import ev_after_fees
-from strategy.pnl import positions_from_events
+from strategy.pnl import positions_from_ledger
 from strategy.trading import (
     Candidate,
     ModelView,
@@ -168,22 +168,35 @@ def _trade(tmp_path, book=None, confirm_book=None, model=MODEL, policy=Policy(),
     m = markets(book)
     record_scan(run, m, model, "test book")
     trade(run, BookClient(confirm_book or book or BOOK), m, run_checks(m, {}), model, {}, policy, 100)
-    return run, read_events(tmp_path, "s")
+    return run, read_ledger(tmp_path, "s"), read_events(tmp_path, "s")
 
 
 def test_trade_fills_at_the_confirmed_price_with_fees_at_the_filled_quantity(tmp_path):
-    run, events = _trade(tmp_path)
-    fills = [e for e in events if e["type"] == "fill"]
+    run, rows, _ = _trade(tmp_path)
+    fills = [r for r in rows if r["type"] == "fill"]
     dd = next(f for f in fills if f["ticker"] == f"{COMBO}-DD")
     n = dd["quantity"]
     cost = FeeSchedule().order("0.60", n)
     assert D(dd["fee"]) == cost.fee and D(dd["cash_delta"]) == cost.cash_delta
-    assert dd["simulated"] is True and dd["mode"] == "paper"
+    assert dd["simulated"] is True and dd["basket"] == "model:buy DD"
     assert -D(dd["cash_delta"]) <= Policy().max_position
 
 
+def test_every_open_leg_is_marked_at_what_a_buyer_pays_now(tmp_path):
+    _, rows, _ = _trade(tmp_path)
+    fills = {(r["ticker"], r["side"]): r for r in rows if r["type"] == "fill"}
+    marks = {(r["ticker"], r["side"]): r for r in rows if r["type"] == "mark"}
+    assert set(marks) == set(fills) and fills
+    for (ticker, side), m in marks.items():
+        assert m["quantity"] == fills[(ticker, side)]["quantity"] and D(m["cash_delta"]) == 0
+        bid, ask, _ = BOOK[ticker]
+        expected = D(str(bid)) if side == "yes" else 1 - D(str(ask))  # the bid, or one minus the ask
+        assert D(m["price"]) == expected
+    assert {side for _, side in marks} == {"yes", "no"}
+
+
 def test_accepted_signals_record_what_capped_them(tmp_path):
-    _, events = _trade(tmp_path)
+    _, _, events = _trade(tmp_path)
     accepted = [e for e in events if e["type"] == "signal" and e["accepted"]]
     assert accepted
     for e in accepted:
@@ -200,14 +213,14 @@ def test_market_probabilities_are_normalized_midpoints():
 
 def test_a_candidate_that_worsens_on_the_confirming_scan_is_rejected(tmp_path):
     worse = {**BOOK, f"{COMBO}-DD": (0.68, 0.69, 500.0)}
-    _, events = _trade(tmp_path, confirm_book=worse)
+    _, _, events = _trade(tmp_path, confirm_book=worse)
     rejected = {e["basket"]: e["reason"] for e in events if e["type"] == "signal" and not e["accepted"]}
     assert "does not exceed threshold" in rejected["model:buy DD"]
 
 
 def test_one_open_position_per_basket(tmp_path):
     _trade(tmp_path)
-    _, events = _trade(tmp_path)  # a second run, same prices
+    _, _, events = _trade(tmp_path)  # a second run, same prices
     reasons = [e["reason"] for e in events if e["type"] == "signal" and not e["accepted"]]
     assert any(r.startswith("already open as") for r in reasons)
 
@@ -216,9 +229,9 @@ def test_overlapping_baskets_do_not_reuse_depth(tmp_path):
     # Two model trades on different legs plus depth of 30 each: each fill is
     # capped by the depth left after the previous fills of the same leg.
     thin = {k: (b, a, 30.0) for k, (b, a, _) in BOOK.items()}
-    _, events = _trade(tmp_path, book=thin, policy=Policy(max_position=D("1000")))
+    _, rows, _ = _trade(tmp_path, book=thin, policy=Policy(max_position=D("1000")))
     used = {}
-    for e in events:
+    for e in rows:
         if e["type"] == "fill":
             key = (e["ticker"], e["side"])
             used[key] = used.get(key, 0) + e["quantity"]
@@ -226,30 +239,33 @@ def test_overlapping_baskets_do_not_reuse_depth(tmp_path):
 
 
 def test_settlement_pays_one_dollar_per_winning_contract(tmp_path):
-    run, events = _trade(tmp_path)
-    opened = positions_from_events(events)
+    run, rows, _ = _trade(tmp_path)
+    opened = positions_from_ledger(rows)
     resolved = markets(status="finalized")
     for code, q in resolved.combo.items():
         resolved.combo[code] = Quote(q.ticker, q.bid, q.ask, status="finalized",
                                      result="yes" if code == "DD" else "no")
     later = Run.start(tmp_path, "s", {}, lambda: T0.replace(month=11))
     settle(later, resolved, BookClient(BOOK))
-    settled = {e["position_id"]: e for e in read_events(tmp_path, "s") if e["type"] == "settlement"}
+    after = positions_from_ledger(read_ledger(tmp_path, "s"))
+    settlements = [r for r in read_ledger(tmp_path, "s") if r["type"] == "settlement"]
+    assert len(settlements) == sum(len(p.legs) for p in opened.values())  # one row per leg
+    assert all(D(r["price"]) in (D(0), D(1)) and D(r["fee"]) == 0 for r in settlements)
     for pid, pos in opened.items():
         winning = sum(int(f["quantity"]) for f in pos.legs
-                      if {"yes": "yes", "no": "no"}[f["side"]] == ("yes" if f["ticker"].endswith("-DD") else "no"))
-        assert D(settled[pid]["receipt"]) == winning
-        assert D(settled[pid]["pnl"]) == winning - pos.entry_capital
+                      if f["side"] == ("yes" if f["ticker"].endswith("-DD") else "no"))
+        assert after[pid].receipt == winning and not after[pid].is_open
+        assert after[pid].settled_pnl == winning - pos.entry_capital
 
 
 def test_unresolved_positions_stay_open(tmp_path):
     _trade(tmp_path)
     later = Run.start(tmp_path, "s", {}, lambda: T0.replace(month=10))
     settle(later, markets(), BookClient(BOOK))
-    assert not [e for e in read_events(tmp_path, "s") if e["type"] == "settlement"]
+    assert not [r for r in read_ledger(tmp_path, "s") if r["type"] == "settlement"]
 
 
 @pytest.mark.parametrize("policy", [Policy(bankroll=D("0")), Policy(max_position=D("0.01"))])
 def test_no_cash_no_fills(tmp_path, policy):
-    _, events = _trade(tmp_path, policy=policy)
-    assert not [e for e in events if e["type"] == "fill"]
+    _, rows, _ = _trade(tmp_path, policy=policy)
+    assert not rows

@@ -40,7 +40,7 @@ D Senate control     66.8%   64.5%    64.0/65.0
 Independent model: 100,000 simulations, SE <= 0.15pp
 
 Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96
+Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96, marked at $125.30 (P&L -$8.66)
 Signals: 2 accepted, 3 rejected
   + 20260923T170000Z-01 model:sell RR: 37 x (capped by depth), edge +7.9c/set > threshold +1.0c
   + 20260923T170000Z-02 model:buy DR: 352 x (capped by max position), edge +4.8c/set > threshold +1.4c
@@ -49,4 +49,5 @@ Signals: 2 accepted, 3 rejected
   - arbitrage:DD + RR vs same-party (long): conditional: pays nothing if a chamber leader is an independent or the office is vacant
   fill 20260923T170000Z-01 KXBALANCEPOWERCOMBO-27FEB-RR NO 37 @ 0.9150, fee $0.20, cash -$34.06 (simulated)
   fill 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 352 @ 0.2700, fee $4.86, cash -$99.90 (simulated)
-Open book: projected minimum profit -$133.96 (worst settlement state)
+  mark 20260923T170000Z-01 KXBALANCEPOWERCOMBO-27FEB-RR NO 37 @ 0.9130
+  mark 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 352 @ 0.2600

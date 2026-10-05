@@ -50,7 +50,7 @@ Factor model Democratic seats: House 235.5 +/- 15.6, Senate 51.6 +/- 3.1
 Independent: 100,000 simulations, SE <= 0.14pp
 
 Paper trading - runs/2026-midterm-dependence-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $1,000.00 after this run; 0 open position(s), entry capital $0.00
+Bankroll $1,000.00; free cash $1,000.00 after this run; 0 open position(s), entry capital $0.00, marked at $0.00 (P&L $0.00)
 Signals: 0 accepted, 2 rejected
   - model:sell RD: edge +0.20c/set at 100 sets does not exceed threshold 2.81c
   - arbitrage:DD + RR vs same-party (long): conditional: pays nothing if a chamber leader is an independent or the office is vacant
