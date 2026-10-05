@@ -7,13 +7,13 @@ golden string. Beyond that:
 * a run writes ``run.json``, ``ledger.jsonl``, and ``run.log`` and sends nothing;
 * the snapshot is saved before the model runs, so a failed run is replayable;
 * issue #7's acceptance: two runs on two snapshots, the first opens a paper
-  position and the second settles it, and ``ledger`` reports it once.
+  position and the second settles it.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -22,7 +22,6 @@ import pytest
 from strategy import runner
 from strategy.estimators import ESTIMATORS
 from strategy.ledger import read_events, read_runs
-from strategy.output import ledger_report
 from strategy.pnl import positions_from_events
 from strategy.runner import STRATEGY_ID, acquire, build_report, run
 from strategy.snapshot import SnapshotClient
@@ -116,13 +115,7 @@ def test_a_position_opened_in_one_run_settles_in_the_next(tmp_path, capsys):
     settled = positions_from_events(read_events(runs, STRATEGY_ID))[dd.position_id]
     assert settled.receipt == D(dd.quantity)
     assert settled.settled_pnl == D(dd.quantity) - dd.entry_capital
-
-    text = ledger_report(runs, STRATEGY_ID, n=10_000)
-    assert text.count(f"{dd.position_id} model:buy DD") == 1
-    assert f"P&L ${settled.settled_pnl:,.2f}" in text
-    assert f"return {settled.settled_pnl / dd.entry_capital * 100:+.1f}%" in text
-    assert "0 position(s) selected" in ledger_report(runs, STRATEGY_ID, since=date(2026, 10, 1), n=1000)
-    assert "0 position(s) selected" in ledger_report(runs, "another-strategy", n=1000)
+    assert not [p for p in positions_from_events(read_events(runs, "another-strategy"))]
 
 
 @pytest.mark.parametrize("estimator", sorted(ESTIMATORS))

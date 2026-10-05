@@ -15,12 +15,7 @@ Each event has ``ts``, ``run_id``, ``strategy``, ``type``, and ``position_id``.
 Types: ``scan`` (model and market prices), ``signal`` (a basket or trade the
 strategy wants, accepted or rejected with a reason), ``fill`` (one leg: ticker,
 side, price, quantity, fee, cash delta; ``simulated`` in paper mode),
-``settlement`` (position, receipt, date of cash receipt), ``valuation`` (the
-simulated P&L of the open book under one view), and ``note``.
-
-A run can carry tags that are written into every one of its events: a run that
-is one pass of a ``--duration`` session has ``session`` (the session id), and
-its ``run.json`` records the session, the pass number, and the deadline.
+``settlement`` (position, receipt, date of cash receipt), and ``note``.
 
 Money is written as decimal strings and read back as ``Decimal``, so the ledger
 never rounds. ``runs/`` is gitignored. The directory is found by walking up
@@ -40,7 +35,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
-EVENT_TYPES = ("scan", "signal", "fill", "settlement", "valuation", "note")
+EVENT_TYPES = ("scan", "signal", "fill", "settlement", "note")
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -102,7 +97,6 @@ class Run:
     directory: Path
     clock: Callable[[], datetime] = utc_now
     meta: dict = field(default_factory=dict)
-    tags: dict = field(default_factory=dict)  # written into every event, e.g. {"session": id}
 
     @property
     def ledger_path(self) -> Path:
@@ -124,7 +118,6 @@ class Run:
         strategy: str,
         meta: dict,
         clock: Callable[[], datetime] = utc_now,
-        tags: dict | None = None,
     ) -> "Run":
         started = clock()
         base = started.strftime("%Y%m%dT%H%M%SZ")
@@ -138,7 +131,7 @@ class Run:
             except FileExistsError:
                 n += 1
                 run_id = f"{base}-{n}"
-        run = cls(strategy, run_id, parent / run_id, clock, tags=dict(tags or {}))
+        run = cls(strategy, run_id, parent / run_id, clock)
         run.meta = {
             "strategy": strategy,
             "run_id": run_id,
@@ -163,7 +156,6 @@ class Run:
             "strategy": self.strategy,
             "type": type,
             "position_id": position_id,
-            **self.tags,
             **fields,
         }
         line = json.dumps(record, default=_encode, sort_keys=True)
