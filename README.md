@@ -10,7 +10,9 @@ or retired without an effect on the others.
 
 ## Strategies
 
-- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets drawn independently, nine-state model-free checks, and a paper-trading ledger (`uv run strategy ledger`), against the `KXBALANCEPOWERCOMBO` combo market.
+- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets drawn independently, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
+
+- [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
 ## Quickstart
 
@@ -60,8 +62,7 @@ cd cz-quant
 
 This strategy is implemented: the command reads the live Kalshi markets, runs
 the model-free checks and the independent Monte Carlo, prints the
-model-vs-market table, and paper-trades into `runs/` (nothing is ever sent).
-`uv run strategy ledger` aggregates the paper ledger. See its
+model-vs-market table, and paper-trades into `runs/` (nothing is ever sent). See its
 [README](strategies/2026-midterm-prediction-arbitrage/README.md) for the method,
 a sample report, and the reproducible `--snapshot-in` run.
 

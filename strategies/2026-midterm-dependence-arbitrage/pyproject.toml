@@ -1,0 +1,31 @@
+[project]
+name = "2026-midterm-dependence-arbitrage"
+version = "0.1.0"
+description = "Latent-swing model of 2026 Congress control vs. Kalshi's combo market, with paper trading."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "numpy>=2.0",
+    "scipy>=1.13",
+]
+
+[project.scripts]
+strategy = "strategy.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strategy"]
+
+[tool.uv]
+# OneDrive and some synced folders reject the hardlinks uv uses by default,
+# which leaves a half-installed .venv. Copying always works.
+link-mode = "copy"

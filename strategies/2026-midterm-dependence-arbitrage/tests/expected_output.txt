@@ -1,5 +1,5 @@
 2026 Midterm - Congress balance of power
-snapshot 2026-09-23.json (captured 2026-09-23T16:25:13Z) - estimator midpoint - model independent
+snapshot 2026-09-23.json (captured 2026-09-23T16:25:13Z) - estimator midpoint - model one factor
 
 Model-free checks (taker; per set, in cents; fees at min(100, size) sets; Raw/Net assume D or R leaders, Worst covers independent or vacant leaders)
 Check                                      Cost      Raw      Net     Worst     Size  Verdict
@@ -28,25 +28,29 @@ Senate seats >= 51 vs Senate-D (short)   1.0300    -3.0c    -8.1c     -8.1c     
 Senate seats >= 51 vs Senate-D (long)    0.9840    +1.6c    -6.0c     -6.0c     0.15  fees
 0 arbitrage(s) in every settlement state; 1 conditional on D/R leaders; 4 positive only before fees.
 
-Outcome              Model  Market      Bid/Ask     Edge      EV after fees
----------------------------------------------------------------------------
-Democrats sweep      66.8%   63.5%    63.0/64.0   +3.3pp     buy +1.2c x100
-D House / R Senate   33.2%   26.5%    26.0/27.0   +6.7pp     buy +4.8c x100
-R House / D Senate    0.0%    0.7%      0.6/0.7   -0.6pp    sell +0.5c x100
-Republicans sweep     0.0%    8.6%      8.5/8.7   -8.6pp     sell +7.9c x37
----------------------------------------------------------------------------
-D House control     100.0%   91.3%    91.2/91.3
-D Senate control     66.8%   64.5%    64.0/65.0
-Independent model: 100,000 simulations, SE <= 0.15pp
+Calibration: seat-count and control markets (combo held out)
+Model            sigma H sigma S  caucus     flip R/D    loss   House  Senate
+-----------------------------------------------------------------------------
+no swing           0.000   0.000    0.42  25.0%/24.6%  0.5486   96.4%   71.2%
+one factor         0.560   0.560    0.77    3.5%/0.2%  0.0211   91.1%   64.4%
+two factor         0.384   0.607    0.74    4.3%/1.1%  0.0170   91.2%   63.7%
+control markets                                                 91.3%   63.9%
+Selected one factor: one factor matches both control markets within 0.005 <= 0.01
 
-Paper trading - runs/2026-midterm-prediction-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
-Bankroll $1,000.00; free cash $866.04 after this run; 2 open position(s), entry capital $133.96
-Signals: 2 accepted, 3 rejected
-  + 20260923T170000Z-01 model:sell RR: 37 x (capped by depth), edge +7.9c/set > threshold +1.0c
-  + 20260923T170000Z-02 model:buy DR: 352 x (capped by max position), edge +4.8c/set > threshold +1.4c
-  - model:buy DD: edge +1.17c/set at 152 sets does not exceed threshold 1.45c
-  - model:sell RD: edge +0.54c/set at 100 sets does not exceed threshold 1.01c
+Outcome              Indep  Factor  Market      Bid/Ask     Edge      EV after fees
+-----------------------------------------------------------------------------------
+Democrats sweep      74.4%   64.0%   63.5%    63.0/64.0   +0.5pp                  -
+D House / R Senate   25.6%   27.1%   26.5%    26.0/27.0   +0.6pp                  -
+R House / D Senate    0.0%    0.4%    0.7%      0.6/0.7   -0.3pp    sell +0.2c x100
+Republicans sweep     0.0%    8.5%    8.6%      8.5/8.7   -0.1pp                  -
+-----------------------------------------------------------------------------------
+D House control     100.0%   91.1%   91.3%    91.2/91.3
+D Senate control     74.4%   64.4%   64.5%    64.0/65.0
+Factor model Democratic seats: House 235.5 +/- 15.6, Senate 51.6 +/- 3.1
+Independent: 100,000 simulations, SE <= 0.14pp
+
+Paper trading - runs/2026-midterm-dependence-arbitrage/20260923T170000Z (paper mode: simulated fills, nothing sent)
+Bankroll $1,000.00; free cash $1,000.00 after this run; 0 open position(s), entry capital $0.00
+Signals: 0 accepted, 2 rejected
+  - model:sell RD: edge +0.20c/set at 100 sets does not exceed threshold 2.81c
   - arbitrage:DD + RR vs same-party (long): conditional: pays nothing if a chamber leader is an independent or the office is vacant
-  fill 20260923T170000Z-01 KXBALANCEPOWERCOMBO-27FEB-RR NO 37 @ 0.9150, fee $0.20, cash -$34.06 (simulated)
-  fill 20260923T170000Z-02 KXBALANCEPOWERCOMBO-27FEB-DR YES 352 @ 0.2700, fee $4.86, cash -$99.90 (simulated)
-Open book: projected minimum profit -$133.96 (worst settlement state)

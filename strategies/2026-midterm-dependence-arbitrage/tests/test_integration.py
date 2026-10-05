@@ -1,11 +1,13 @@
 """End to end on the committed snapshot of real quotes, and the paper ledger.
 
-The snapshot replays every quote the run read, the simulation is seeded, and the
-clock is fixed, so a whole run -- report and paper section -- reduces to one
-golden string. Beyond that:
+The snapshot replays every quote the run read, calibration is deterministic,
+the simulations are seeded, and the clock is fixed, so a whole run -- report
+and paper section -- reduces to one golden string. Beyond that:
 
+* one factor is selected because it reproduces both chamber-control markets
+  within 0.01, and every race keeps its market probability within 0.01;
 * a run writes ``run.json``, ``ledger.jsonl``, and ``run.log`` and sends nothing;
-* the snapshot is saved before the model runs, so a failed run is replayable;
+* the snapshot is saved before calibration, so a failed fit is replayable;
 * issue #7's acceptance: two runs on two snapshots, the first opens a paper
   position and the second settles it.
 """
@@ -20,7 +22,9 @@ from pathlib import Path
 import pytest
 
 from strategy import runner
+from strategy.calibration import FACTOR_TOLERANCE, control_miss
 from strategy.estimators import ESTIMATORS
+from strategy.factor import simulate_factor
 from strategy.ledger import read_events, read_runs
 from strategy.pnl import positions_from_events
 from strategy.runner import STRATEGY_ID, acquire, build_report, run
@@ -36,6 +40,13 @@ DAY2 = datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 def at(moment):
     return lambda: moment
+
+
+@pytest.fixture(scope="module")
+def report():
+    client = SnapshotClient(SNAPSHOT)
+    source = f"snapshot {SNAPSHOT.name} (captured {client.captured_at})"
+    return build_report(acquire(client, "midpoint"), source, 100_000, SEED, "auto", "midpoint", 100)
 
 
 def test_run_prints_the_golden_report(tmp_path, capsys):
@@ -54,9 +65,10 @@ def test_a_run_writes_its_directory_and_sends_nothing(tmp_path, capsys, monkeypa
     meta = json.loads((directory / "run.json").read_text(encoding="utf-8"))
     assert meta["mode"] == "paper" and meta["status"] == "ok"
     assert meta["snapshot_in"] == str(SNAPSHOT) and meta["api_base_url"]
+    assert {"commit", "dirty"} <= set(meta["git"]) and meta["ended_at"]
     assert (directory / "run.log").read_text(encoding="utf-8") == printed
     events = read_events(tmp_path / "runs", STRATEGY_ID)
-    assert events[0]["type"] == "scan" and events[0]["model"] == "independent model"
+    assert events[0]["type"] == "scan" and events[0]["state_probs"]["DD"] > 0
     assert all(e["simulated"] for e in events if e["type"] == "fill")
 
 
@@ -65,23 +77,20 @@ def test_live_mode_is_refused(tmp_path):
         run(snapshot_in=str(SNAPSHOT), mode="live", runs_dir=tmp_path / "runs")
 
 
-def test_only_the_independent_model_exists(tmp_path):
-    with pytest.raises(ValueError, match="independent"):
-        run(snapshot_in=str(SNAPSHOT), model="one-factor", runs_dir=tmp_path / "runs")
-
-
-def test_snapshot_is_saved_before_the_model_runs(tmp_path, monkeypatch, capsys):
+def test_snapshot_is_saved_before_calibration(tmp_path, monkeypatch, capsys):
     def broken(*args, **kwargs):
-        raise RuntimeError("simulation exploded")
+        raise RuntimeError("calibration exploded")
 
-    monkeypatch.setattr(runner, "simulate", broken)
+    monkeypatch.setattr(runner, "calibrate", broken)
     out = tmp_path / "acquired.json"
     with pytest.raises(RuntimeError, match="exploded"):
         run(seed=SEED, snapshot_in=str(SNAPSHOT), snapshot_out=str(out), runs_dir=tmp_path / "runs",
             clock=at(DAY1))
-    replayed = acquire(SnapshotClient(out), "midpoint")
+    replayed = acquire(SnapshotClient(out), "midpoint")  # every acquired quote is there
     assert replayed.markets.combo["DD"].ask == pytest.approx(0.64)
-    assert read_runs(tmp_path / "runs", STRATEGY_ID)[0]["status"] == "failed"
+    meta = read_runs(tmp_path / "runs", STRATEGY_ID)[0]
+    assert meta["status"] == "failed" and "exploded" in meta["error"]
+    assert read_events(tmp_path / "runs", STRATEGY_ID)[-1]["message"].startswith("run failed")
 
 
 def _derived_snapshots(tmp_path) -> tuple[Path, Path]:
@@ -91,6 +100,7 @@ def _derived_snapshots(tmp_path) -> tuple[Path, Path]:
     records["book:KXBALANCEPOWERCOMBO-27FEB-DD"] = {"yes": [[0.49, 300.0]], "no": [[0.5, 300.0]]}
     day1 = tmp_path / "day1.json"
     day1.write_text(json.dumps(data), encoding="utf-8")
+
     winners = {"KXBALANCEPOWERCOMBO-27FEB-DD", "CONTROLH-2026-D", "CONTROLS-2026-D",
                "KXSAMEPARTYCONGRESS-27FEB01"}
     for key in ("event:KXBALANCEPOWERCOMBO-27FEB", "event:CONTROLH-2026", "event:CONTROLS-2026",
@@ -115,11 +125,32 @@ def test_a_position_opened_in_one_run_settles_in_the_next(tmp_path, capsys):
     settled = positions_from_events(read_events(runs, STRATEGY_ID))[dd.position_id]
     assert settled.receipt == D(dd.quantity)
     assert settled.settled_pnl == D(dd.quantity) - dd.entry_capital
+    assert settled.settled_run == "20261105T120000Z"
     assert not [p for p in positions_from_events(read_events(runs, "another-strategy"))]
+
+
+def test_one_factor_is_selected_within_one_cent_of_control(report):
+    cal = report.calibration
+    assert cal.selected == "one" and cal.chosen.params.factors == 1
+    assert control_miss(cal.one, cal.targets) <= FACTOR_TOLERANCE
+
+
+def test_race_marginals_are_preserved_within_one_cent(report):
+    fit = report.calibration.chosen
+    mc = simulate_factor(fit.probs, fit.params, n=100_000, seed=SEED)
+    worst = max(abs(rate - fit.probs[rid]) for rid, rate in mc.race_win_rates.items())
+    assert worst <= 0.01
+    for code, p in fit.result.combo.items():
+        assert mc.combo[code] == pytest.approx(p, abs=0.01)
+
+
+def test_dependence_beats_independence_on_the_calibration_targets(report):
+    assert report.calibration.one.loss < report.calibration.baseline.loss / 10
 
 
 @pytest.mark.parametrize("estimator", sorted(ESTIMATORS))
 def test_every_estimator_replays_from_the_snapshot(estimator):
     acquired = acquire(SnapshotClient(SNAPSHOT), estimator)
     r = build_report(acquired, "snapshot", 10_000, SEED, "independent", estimator, 100)
+    assert r.calibration is None
     assert sum(r.independent.combo.values()) == pytest.approx(1.0)

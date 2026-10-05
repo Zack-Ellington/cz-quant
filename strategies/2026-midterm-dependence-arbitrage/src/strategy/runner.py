@@ -1,25 +1,22 @@
-"""Runner for the independent strategy. Configuration comes from the environment.
+"""Runner for the dependence strategy. Configuration comes from the environment.
 
-Pipeline: acquire quotes -> save snapshot -> checks -> simulate -> report ->
-paper trade -> paper section.
+Pipeline: acquire quotes -> save snapshot -> checks -> calibrate -> simulate ->
+report -> paper trade -> paper section.
 
 1. Acquire every quote the run needs: each race's legs, the combo, House and
    Senate control, the same-party market, the seat-count buckets, and each
    traded series' fees and contract terms.
-2. With ``snapshot_out``, save the snapshot *now*, before the model runs, so a
-   run that fails later still leaves its quotes on disk for replay.
-3. Run the model-free checks and the independent model: every race drawn on its
-   own from its market probability, independent candidates counted as
-   non-Democratic.
+2. With ``snapshot_out``, save the snapshot *now*, before any fitting, so a run
+   that fails later still leaves its quotes on disk for replay.
+3. Run the model-free checks, calibrate the latent swing (unless
+   ``model="independent"``), and simulate the independent model on the same
+   race probabilities.
 4. Print the report, then trade on paper: settle positions whose markets have
    resolved, confirm candidates on a second scan, size them within the caps, and
    fill. The paper section is read back from the ledger.
 
 Every run writes ``runs/<strategy-id>/<UTC timestamp>/`` (see ``ledger.py``).
 Paper mode is the only mode; nothing can send an order (issue #5).
-
-Everything but the model -- quotes, snapshots, checks, fees, trading, ledger --
-is shared with ``2026-midterm-dependence-arbitrage`` and kept identical.
 """
 
 from __future__ import annotations
@@ -32,6 +29,7 @@ from pathlib import Path
 
 from strategy import constants
 from strategy.api import Client, KalshiClient
+from strategy.calibration import calibrate
 from strategy.checks import run_checks
 from strategy.estimators import RaceProb
 from strategy.fees import DEFAULT_ACCOUNT, DEFAULT_CONTRACTS, FeeSchedule, fee_schedules
@@ -45,9 +43,9 @@ from strategy.simulation import OUTCOMES, simulate
 from strategy.snapshot import RecordingClient, SnapshotClient
 from strategy.trading import ModelView, Policy, record_scan, trade
 
-STRATEGY_ID = "2026-midterm-prediction-arbitrage"
-MODELS = ("independent",)
-DEFAULT_MODEL = "independent"
+STRATEGY_ID = "2026-midterm-dependence-arbitrage"
+MODELS = ("auto", "one-factor", "two-factor", "independent")
+DEFAULT_MODEL = "auto"
 LIVE_CONFIRM_DELAY = 5.0  # seconds between the scan and its confirmation, live
 
 
@@ -76,27 +74,45 @@ def build_report(
     estimator: str,
     contracts: int,
 ) -> Report:
-    if model not in MODELS:
-        raise ValueError(f"model must be one of {MODELS}, got {model!r}")
-    probs = caucus_probs(acquired.race_probs, 0.0)
+    checks = run_checks(acquired.markets, acquired.fees, contracts)
+    if model == "independent":
+        calibration = None
+        probs = caucus_probs(acquired.race_probs, 0.0)
+    else:
+        calibration = calibrate(acquired.race_probs, acquired.markets, model)
+        probs = calibration.chosen.probs
     return Report(
         source=source,
         estimator=estimator,
         contracts=contracts,
-        checks=run_checks(acquired.markets, acquired.fees, contracts),
+        checks=checks,
         markets=acquired.markets,
         fees=acquired.fees,
         independent=simulate(probs, n=simulations, seed=seed),
+        calibration=calibration,
     )
 
 
 def model_view(report: Report) -> ModelView:
-    """The model's prices for trading; its uncertainty is 3 Monte Carlo SEs."""
-    ind = report.independent
+    """The selected model's prices and uncertainty, for trading.
+
+    The factor model's uncertainty on each outcome is how far the one- and
+    two-factor fits disagree -- the part of the answer the markets do not pin
+    down. The independent model's is three Monte Carlo standard errors.
+    """
+    cal = report.calibration
+    if cal is None:
+        ind = report.independent
+        return ModelView(
+            "independent model",
+            dict(ind.combo),
+            {k: 3 * ind.standard_error[k] for k in OUTCOMES},
+        )
+    chosen = cal.chosen.result
     return ModelView(
-        "independent model",
-        dict(ind.combo),
-        {k: 3 * ind.standard_error[k] for k in OUTCOMES},
+        f"{report.model_name} model",
+        dict(chosen.combo),
+        {k: abs(cal.one.result.combo[k] - cal.two.result.combo[k]) for k in OUTCOMES},
     )
 
 
@@ -165,7 +181,7 @@ def run(
     try:
         acquired = acquire(client, estimator)
         if recorder is not None:
-            recorder.save(snapshot_out)  # before the model runs
+            recorder.save(snapshot_out)  # before any fitting
         report = build_report(acquired, source, simulations, seed, model, estimator, contracts)
         view = model_view(report)
         record_scan(run_, acquired.markets, view, source)
