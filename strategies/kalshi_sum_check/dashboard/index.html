@@ -1,0 +1,537 @@
+<title>Kalshi Sum Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: status header, KPI band, two trend charts, sum distribution, then the event ledger. */
+:root {
+  --bg: #eef1f4;
+  --panel: #ffffff;
+  --ink: #17202b;
+  --muted: #5d6877;
+  --line: #d5dbe2;
+  --grid: #e6eaef;
+  --accent: #0f5f73;
+  --under: #2f5fd0;      /* YES asks sum below $1: buy every leg */
+  --under-soft: rgba(47, 95, 208, .14);
+  --over: #c26a0a;       /* YES bids sum above $1: sell every leg */
+  --over-soft: rgba(194, 106, 10, .16);
+  --good: #1d7a4a;
+  --bad: #b3372f;
+  --warn-bg: #fbf1dd;
+  --warn-fg: #7d5409;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161c; --panel: #182029; --ink: #e5eaf0; --muted: #93a0b0; --line: #2b3643; --grid: #222c37;
+    --accent: #5cb8cc; --under: #7d9ff0; --under-soft: rgba(125, 159, 240, .18); --over: #eaa04a; --over-soft: rgba(234, 160, 74, .2);
+    --good: #57c18a; --bad: #ef7d74; --warn-bg: #3a2e16; --warn-fg: #f0c878; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #182029; --ink: #e5eaf0; --muted: #93a0b0; --line: #2b3643; --grid: #222c37;
+  --accent: #5cb8cc; --under: #7d9ff0; --under-soft: rgba(125, 159, 240, .18); --over: #eaa04a; --over-soft: rgba(234, 160, 74, .2);
+  --good: #57c18a; --bad: #ef7d74; --warn-bg: #3a2e16; --warn-fg: #f0c878; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
+.wrap { max-width: 1280px; margin: 0 auto; padding-inline: 20px; padding-block: 24px 48px; display: grid; gap: 20px; }
+h1, h2 { font-family: var(--font-display); font-weight: 600; margin: 0; text-wrap: balance; }
+h1 { font-size: 1.75rem; letter-spacing: -.01em; }
+h2 { font-size: 1.05rem; }
+.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.small { font-size: .8rem; }
+
+header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+header p { margin: 4px 0 0; color: var(--muted); max-width: 62ch; }
+.status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: .8rem; font-weight: 500; border: 1px solid var(--line); background: var(--panel); }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.live::before { background: var(--good); }
+.pill.stale::before { background: var(--over); }
+
+.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.kpi { background: var(--panel); padding: 14px 16px; display: grid; gap: 4px; align-content: start; min-width: 0; }
+.kpi .label, .kpi.extremes .label { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 500; }
+.kpi .value { font-family: var(--font-data); font-size: 1.6rem; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.kpi .value.under { color: var(--under); }
+.kpi .value.over { color: var(--over); }
+.kpi .value.good { color: var(--good); }
+.kpi .sub { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
+.kpi.wide { grid-column: span 2; }
+.fee-steps { display: grid; grid-template-columns: auto 1fr auto auto; gap: 2px 12px; font-size: .8rem; align-items: baseline; margin-top: 4px; }
+.fee-steps .h { font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.fee-steps .r { text-align: right; font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.fee-steps .fee { color: var(--bad); }
+.fee-steps .tot { border-top: 1px solid var(--line); padding-top: 2px; font-weight: 500; }
+.kpi.extremes { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.kpi.extremes > div { display: grid; gap: 2px; }
+@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .kpis { grid-template-columns: minmax(0, 1fr); } .kpi.wide { grid-column: auto; } }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; display: grid; gap: 10px; }
+.panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 16px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .8rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+.chart { width: 100%; min-height: 200px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart svg text { fill: var(--muted); font-family: var(--font-data); font-size: 10.5px; }
+.empty { display: grid; place-items: center; min-height: 160px; color: var(--muted); text-align: center; padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.controls input[type="search"], .controls select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+.controls input[type="search"] { min-width: 0; width: 220px; max-width: 100%; }
+.controls label { display: inline-flex; gap: 6px; align-items: center; font-size: .85rem; color: var(--muted); cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: .85rem; min-width: 1240px; }
+th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; vertical-align: top; }
+th:first-child, td:first-child { text-align: left; white-space: normal; min-width: 240px; }
+thead th { position: sticky; top: 0; background: var(--panel); font-weight: 500; color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; cursor: pointer; user-select: none; border-bottom: 1px solid var(--line); }
+thead th[aria-sort="ascending"]::after { content: " ▲"; }
+thead th[aria-sort="descending"]::after { content: " ▼"; }
+tbody tr:hover { background: var(--bg); }
+td .t { font-weight: 500; }
+td .tk { font-family: var(--font-data); font-size: .75rem; color: var(--muted); }
+.freq { display: inline-grid; grid-template-columns: 54px auto; gap: 8px; align-items: center; }
+.bar { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; }
+.bar b { display: block; height: 100%; }
+.bar.u b { background: var(--under); }
+.bar.o b { background: var(--over); }
+.range { display: block; font-size: .72rem; color: var(--muted); }
+.cell-under { color: var(--under); font-weight: 500; }
+.cell-over { color: var(--over); font-weight: 500; }
+.pos { color: var(--good); font-weight: 500; }
+.fee-cell { color: var(--bad); }
+.neg { color: var(--muted); }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: .7rem; background: var(--grid); color: var(--muted); margin: 2px 0 0 4px; }
+.chip.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.table-foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: .8rem; color: var(--muted); }
+.notes { font-size: .8rem; color: var(--muted); display: grid; gap: 6px; max-width: 90ch; }
+.notes p { margin: 0; }
+@media (max-width: 520px) { h1 { font-size: 1.4rem; } .kpi .value { font-size: 1.35rem; } .charts { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Kalshi Sum Monitor</h1>
+      <p>Every open mutually exclusive Kalshi event, scanned on a schedule. If exactly one outcome pays $1, the YES prices across its markets should add up to $1.00.</p>
+    </div>
+    <div class="status">
+      <span class="pill" id="pill">Connecting</span>
+      <span class="small muted num" id="scanmeta"></span>
+    </div>
+  </header>
+
+  <section class="kpis" aria-label="Current scan">
+    <div class="kpi"><span class="label">Events tracked</span><span class="value" id="k-tracked">—</span><span class="sub" id="k-tracked-sub">Waiting for the first scan</span></div>
+    <div class="kpi"><span class="label">Asks under $1 now</span><span class="value under" id="k-under">—</span><span class="sub" id="k-under-sub">Buying every YES costs less than the payout</span></div>
+    <div class="kpi"><span class="label">Bids over $1 now</span><span class="value over" id="k-over">—</span><span class="sub" id="k-over-sub">Selling every YES collects more than $1</span></div>
+    <div class="kpi wide"><span class="label">Est. taker return now, after Kalshi fees</span><span class="value good" id="k-net">—</span>
+      <div class="fee-steps" id="k-fees" aria-label="Return before and after Kalshi fees"></div>
+      <span class="sub" id="k-net-sub">Across every event with a positive edge after fees</span></div>
+    <div class="kpi extremes">
+      <div><span class="label">Lowest Σask so far</span><span class="value under" id="k-lo">—</span><span class="sub" id="k-lo-sub"></span></div>
+      <div><span class="label">Highest Σbid so far</span><span class="value over" id="k-hi">—</span><span class="sub" id="k-hi-sub"></span></div>
+    </div>
+  </section>
+
+  <section class="charts">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Events off $1, per scan</h2>
+        <div class="legend"><span><i style="background:var(--under)"></i>Σask &lt; 1</span><span><i style="background:var(--over)"></i>Σbid &gt; 1</span></div>
+      </div>
+      <div class="chart" id="c-counts"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Estimated taker return, per scan</h2>
+        <div class="legend"><span><i style="background:repeating-linear-gradient(90deg,var(--ink) 0 4px,transparent 4px 7px)"></i>Before fees</span><span><i style="background:var(--good)"></i>After Kalshi fees</span><span><i style="background:var(--bad);opacity:.35;height:8px"></i>Fees taken</span></div>
+      </div>
+      <div class="chart" id="c-net"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Where sums sit right now</h2>
+      <div class="legend"><span><i style="background:var(--under)"></i>Σask (walked)</span><span><i style="background:var(--over)"></i>Σbid (walked)</span><span>Fair value is 1.00</span></div>
+    </div>
+    <div class="chart" id="c-hist"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Events</h2>
+      <div class="controls">
+        <input type="search" id="q" placeholder="Search event or ticker" aria-label="Search events">
+        <select id="view" aria-label="Filter events">
+          <option value="ever">Ever off $1</option>
+          <option value="under">Asks under $1 now</option>
+          <option value="over">Bids over $1 now</option>
+          <option value="edge">Taker edge now</option>
+          <option value="all">All pushed events</option>
+        </select>
+        <label><input type="checkbox" id="nonexh"> Include likely non-exhaustive</label>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr id="thead"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="table-foot"><span id="tcount"></span><span>Frequency = share of scans with the sum on that side of $1. Ranges are the lowest and highest values seen.</span></div>
+  </section>
+
+  <section class="notes">
+    <p><strong>How the numbers are made.</strong> Each scan walks every leg's order book to the target size in contract sets. Σask is the cost of buying YES on every leg, and Σbid is the proceeds of selling YES on every leg. The estimated return adds up taker edge for every event with a positive edge in the latest scan. It is shown before fees and after Kalshi's taker fee, which is charged on every leg as 0.07 × the series fee multiplier × contracts × P × (1 − P), rounded up to the cent. Only events still positive after fees count, and all ROI and APR figures in the table are after fees. APR is weighted by capital and runs to the event's expected settlement.</p>
+    <p><strong>Read before trading.</strong> Mutually exclusive doesn't mean one outcome must win. Events where the mid prices sum below 0.90 are marked likely non-exhaustive and left out of the totals. Two-party races can also resolve with no listed winner.</p>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { summary: null, history: null, sort: { key: "freq", dir: -1 } };
+  const STALE_MIN = 40;
+
+  const fmtSum = (v) => (v == null ? "—" : v.toFixed(4));
+  const fmtUsd = (v) => (v == null ? "—" : (v < 0 ? "−$" : "$") + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const fmtPct = (v, d = 1) => (v == null || !isFinite(v) ? "—" : (v * 100).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d }) + "%");
+  const fmtInt = (v) => (v == null ? "—" : v.toLocaleString());
+  const ago = (iso) => {
+    const m = (Date.now() - new Date(iso).getTime()) / 60000;
+    if (m < 1) return "just now";
+    if (m < 60) return Math.round(m) + " min ago";
+    if (m < 48 * 60) return Math.round(m / 60) + " h ago";
+    return Math.round(m / 1440) + " days ago";
+  };
+  const fmtAxis = (t, span) => {
+    const d = new Date(t);
+    const md = `${d.getMonth() + 1}/${d.getDate()}`;
+    if (span >= 2 * 864e5) return md;
+    return md + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  };
+  const fmtTime = (iso) => new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // ---------- status + KPIs ----------
+  function renderStatus() {
+    const s = state.summary;
+    const pill = $("pill");
+    if (!s) return;
+    const mins = (Date.now() - new Date(s.updated_at).getTime()) / 60000;
+    pill.className = "pill " + (mins > STALE_MIN ? "stale" : "live");
+    pill.textContent = mins > STALE_MIN ? "Stale" : "Live";
+    $("scanmeta").textContent = `Scan #${s.scans} · ${ago(s.updated_at)} · ${s.size} sets per event`;
+  }
+
+  function renderKpis() {
+    const s = state.summary;
+    if (!s) return;
+    const c = s.current;
+    $("k-tracked").textContent = fmtInt(s.tracked);
+    $("k-tracked-sub").textContent = `${fmtInt(s.ever_under)} ever under, ${fmtInt(s.ever_over)} ever over, since ${fmtTime(s.first_scan_at)}`;
+    $("k-under").textContent = fmtInt(c.under_exh);
+    $("k-under-sub").textContent = `${fmtInt(c.under - c.under_exh)} more in likely non-exhaustive events`;
+    $("k-over").textContent = fmtInt(c.over_exh);
+    $("k-over-sub").textContent = `${fmtInt(c.over - c.over_exh)} more in likely non-exhaustive events`;
+    $("k-net").textContent = fmtUsd(c.net);
+    const hasFees = c.gross != null && c.fees != null;
+    const capNoFees = hasFees ? c.cap - c.fees : null;
+    $("k-fees").innerHTML = hasFees && c.opps ? `
+      <span class="h"></span><span class="h"></span><span class="h r">ROI</span><span class="h r">APR</span>
+      <span>Before fees</span><span class="r">${fmtUsd(c.gross)}</span><span class="r">${fmtPct(capNoFees ? c.gross / capNoFees : null, 2)}</span><span class="r">${fmtPct(c.apr_gross)}</span>
+      <span>Kalshi fees</span><span class="r fee">−${fmtUsd(c.fees)}</span><span class="r fee" style="grid-column: span 2">${fmtPct(c.gross ? c.fees / c.gross : null, 0)} of the edge</span>
+      <span class="tot">After fees</span><span class="r tot">${fmtUsd(c.net)}</span><span class="r tot">${fmtPct(c.cap ? c.net / c.cap : null, 2)}</span><span class="r tot">${fmtPct(c.apr)}</span>` : "";
+    const eaten = c.fee_eaten ? ` Fees wiped out the edge on ${c.fee_eaten} more event${c.fee_eaten === 1 ? "" : "s"} (${fmtUsd(c.fee_eaten_gross)} before fees).` : "";
+    $("k-net-sub").textContent = c.opps
+      ? `${c.opps} event${c.opps === 1 ? "" : "s"} · ${fmtUsd(c.cap)} capital, fees included.${eaten}`
+      : "No event has a positive taker edge after fees this scan." + eaten;
+    const lo = s.extremes?.ask_lo, hi = s.extremes?.bid_hi;
+    $("k-lo").textContent = fmtSum(lo?.value);
+    $("k-lo-sub").textContent = lo ? `${lo.title} · ${fmtTime(lo.at)}` : "";
+    $("k-hi").textContent = fmtSum(hi?.value);
+    $("k-hi-sub").textContent = hi ? `${hi.title} · ${fmtTime(hi.at)}` : "";
+  }
+
+  // ---------- SVG charts ----------
+  const NS = "http://www.w3.org/2000/svg";
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+    return 10 * p;
+  }
+  function svgEl(tag, attrs, parent) {
+    const el = document.createElementNS(NS, tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(el);
+    return el;
+  }
+  function frame(container, height) {
+    const w = Math.max(280, container.clientWidth || 600);
+    container.innerHTML = "";
+    const svg = svgEl("svg", { viewBox: `0 0 ${w} ${height}`, role: "img" }, container);
+    return { svg, w, h: height };
+  }
+
+  function lineChart(container, points, series, opts = {}) {
+    if (!points || points.length === 0) {
+      container.innerHTML = '<div class="empty">The trend fills in after the first scans arrive.</div>';
+      return;
+    }
+    const { svg, w, h } = frame(container, 220);
+    const m = { l: 44, r: opts.right ? 40 : 12, t: 10, b: 26 };
+    const iw = w - m.l - m.r, ih = h - m.t - m.b;
+    const ts = points.map((p) => new Date(p.t).getTime());
+    const t0 = ts[0], t1 = ts.length > 1 ? ts[ts.length - 1] : t0 + 1;
+    const x = (t) => m.l + ((t - t0) / (t1 - t0)) * iw;
+    const leftMax = niceMax(Math.max(1, ...series.filter((s) => !s.right).flatMap((s) => points.map((p) => p[s.key] ?? 0))));
+    const rightMax = niceMax(Math.max(1, ...series.filter((s) => s.right).flatMap((s) => points.map((p) => p[s.key] ?? 0))));
+    const yL = (v) => m.t + ih - (v / leftMax) * ih;
+    const yR = (v) => m.t + ih - (v / rightMax) * ih;
+    for (let i = 0; i <= 4; i++) {
+      const v = (leftMax * i) / 4, yy = yL(v);
+      svgEl("line", { x1: m.l, x2: w - m.r, y1: yy, y2: yy, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+      svgEl("text", { x: m.l - 6, y: yy + 3.5, "text-anchor": "end" }, svg).textContent = opts.leftFmt ? opts.leftFmt(v) : v;
+      if (opts.right) svgEl("text", { x: w - m.r + 6, y: yy + 3.5 }, svg).textContent = Math.round((rightMax * i) / 4);
+    }
+    const nT = Math.min(5, points.length);
+    for (let i = 0; i < nT; i++) {
+      const t = nT === 1 ? t0 : t0 + ((t1 - t0) * i) / (nT - 1);
+      const anchor = i === 0 ? "start" : i === nT - 1 ? "end" : "middle";
+      svgEl("text", { x: x(t), y: h - 6, "text-anchor": anchor }, svg).textContent = fmtAxis(t, t1 - t0);
+    }
+    const px = (i) => (points.length === 1 ? m.l + iw / 2 : x(ts[i]));
+    if (opts.band) {
+      // Shade the gap between two series (the fees between gross and net).
+      const [hiK, loK, color] = opts.band;
+      const idx = points.map((p, i) => i).filter((i) => points[i][hiK] != null && points[i][loK] != null);
+      if (idx.length) {
+        const top = idx.map((i) => [px(i), yL(points[i][hiK])]);
+        const bot = idx.map((i) => [px(i), yL(points[i][loK])]).reverse();
+        if (idx.length === 1) { top.unshift([top[0][0] - 4, top[0][1]]); top.push([top[top.length - 1][0] + 4, top[0][1]]); bot.unshift([bot[0][0] + 4, bot[0][1]]); bot.push([bot[bot.length - 1][0] - 4, bot[0][1]]); }
+        const d = top.concat(bot).map((c, i) => (i ? "L" : "M") + c[0].toFixed(1) + "," + c[1].toFixed(1)).join("") + "Z";
+        svgEl("path", { d, fill: color, opacity: 0.3 }, svg);
+      }
+    }
+    for (const s of series) {
+      const y = s.right ? yR : yL;
+      const coords = points.map((p, i) => (p[s.key] == null ? null : [px(i), y(p[s.key])])).filter(Boolean);
+      if (!coords.length) continue;
+      const d = coords.map((c, i) => (i ? "L" : "M") + c[0].toFixed(1) + "," + c[1].toFixed(1)).join("");
+      if (s.area) {
+        svgEl("path", { d: d + `L${coords[coords.length - 1][0].toFixed(1)},${m.t + ih}L${coords[0][0].toFixed(1)},${m.t + ih}Z`, fill: s.color, opacity: 0.14 }, svg);
+      }
+      svgEl("path", { d, fill: "none", stroke: s.color, "stroke-width": s.thin ? 1.25 : 2, "stroke-dasharray": s.dash || "none", "stroke-linejoin": "round" }, svg);
+      const last = coords[coords.length - 1];
+      svgEl("circle", { cx: last[0], cy: last[1], r: 3.5, fill: s.color }, svg);
+    }
+  }
+
+  function histChart(container, hist) {
+    if (!hist) {
+      container.innerHTML = '<div class="empty">The distribution appears after the first scan.</div>';
+      return;
+    }
+    const { svg, w, h } = frame(container, 200);
+    const m = { l: 40, r: 12, t: 10, b: 26 };
+    const iw = w - m.l - m.r, ih = h - m.t - m.b;
+    const n = hist.ask.length; // [below, ...bins, above]
+    const maxV = niceMax(Math.max(1, ...hist.ask, ...hist.bid));
+    const bw = iw / n;
+    const y = (v) => m.t + ih - (v / maxV) * ih;
+    for (let i = 0; i <= 4; i++) {
+      const v = (maxV * i) / 4;
+      svgEl("line", { x1: m.l, x2: w - m.r, y1: y(v), y2: y(v), stroke: "var(--grid)" }, svg);
+      svgEl("text", { x: m.l - 6, y: y(v) + 3.5, "text-anchor": "end" }, svg).textContent = Math.round(v);
+    }
+    const fair = 1 + Math.round((1 - hist.lo) / hist.step);
+    svgEl("rect", { x: m.l + fair * bw, y: m.t, width: 1.5, height: ih, fill: "var(--ink)", opacity: 0.55 }, svg);
+    for (let i = 0; i < n; i++) {
+      const x0 = m.l + i * bw;
+      const inner = Math.max(1, bw / 2 - 1);
+      if (hist.ask[i]) svgEl("rect", { x: x0 + 0.5, y: y(hist.ask[i]), width: inner, height: m.t + ih - y(hist.ask[i]), fill: "var(--under)" }, svg).appendChild(title(`Σask ${binLabel(hist, i)}: ${hist.ask[i]} events`));
+      if (hist.bid[i]) svgEl("rect", { x: x0 + bw / 2, y: y(hist.bid[i]), width: inner, height: m.t + ih - y(hist.bid[i]), fill: "var(--over)" }, svg).appendChild(title(`Σbid ${binLabel(hist, i)}: ${hist.bid[i]} events`));
+    }
+    const labels = [[0, "< " + hist.lo.toFixed(2)], [fair, "1.00"], [n - 1, "≥ " + hist.hi.toFixed(2)]];
+    const mid1 = 1 + Math.round((0.9 - hist.lo) / hist.step), mid2 = 1 + Math.round((1.1 - hist.lo) / hist.step);
+    if (w > 480) labels.push([mid1, "0.90"], [mid2, "1.10"]);
+    for (const [i, lab] of labels) {
+      const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
+      const xx = i === 0 ? m.l : i === n - 1 ? w - m.r : m.l + i * bw;
+      svgEl("text", { x: xx, y: h - 6, "text-anchor": anchor }, svg).textContent = lab;
+    }
+  }
+  function binLabel(hist, i) {
+    const n = hist.ask.length;
+    if (i === 0) return "below " + hist.lo.toFixed(2);
+    if (i === n - 1) return hist.hi.toFixed(2) + " and above";
+    const a = hist.lo + (i - 1) * hist.step;
+    return a.toFixed(2) + "–" + (a + hist.step).toFixed(2);
+  }
+  function title(text) { const t = document.createElementNS(NS, "title"); t.textContent = text; return t; }
+
+  function renderCharts() {
+    const pts = state.history?.points || [];
+    lineChart($("c-counts"), pts, [
+      { key: "under_exh", color: "var(--under)" },
+      { key: "over_exh", color: "var(--over)" },
+    ]);
+    lineChart($("c-net"), pts, [
+      { key: "gross", color: "var(--ink)", thin: true, dash: "4 3" },
+      { key: "net", color: "var(--good)" },
+    ], { band: ["gross", "net", "var(--bad)"], leftFmt: (v) => "$" + (v >= 100 ? Math.round(v) : v.toFixed(v < 10 ? 1 : 0)) });
+    histChart($("c-hist"), state.summary?.hist);
+  }
+
+  // ---------- table ----------
+  const COLS = [
+    { key: "title", label: "Event", val: (e) => e.title || e.ticker },
+    { key: "n", label: "Legs", val: (e) => e.n },
+    { key: "obs", label: "Scans", val: (e) => e.obs },
+    { key: "freq_u", label: "Under freq", val: (e) => e.under / e.obs },
+    { key: "freq_o", label: "Over freq", val: (e) => e.over / e.obs },
+    { key: "last_ask", label: "Σask now", val: (e) => e.last_ask ?? Infinity },
+    { key: "last_bid", label: "Σbid now", val: (e) => e.last_bid ?? -Infinity },
+    { key: "gross", label: "Edge before fees", val: (e) => e.gross ?? -Infinity },
+    { key: "fees", label: "Kalshi fees", val: (e) => e.fees ?? -Infinity },
+    { key: "net", label: "Edge after fees", val: (e) => e.net ?? -Infinity },
+    { key: "roi", label: "Net ROI", val: (e) => e.roi ?? -Infinity },
+    { key: "apr", label: "Net APR", val: (e) => e.apr ?? -Infinity },
+    { key: "days", label: "Days left", val: (e) => e.days ?? Infinity },
+  ];
+  const freqVal = (e) => (e.under + e.over) / e.obs;
+
+  function renderHead() {
+    $("thead").innerHTML = COLS.map((c) => {
+      const s = state.sort.key === c.key ? (state.sort.dir > 0 ? "ascending" : "descending") : "none";
+      return `<th scope="col" data-key="${c.key}" aria-sort="${s}" tabindex="0">${c.label}</th>`;
+    }).join("");
+  }
+
+  function renderTable() {
+    const s = state.summary;
+    const body = $("tbody");
+    if (!s) {
+      body.innerHTML = `<tr><td colspan="${COLS.length}"><div class="empty">Events appear here after the first scan is pushed. The scheduled task <span class="num">kalshi-sum-monitor</span> runs a scan every 15 minutes.</div></td></tr>`;
+      $("tcount").textContent = "";
+      return;
+    }
+    const q = $("q").value.trim().toLowerCase();
+    const view = $("view").value;
+    const showNon = $("nonexh").checked;
+    let rows = s.events.filter((e) => {
+      if (!showNon && e.exh === false) return false;
+      if (q && !(e.title || "").toLowerCase().includes(q) && !e.ticker.toLowerCase().includes(q)) return false;
+      if (view === "ever") return e.under + e.over > 0;
+      if (view === "under") return e.live && e.last_ask != null && e.last_ask < 1;
+      if (view === "over") return e.live && e.last_bid != null && e.last_bid > 1;
+      if (view === "edge") return e.live && e.net != null && e.net > 0;
+      return true;
+    });
+    const col = COLS.find((c) => c.key === state.sort.key);
+    const val = col ? col.val : freqVal;
+    rows.sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (typeof va === "string") return state.sort.dir * va.localeCompare(vb);
+      return state.sort.dir * ((va > vb) - (va < vb)) || freqVal(b) - freqVal(a);
+    });
+    $("tcount").textContent = `${rows.length} of ${s.events.length} pushed events (${fmtInt(s.tracked)} tracked)`;
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="${COLS.length}"><div class="empty">No events match this filter right now.</div></td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map((e) => {
+      const fu = e.under / e.obs, fo = e.over / e.obs;
+      const askCls = e.last_ask != null && e.last_ask < 1 ? "cell-under" : "";
+      const bidCls = e.last_bid != null && e.last_bid > 1 ? "cell-over" : "";
+      const netCls = e.net != null && e.net > 0 ? "pos" : "neg";
+      const chips = [
+        !e.live ? '<span class="chip">closed or not seen</span>' : "",
+        e.exh === false ? '<span class="chip warn">likely non-exhaustive</span>' : "",
+        /depth_only/.test(e.flags || "") ? '<span class="chip">thin book</span>' : "",
+      ].join("");
+      return `<tr>
+        <td><div class="t">${esc(e.title)}${chips}</div><div class="tk">${esc(e.ticker)}${e.category ? " · " + esc(e.category) : ""}</div></td>
+        <td class="num">${e.n}</td>
+        <td class="num">${e.obs}</td>
+        <td><span class="freq"><span class="bar u"><b style="width:${(fu * 100).toFixed(1)}%"></b></span><span class="num">${fmtPct(fu, 0)}</span></span></td>
+        <td><span class="freq"><span class="bar o"><b style="width:${(fo * 100).toFixed(1)}%"></b></span><span class="num">${fmtPct(fo, 0)}</span></span></td>
+        <td class="num"><span class="${askCls}">${fmtSum(e.last_ask)}</span><span class="range">${fmtSum(e.ask_lo)} – ${fmtSum(e.ask_hi)}</span></td>
+        <td class="num"><span class="${bidCls}">${fmtSum(e.last_bid)}</span><span class="range">${fmtSum(e.bid_lo)} – ${fmtSum(e.bid_hi)}</span></td>
+        <td class="num">${fmtUsd(e.gross)}<span class="range">${e.best ? (e.best === "taker_long" ? "buy YES" : "buy NO") + " on every leg" : ""}</span></td>
+        <td class="num fee-cell">${e.fees == null ? "—" : "−" + fmtUsd(e.fees)}</td>
+        <td class="num"><span class="${netCls}">${fmtUsd(e.net)}</span></td>
+        <td class="num">${fmtPct(e.roi, 2)}</td>
+        <td class="num">${fmtPct(e.apr)}</td>
+        <td class="num">${e.days == null ? "—" : e.days < 1 ? (e.days * 24).toFixed(1) + " h" : e.days.toFixed(1)}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderAll() {
+    renderStatus();
+    renderKpis();
+    renderCharts();
+    renderHead();
+    renderTable();
+  }
+
+  // ---------- controls ----------
+  $("thead").addEventListener("click", (ev) => {
+    const th = ev.target.closest("th");
+    if (!th) return;
+    const key = th.dataset.key;
+    state.sort = state.sort.key === key ? { key, dir: -state.sort.dir } : { key, dir: key === "title" || key === "last_ask" || key === "days" ? 1 : -1 };
+    renderHead();
+    renderTable();
+  });
+  $("thead").addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.target.click(); } });
+  for (const id of ["q", "view", "nonexh"]) $(id).addEventListener("input", renderTable);
+  try {
+    const saved = JSON.parse(localStorage.getItem("ksm-prefs") || "{}");
+    if (saved.view) $("view").value = saved.view;
+    if (saved.nonexh) $("nonexh").checked = true;
+  } catch {}
+  for (const id of ["view", "nonexh"]) $(id).addEventListener("change", () => {
+    try { localStorage.setItem("ksm-prefs", JSON.stringify({ view: $("view").value, nonexh: $("nonexh").checked })); } catch {}
+  });
+  let rt;
+  new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(renderCharts, 120); }).observe(document.querySelector(".charts"));
+  setInterval(renderStatus, 30000);
+  renderAll();
+
+  // ---------- data ----------
+  (async () => {
+    const db = window.claude?.use ? await window.claude.use("db") : null;
+    if (!db) {
+      $("pill").textContent = "Offline";
+      $("scanmeta").textContent = "Sign in to claude.ai to see the scan data.";
+      return;
+    }
+    $("pill").textContent = "Waiting for data";
+    const onErr = () => { $("pill").className = "pill stale"; $("pill").textContent = "Disconnected"; };
+    db.doc("dash/summary").onSnapshot((snap) => {
+      state.summary = snap.exists ? snap.data() : null;
+      renderStatus(); renderKpis(); renderHead(); renderTable(); histChart($("c-hist"), state.summary?.hist);
+    }, onErr);
+    db.doc("dash/history").onSnapshot((snap) => {
+      state.history = snap.exists ? snap.data() : null;
+      renderCharts();
+    }, onErr);
+  })();
+})();
+</script>
