@@ -164,6 +164,7 @@ def point(rows: pd.DataFrame) -> dict:
 # keeps its slot by sorted name, so filtering never repaints the survivors.
 SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 SURFACE, INK, MUTED, GRID = "#fcfcfb", "#52514e", "#898781", "#e1e0d9"
+MARKERS_UP_TO = 60  # points per series; above this a series is a line with one end marker
 
 
 def plot(s: pd.DataFrame, all_strategies: list[str], title: str) -> str:
@@ -176,12 +177,13 @@ def plot(s: pd.DataFrame, all_strategies: list[str], title: str) -> str:
     color = {name: SLOTS[i] for i, name in enumerate(sorted(all_strategies))}
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
                         subplot_titles=("P&L, dollars", "Return on committed capital"))
+    marker = dict(size=8, line=dict(color=SURFACE, width=2))
     for name, rows in s.groupby("strategy", sort=True):
         custom = rows[["capital", "cash", "value", "open", "run_id"]].to_numpy()
-        common = dict(name=name, legendgroup=name, mode="lines+markers",
+        dense = len(rows) > MARKERS_UP_TO
+        common = dict(name=name, legendgroup=name, mode="lines" if dense else "lines+markers",
                       line=dict(color=color[name], width=2, shape="linear"),
-                      marker=dict(size=8, color=color[name], line=dict(color=SURFACE, width=2)),
-                      customdata=custom)
+                      marker=dict(color=color[name], **marker), customdata=custom)
         fig.add_trace(go.Scatter(x=rows["ts"], y=rows["pnl"],
                                  hovertemplate="P&L $%{y:,.2f}<br>capital $%{customdata[0]:,.2f}"
                                  "<br>cash $%{customdata[1]:,.2f}<br>value $%{customdata[2]:,.2f}"
@@ -190,6 +192,12 @@ def plot(s: pd.DataFrame, all_strategies: list[str], title: str) -> str:
         fig.add_trace(go.Scatter(x=rows["ts"], y=rows["return"], showlegend=False,
                                  hovertemplate="return %{y:.1%}<extra>%{fullData.name}</extra>", **common),
                       row=2, col=1)
+        if dense:  # one end marker so the latest point still reads
+            last = rows.iloc[-1]
+            for row, y in ((1, last["pnl"]), (2, last["return"])):
+                fig.add_trace(go.Scatter(x=[last["ts"]], y=[y], mode="markers", showlegend=False,
+                                         legendgroup=name, hoverinfo="skip",
+                                         marker=dict(color=color[name], **marker)), row=row, col=1)
     axis = dict(showgrid=True, gridcolor=GRID, gridwidth=1, zeroline=True, zerolinecolor=GRID,
                 zerolinewidth=1, linecolor=GRID, tickfont=dict(color=MUTED))
     fig.update_xaxes(**axis)
