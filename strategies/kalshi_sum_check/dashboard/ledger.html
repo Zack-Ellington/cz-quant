@@ -250,6 +250,7 @@ thead th { background: var(--panel); font-weight: 500; color: var(--muted); font
     $("k-trades-sub").textContent = `${t.open} open · ${t.settled} settled${t.settled ? ` · ${t.wins} paid as expected` : ""}`;
     $("k-dep").textContent = usd(t.deployed);
     $("k-dep-sub").textContent = bank ? `${pct(t.deployed / bank, 0)} of the ${usd(bank)} paper bankroll · cash ${usd(hb?.cash)}` : "";
+    if (hb && hb.reserve_target != null) $("k-dep-sub").textContent += ` · priority ${usd(hb.priority_exposure)} / general ${usd(hb.general_exposure)} · reserve cash ${usd(hb.reserve_free)} held of ${usd(hb.reserve_target)}`;
     $("k-exp").textContent = usd(t.expected_open);
     $("k-real").textContent = usd(t.realized);
     $("k-real").className = "value " + (t.realized > 0 ? "good" : t.realized < 0 ? "bad" : "");
@@ -272,7 +273,7 @@ thead th { background: var(--panel); font-weight: 500; color: var(--muted); font
 
     const legs = (tr) => `<div class="legs">${tr.legs.map((l) => `${esc(l.outcome || l.ticker)} ${l.contract} @ ${l.vwap.toFixed(4)}`).join(" · ")}</div>`;
     $("open").innerHTML = S.open_trades.length ? S.open_trades.map((tr) => `<tr>
-      <td><div class="t">${esc(tr.title)}<span class="chip">${esc(tr.cls)}</span></div><div class="tk">${esc(tr.event)}</div>${legs(tr)}</td>
+      <td><div class="t">${esc(tr.title)}<span class="chip">${esc(tr.cls)}</span>${tr.pool ? `<span class="chip">${tr.pool === "priority" ? "priority (reserve)" : "general"}</span>` : ""}</div><div class="tk">${esc(tr.event)}</div>${legs(tr)}</td>
       <td>${sideLabel(tr.side)}</td><td class="num">${int(tr.sets)}</td><td class="num">${usd(tr.capital)}</td>
       <td class="num">${usd(tr.gross)}</td><td class="num bad">−${usd(tr.fees)}</td><td class="num good">${usd(tr.net)}</td>
       <td class="num">${pct(tr.apr)}</td><td class="num">${short(tr.settle_eta)}<div class="tk">${dur((new Date(tr.settle_eta) - Date.now()) / 864e5)}</div></td></tr>`).join("")
@@ -296,7 +297,7 @@ thead th { background: var(--panel); font-weight: 500; color: var(--muted); font
       ["Evaluations", int(hb?.counters?.evaluations)], ["Events with an opportunity", int(t.opp_events)]];
     $("feedinfo").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 
-    const names = { recheck_failed: "Gone on re-check", cooldown: "Cooling down after a trade", event_limit: "Event capital cap", total_limit: "Total capital cap", no_cash: "Out of cash", max_open_events: "Max open events" };
+    const names = { reserve_held: "Held for the fast-trade reserve", recheck_failed: "Gone on re-check", cooldown: "Cooling down after a trade", event_limit: "Event capital cap", total_limit: "Total capital cap", no_cash: "Out of cash", max_open_events: "Max open events" };
     const maxR = Math.max(1, ...S.rejects.map(([, n]) => n));
     $("rejects").innerHTML = S.rejects.length ? S.rejects.map(([r, n]) => `<div class="row"><span>${esc(names[r] || r)}</span><span class="num">${int(n)}</span><span class="track"><b style="width:${(n / maxR * 100).toFixed(1)}%"></b></span></div>`).join("")
       : '<div class="empty">No rejections yet.</div>';

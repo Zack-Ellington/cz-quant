@@ -20,6 +20,9 @@ Constraints on every trade
         net > capital * ((1 + rf) ** (days / 365) - 1)
     i.e. compounded APR to the expected settlement date > rf (default 5%)
   * per-event and total capital caps, max open events, cash on hand, a per-event cooldown
+  * reserve (R2): --reserve-frac of equity is kept for priority trades, those settling
+    within --reserve-max-days with APR >= --reserve-min-apr. Other trades only use
+    cash beyond what the reserve still needs; nothing is sold to refill it
   * all legs fill at the re-checked prices, or nothing does
   * kill switch: a file named KILL in runs/kalshi_sum_check/ws/ halts new trades, and so
     does any settled trade that loses money (it would mean an event wasn't exhaustive)
@@ -84,6 +87,12 @@ class Config:
     refill_seconds: float = 300.0
     # UNKNOWN candidate lists (elections, nominations) trade only if listed in approvals.json.
     require_candidate_approval: bool = True
+    # R2 reserve: this share of equity is kept for priority trades (settling within
+    # reserve_max_days AND at or above reserve_min_apr). General trades can only use
+    # cash beyond what the reserve still needs; priority trades can use any cash.
+    reserve_frac: float = 0.30
+    reserve_max_days: float = 7.0
+    reserve_min_apr: float = 1.00
     duration_minutes: float | None = None
 
 
@@ -116,6 +125,20 @@ def load_approvals(path: str = APPROVALS) -> dict:
         return {"events": set(d.get("events") or []), "series": set(d.get("series") or [])}
     except FileNotFoundError:
         return {"events": set(), "series": set()}
+
+
+def is_priority(days: float, apr: float, cfg) -> bool:
+    """R2: may this trade draw on the reserve?"""
+    return days <= cfg.reserve_max_days and apr >= cfg.reserve_min_apr
+
+
+def reserve_need(equity: float, priority_exposure: float, cfg) -> float:
+    """Cash general trades must leave untouched: the reserve minus what priority trades already use.
+
+    The reserve isn't rebalanced. Priority trades may spend it down; it refills as they
+    settle, because settled cash tops up the reserve before general trades can use it.
+    """
+    return max(0.0, cfg.reserve_frac * equity - priority_exposure)
 
 
 def rebuild_consumed(store, positions: dict):
@@ -353,6 +376,20 @@ class Engine:
     def exposure(self, event=None):
         return sum(p["capital"] for p in self.positions.values() if event is None or p["event"] == event)
 
+    def pool(self, p) -> str:
+        if p.get("pool"):
+            return p["pool"]
+        return "priority" if is_priority(p.get("days", 1e9), p.get("apr", 0), self.cfg) else "general"
+
+    def priority_exposure(self):
+        return sum(p["capital"] for p in self.positions.values() if self.pool(p) == "priority")
+
+    def equity(self):
+        return self.cfg.bankroll + self.realized
+
+    def reserved_cash(self):
+        return min(self.cash, reserve_need(self.equity(), self.priority_exposure(), self.cfg))
+
     def open_events(self):
         return {p["event"] for p in self.positions.values()}
 
@@ -436,11 +473,14 @@ class Engine:
 
     # -- evaluation and allocation ---------------------------------------------
 
-    def limits(self, event):
+    def limits(self, event, priority=True):
         c = self.cfg
-        return min(self.cash,
-                   c.bankroll * c.max_total_frac - self.exposure(),
-                   c.bankroll * c.max_event_frac - self.exposure(event))
+        cap = min(self.cash,
+                  c.bankroll * c.max_total_frac - self.exposure(),
+                  c.bankroll * c.max_event_frac - self.exposure(event))
+        if not priority:
+            cap = min(cap, self.cash - self.reserved_cash())
+        return cap
 
     def evaluate(self, event, max_capital=None) -> tuple[Quote | None, str]:
         u = self.universe.get(event)
@@ -456,10 +496,20 @@ class Engine:
             if mid < 1 - self.cfg.unknown_mid_gap:
                 return None, "likely_non_exhaustive"
         days = max((u["settle_ts"] - time.time()) / 86400, MIN_DAYS)
-        cap = self.limits(event) if max_capital is None else max_capital
         self.counters["evaluations"] += 1
-        return best_quote(event, u["tickers"], books, u["fee_type"], u["fee_mult"], days,
-                          self.cfg.risk_free, self.cfg.max_sets, max(cap, 0.0), self.cfg.min_net)
+
+        def run(cap):
+            return best_quote(event, u["tickers"], books, u["fee_type"], u["fee_mult"], days,
+                              self.cfg.risk_free, self.cfg.max_sets, max(cap, 0.0), self.cfg.min_net)
+
+        if max_capital is not None:  # opportunity scan: same cap for everyone
+            return run(max_capital)
+        q, why = run(self.limits(event, priority=days <= self.cfg.reserve_max_days))
+        if q is None or is_priority(q.days, q.apr, self.cfg):
+            return q, why
+        # Not a priority trade: it may only use cash outside the reserve.
+        q2, why2 = run(self.limits(event, priority=False))
+        return (q2, why2) if q2 else (None, "reserve_held")
 
     async def allocate_loop(self):
         while True:
@@ -501,9 +551,13 @@ class Engine:
             return "cooldown"
         if event not in self.open_events() and len(self.open_events()) >= c.max_open_events:
             return "max_open_events"
-        if self.limits(event) < 1.0:
+        u = self.universe.get(event) or {}
+        could_be_priority = (u.get("settle_ts", 0) - time.time()) / 86400 <= c.reserve_max_days
+        if self.limits(event, priority=could_be_priority) < 1.0:
             if self.cash < 1.0:
                 return "no_cash"
+            if not could_be_priority and self.limits(event, priority=True) >= 1.0:
+                return "reserve_held"
             if self.exposure() >= c.bankroll * c.max_total_frac - 1.0:
                 return "total_limit"
             return "event_limit"
@@ -538,6 +592,8 @@ class Engine:
             side=r.side, sets=r.sets, legs=r.legs, cost=r.cost, fees=r.fees, capital=r.capital, payout=r.payout,
             net=r.net, gross=r.gross, apr=r.apr, hurdle=r.hurdle, excess=r.excess, days=r.days,
             settle_eta=datetime.fromtimestamp(u["settle_ts"], timezone.utc).isoformat(),
+            pool="priority" if is_priority(r.days, r.apr, self.cfg) else "general",
+            reserve_before=round(self.reserved_cash(), 2),
             decided_apr=q.apr, latency_ms=round((time.monotonic() - decided) * 1000), feed=self.feed.mode)
         self.positions[trade_id] = rec
         self.cash -= r.capital
@@ -602,6 +658,10 @@ class Engine:
             ready = sum(1 for t in self.ticker_event if self.store.age(t) <= self.cfg.stale_seconds)
             self.ledger.write("heartbeat", cash=round(self.cash, 2), exposure=round(self.exposure(), 2),
                               realized=round(self.realized, 2), open_trades=len(self.positions),
+                              priority_exposure=round(self.priority_exposure(), 2),
+                              general_exposure=round(self.exposure() - self.priority_exposure(), 2),
+                              reserve_target=round(self.cfg.reserve_frac * self.equity(), 2),
+                              reserve_free=round(self.reserved_cash(), 2),
                               open_events=len(self.open_events()), universe=len(self.universe),
                               markets=len(self.ticker_event), books_fresh=ready, msgs_per_s=round(rate, 1),
                               opps_now=len(self.opps), best_apr_now=best.apr if best else None,
@@ -659,6 +719,12 @@ def main(argv=None):
                    help="seconds a filled level must be gone before its liquidity counts as new (300)")
     p.add_argument("--allow-unapproved-candidates", action="store_true",
                    help="trade UNKNOWN candidate lists without listing them in approvals.json")
+    p.add_argument("--reserve-frac", type=float, default=d.reserve_frac,
+                   help="share of equity held for priority trades (0.30)")
+    p.add_argument("--reserve-max-days", type=float, default=d.reserve_max_days,
+                   help="priority trades settle within this many days (7)")
+    p.add_argument("--reserve-min-apr", type=float, default=d.reserve_min_apr,
+                   help="priority trades have at least this APR (1.00 = 100%%)")
     p.add_argument("--max-days", type=float, default=None, help="skip events settling later than this")
     p.add_argument("--stale-seconds", type=float, default=d.stale_seconds)
     p.add_argument("--discover", type=float, default=d.discover_minutes, help="minutes between universe refreshes (10)")
@@ -668,7 +734,8 @@ def main(argv=None):
     cfg = Config(feed=a.feed, bankroll=a.bankroll, max_event_frac=a.max_event_frac, max_total_frac=a.max_total_frac,
                  max_open_events=a.max_open_events, max_sets=a.max_sets, risk_free=a.risk_free, min_net=a.min_net,
                  latency=a.latency, cooldown=a.cooldown, band=a.band, max_days=a.max_days, unknown_mid_gap=a.unknown_mid_gap,
-                 refill_seconds=a.refill_seconds, require_candidate_approval=not a.allow_unapproved_candidates,
+                 refill_seconds=a.refill_seconds, reserve_frac=a.reserve_frac,
+                 reserve_max_days=a.reserve_max_days, reserve_min_apr=a.reserve_min_apr, require_candidate_approval=not a.allow_unapproved_candidates,
                  stale_seconds=a.stale_seconds, discover_minutes=a.discover, settle_minutes=a.settle,
                  duration_minutes=a.duration)
     eng = Engine(cfg)

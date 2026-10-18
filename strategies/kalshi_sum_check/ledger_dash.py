@@ -150,7 +150,7 @@ def build_state(records: list[dict]) -> dict:
     def slim(t):
         keys = ("trade_id", "ts", "event", "title", "category", "cls", "side", "sets", "cost", "fees", "capital",
                 "payout", "net", "gross", "apr", "days", "settle_eta", "latency_ms", "decided_apr", "feed",
-                "settled", "pnl", "settled_at", "verified")
+                "settled", "pnl", "settled_at", "verified", "pool")
         out = {k: t.get(k) for k in keys}
         out["legs"] = [{"ticker": l["ticker"], "outcome": l.get("outcome"), "contract": l["contract"],
                         "vwap": l["vwap"], "fee": l["fee"]} for l in t.get("legs", [])]

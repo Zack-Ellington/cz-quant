@@ -125,6 +125,13 @@ instead of milliseconds.
   level's liquidity only counts as new after the level has been gone for
   `--refill-seconds` (300), so neither a restart nor a level that flickers out of
   one snapshot lets the same resting orders be filled twice.
+- **Reserve (R2):** `--reserve-frac` (30%) of equity is kept for priority
+  trades: those settling within `--reserve-max-days` (7) with APR of at least
+  `--reserve-min-apr` (100%). Priority trades can use any cash. General trades can
+  only use cash beyond what the reserve still needs (the 30% minus what priority
+  trades already hold). Nothing is sold to refill the reserve: priority trades
+  settle quickly, and settled cash tops up the reserve before general trades can
+  use it. Rejections show as `reserve_held`; trades carry `pool`.
 - **Approvals:** UNKNOWN candidate lists (elections, nominations, mayors) trade
   only if their event or series ticker is in `approvals.json`; add one only after
   reading its rules. `--allow-unapproved-candidates` turns this off. Held positions
