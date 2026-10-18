@@ -42,13 +42,14 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-from classifier import EXHAUSTIVE, UNKNOWN, classify
+from classifier import CANDIDATE_REASON, EXHAUSTIVE, UNKNOWN, classify
 from feeds import KalshiWSFeed, OrderBookStore, RestPollFeed
 from kalshi_client import KalshiClient, load_credentials
 from monitor import REPO_ROOT
 from pricing import taker_fee
 
 WS_RUNS = os.path.join(REPO_ROOT, "runs", "kalshi_sum_check", "ws")
+APPROVALS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approvals.json")
 MIN_DAYS = 1 / 24
 APR_CAP = 1e6  # keeps the ledger valid JSON for very short holds
 log = logging.getLogger("paper_ws")
@@ -79,6 +80,10 @@ class Config:
     # pass the market-implied check: if the mids sum below 1 - gap, the market itself
     # prices a real chance that no listed outcome wins. Rules text can't catch everything.
     unknown_mid_gap: float = 0.10
+    # Paper fills stay netted from the book until their level has been gone this long.
+    refill_seconds: float = 300.0
+    # UNKNOWN candidate lists (elections, nominations) trade only if listed in approvals.json.
+    require_candidate_approval: bool = True
     duration_minutes: float | None = None
 
 
@@ -101,6 +106,24 @@ class Ledger:
 
     def close(self):
         self._f.close()
+
+
+def load_approvals(path: str = APPROVALS) -> dict:
+    """{"events": [...], "series": [...]} of candidate-list events you've read and approved."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"events": set(d.get("events") or []), "series": set(d.get("series") or [])}
+    except FileNotFoundError:
+        return {"events": set(), "series": set()}
+
+
+def rebuild_consumed(store, positions: dict):
+    """Re-net every open paper trade's fills from the book (R1: no refills after a restart)."""
+    for p in positions.values():
+        for leg in p.get("legs", []):
+            for price, qty in leg.get("levels", []):
+                store.consume(leg["ticker"], "ask" if p["side"] == "long" else "bid", price, qty)
 
 
 def read_ledgers(root: str = WS_RUNS):
@@ -291,7 +314,8 @@ class Engine:
         self.run_dir = os.path.join(WS_RUNS, self.run_id)
         os.makedirs(self.run_dir, exist_ok=True)
         self.ledger = Ledger(os.path.join(self.run_dir, "ledger.jsonl"), self.run_id)
-        self.store = OrderBookStore(on_update=self._on_book)
+        self.store = OrderBookStore(on_update=self._on_book, refill_seconds=cfg.refill_seconds)
+        self.approvals = load_approvals()
         self.discover_client = KalshiClient(max_rps=5)
         self.settle_client = KalshiClient(max_rps=2)
         self.universe: dict[str, dict] = {}
@@ -306,6 +330,7 @@ class Engine:
         self.counters = {"evaluations": 0, "opportunities": 0, "trades": 0, "rejects": 0}
         self._last_logged: dict[tuple, float] = {}
         self._warned_new_leg: set[str] = set()
+        self._warned_reclass: set[str] = set()
         self.feed = None
         self._resume()
 
@@ -323,6 +348,7 @@ class Engine:
                 self.realized += rec.get("pnl", 0.0)
         self.positions = {k: v for k, v in trades.items() if k not in settled}
         self.cash = self.cfg.bankroll + self.realized - sum(p["capital"] for p in self.positions.values())
+        rebuild_consumed(self.store, self.positions)
 
     def exposure(self, event=None):
         return sum(p["capital"] for p in self.positions.values() if event is None or p["event"] == event)
@@ -363,8 +389,15 @@ class Engine:
             cls, why = classify(ev)
             counts[cls] = counts.get(cls, 0) + 1
             tk = ev["event_ticker"]
+            approved = tk in self.approvals["events"] or ev.get("series_ticker") in self.approvals["series"]
+            needs_approval = cls == UNKNOWN and why == CANDIDATE_REASON and self.cfg.require_candidate_approval
+            eligible = cls in self.cfg.classes and (approved or not needs_approval)
+            if tk in held and not eligible and tk not in self._warned_reclass:
+                self._warned_reclass.add(tk)
+                self.ledger.write("warning", event=tk, kind="held_event_ineligible", cls=cls,
+                                  detail=f"Held position is no longer eligible: {cls} ({why}). It is kept to settlement.")
             if tk not in held:
-                if cls not in self.cfg.classes:
+                if not eligible:
                     continue
                 asks = [float(m["yes_ask_dollars"]) if m.get("yes_ask_dollars") else None for m in legs]
                 bids = [float(m.get("yes_bid_dollars") or 0) for m in legs]
@@ -622,6 +655,10 @@ def main(argv=None):
     p.add_argument("--band", type=float, default=d.band, help="discovery prescreen: top-of-book sums within X of $1 (0.03)")
     p.add_argument("--unknown-mid-gap", type=float, default=d.unknown_mid_gap,
                    help="UNKNOWN events need mid prices summing to >= 1 - X (0.10)")
+    p.add_argument("--refill-seconds", type=float, default=d.refill_seconds,
+                   help="seconds a filled level must be gone before its liquidity counts as new (300)")
+    p.add_argument("--allow-unapproved-candidates", action="store_true",
+                   help="trade UNKNOWN candidate lists without listing them in approvals.json")
     p.add_argument("--max-days", type=float, default=None, help="skip events settling later than this")
     p.add_argument("--stale-seconds", type=float, default=d.stale_seconds)
     p.add_argument("--discover", type=float, default=d.discover_minutes, help="minutes between universe refreshes (10)")
@@ -631,6 +668,7 @@ def main(argv=None):
     cfg = Config(feed=a.feed, bankroll=a.bankroll, max_event_frac=a.max_event_frac, max_total_frac=a.max_total_frac,
                  max_open_events=a.max_open_events, max_sets=a.max_sets, risk_free=a.risk_free, min_net=a.min_net,
                  latency=a.latency, cooldown=a.cooldown, band=a.band, max_days=a.max_days, unknown_mid_gap=a.unknown_mid_gap,
+                 refill_seconds=a.refill_seconds, require_candidate_approval=not a.allow_unapproved_candidates,
                  stale_seconds=a.stale_seconds, discover_minutes=a.discover, settle_minutes=a.settle,
                  duration_minutes=a.duration)
     eng = Engine(cfg)

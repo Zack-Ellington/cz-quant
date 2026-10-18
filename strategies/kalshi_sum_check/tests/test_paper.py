@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from feeds import KalshiWSFeed, OrderBookStore  # noqa: E402
-from paper_ws import best_quote, quote, settle_trade  # noqa: E402
+from paper_ws import best_quote, quote, rebuild_consumed, settle_trade  # noqa: E402
 from pricing import parse_book, round_up_cent  # noqa: E402
 
 
@@ -40,15 +40,30 @@ class FeedTests(unittest.TestCase):
         self.msg(type="orderbook_snapshot", sid=7, seq=1, msg={"market_ticker": "M", "yes": [[40, 10]], "no": []})
         self.assertEqual(self.msg(type="orderbook_delta", sid=7, seq=3, msg={"market_ticker": "M", "price": 40, "delta": 1, "side": "yes"}), 7)
 
-    def test_paper_fills_are_netted_until_the_level_goes(self):
+    def test_paper_fills_survive_a_flickering_level(self):
         self.store.snapshot("M", [(0.40, 10)], [(0.55, 5)])  # YES ask 0.45 x5
         self.store.consume("M", "ask", 0.45, 3)
         self.assertEqual(self.store.book("M").yes_asks, [(0.45, 2.0)])
-        self.store.snapshot("M", [(0.40, 10)], [(0.55, 5)])  # level still there: still netted
+        self.store.snapshot("M", [(0.40, 10)], [(0.54, 5)])  # level briefly gone...
+        self.store.snapshot("M", [(0.40, 10)], [(0.55, 5)])  # ...and back: same liquidity
         self.assertEqual(self.store.book("M").yes_asks, [(0.45, 2.0)])
-        self.store.snapshot("M", [(0.40, 10)], [(0.54, 5)])  # level moved: overlay dropped
-        self.store.snapshot("M", [(0.40, 10)], [(0.55, 5)])
-        self.assertEqual(self.store.book("M").yes_asks, [(0.45, 5.0)])
+
+    def test_paper_fills_expire_after_the_level_is_gone_long_enough(self):
+        store = OrderBookStore(refill_seconds=0)
+        store.snapshot("M", [(0.40, 10)], [(0.55, 5)])
+        store.consume("M", "ask", 0.45, 3)
+        store.snapshot("M", [(0.40, 10)], [(0.54, 5)])  # gone for >= 0 s: forgotten
+        store.snapshot("M", [(0.40, 10)], [(0.55, 5)])
+        self.assertEqual(store.book("M").yes_asks, [(0.45, 5.0)])
+
+    def test_restart_rebuilds_fills_from_open_trades(self):
+        # KXCAELECTION-2614 was bought 30 sets at 0.10 / 0.88 in three runs in a row.
+        trade = {"side": "long", "legs": [{"ticker": "A", "levels": [[0.10, 30]]}, {"ticker": "B", "levels": [[0.88, 30]]}]}
+        store = OrderBookStore()
+        rebuild_consumed(store, {"t1": trade})
+        store.snapshot("A", [], [(0.90, 30)])  # YES ask 0.10 x30
+        store.snapshot("B", [], [(0.12, 30)])  # YES ask 0.88 x30
+        self.assertEqual((store.book("A").yes_asks, store.book("B").yes_asks), ([], []))
 
 
 class QuoteTests(unittest.TestCase):

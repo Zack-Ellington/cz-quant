@@ -121,8 +121,15 @@ instead of milliseconds.
   cooldown.
 - **Fills:** after `--latency` (0.3 s), the trade is re-checked on the newest books.
   Every leg fills at those prices or nothing does. Paper fills are netted from the
-  local books until the real level changes, so the same resting orders can't be
-  filled twice.
+  local books and rebuilt from the ledger's open trades on every start. A filled
+  level's liquidity only counts as new after the level has been gone for
+  `--refill-seconds` (300), so neither a restart nor a level that flickers out of
+  one snapshot lets the same resting orders be filled twice.
+- **Approvals:** UNKNOWN candidate lists (elections, nominations, mayors) trade
+  only if their event or series ticker is in `approvals.json`; add one only after
+  reading its rules. `--allow-unapproved-candidates` turns this off. Held positions
+  that become ineligible are kept to settlement and get a `held_event_ineligible`
+  warning.
 - **Kill switch:** a file named `KILL` in `runs/kalshi_sum_check/ws/` halts new
   trades. So does any settled trade that loses money.
 - **Settlement cross-check:** a trade settles only once every leg is `finalized`
@@ -147,8 +154,11 @@ current as the ledger. No artifact or scheduled task is involved.
 
 1. **Mutually exclusive is not the same as exhaustive.** `classifier.py` sorts each
    event into EXHAUSTIVE (numeric strikes that cover every value, or a catch-all leg
-   such as "Other" or "Tie"), GAP, NOT_EXHAUSTIVE (a tie or no-winner rule),
-   RISKY (party or sworn-in legs, or decades-long events), or UNKNOWN. Only
+   such as "Other", "Tie" or "No team"), GAP, NOT_EXHAUSTIVE (a tie or no-winner
+   rule, including "resolves to $0", or a combat sport with no Draw leg), RISKY
+   (party or sworn-in legs, decades-long events, "first to" markets with no
+   "None" leg, or "Other" with a deadline), or UNKNOWN. Candidate lists are
+   UNKNOWN with the reason "candidate list: trade only if approved". Only
    EXHAUSTIVE events, and UNKNOWN events whose mid prices sum to 0.90 or more,
    count toward the totals. `python reclassify.py` re-scores the monitor's
    history this way.

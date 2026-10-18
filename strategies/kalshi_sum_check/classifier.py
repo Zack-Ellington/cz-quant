@@ -28,18 +28,30 @@ NUMERIC = {"less", "less_or_equal", "between", "greater", "greater_or_equal"}
 # Rules text that makes every leg lose.
 _NO_WINNER = [
     re.compile(r"\btie[ds]?\b[^.]*\bresolves? to no\b", re.I),
+    # NFL / UFC wording: "If the game ends in a tie, the market will resolve to $0."
+    re.compile(r"\b(?:tie[ds]?|draws?|no contest)\b[^.]*\bresolve[sd]? to \$0(?:\.0+)?\b", re.I),
     re.compile(r"\bif (?:no|none of)\b[^.]*\bresolves? to no\b", re.I),
     re.compile(r"\bif no (?:one|candidate|party|team|winner)\b", re.I),
 ]
 # A leg that catches everything not listed.
-_CATCH_ALL = re.compile(r"^(?:any )?(?:other|others|another|field|the field|none|no one|nobody|neither|tie|draw)\b", re.I)
-# Legs that pay on a party or on someone being sworn in: a third party or vacancy loses them all.
+_NO_X = r"no (?:one|team|player|winner|candidate|model|company|country|fighter|driver|club|nominee|score|touchdowns?|goals?)"
+_CATCH_ALL = re.compile(r"^(?:any )?(?:other|others|another|field|the field|none|nobody|neither|tie|draw|" + _NO_X + r")\b", re.I)
 # Catch-alls that also cover "nothing happens"; "Other" alone only covers unlisted names.
-_COVERS_NONE = re.compile(r"^(?:none|no one|nobody|neither|tie|draw)\b", re.I)
+_COVERS_NONE = re.compile(r"^(?:none|nobody|neither|tie|draw|" + _NO_X + r")\b", re.I)
 # A deadline means the event can end with no one qualifying ("first to hit X before Jan 1").
 _DEADLINE = re.compile(r"\b(?:before|by|prior to)\s+(?:the end of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}/|\d{4})", re.I)
+# Legs that pay on a party or on someone being sworn in: a third party or vacancy loses them all.
 _PARTY = re.compile(r"\b(?:representative|member) of the \w+ part(?:y|ies)\b|\bsworn in\b|\bwins the [\w ]*(?:house|senate|chamber)\b", re.I)
 LONG_DATED_YEARS = 5
+# Combat sports can end in a draw or no contest; boxing rules don't always say so.
+_COMBAT = re.compile(r"BOXING|UFC|MMA|PFL|BELLATOR|BKFC|ONEFC", re.I)
+# "First to ..." markets end with no winner if nobody does it.
+_FIRST = re.compile(r"\bfirst (?:\w+ ){0,3}(?:to|that|who) (?:hit|reach|score|win|announce|launch|be|become|cross|pass|top)\b"
+                    r"|\bfirst (?:touchdown|goal|basket|score|scorer|td)\b", re.I)
+# Candidate lists: write-ins, withdrawals and cancelled races can leave every listed name losing.
+_CANDIDATES = re.compile(r"\b(?:wins?|winner of) the [\w ,.'()-]*(?:election|primary|race|runoff|nomination|caucus)\b"
+                         r"|\belected\b|\b(?:mayor|governor|nominee|candidate)\b", re.I)
+CANDIDATE_REASON = "candidate list: trade only if approved"
 
 
 def _num(x):
@@ -100,10 +112,19 @@ def classify(event: dict, now: datetime | None = None) -> tuple[str, str]:
     # A listed "Tie" / "Other" leg wins whenever the named legs don't, so check it
     # before the rules text (which often describes exactly that leg).
     rules = " ".join(f"{m.get('rules_primary') or ''} {m.get('rules_secondary') or ''}" for m in markets[:3])
-    labels = [(m.get("yes_sub_title") or "").strip() for m in markets]
+    # Every market's label, resolved ones included: a "Tie" leg that already settled NO
+    # still means the event had a leg for that outcome.
+    labels = [(m.get("yes_sub_title") or "").strip() for m in event.get("markets") or []]
     catch = [l for l in labels if _CATCH_ALL.match(l)]
+    covers_none = any(_COVERS_NONE.match(l) for l in catch)
+    tickers = f"{event.get('series_ticker') or ''} {event.get('event_ticker') or ''}"
+    if _COMBAT.search(tickers) and not covers_none:
+        return NOT_EXHAUSTIVE, "combat sport with no Draw leg: a draw or no contest loses every leg"
+    title = event.get("title") or ""
+    if (_FIRST.search(title) or _FIRST.search(rules)) and not covers_none:
+        return RISKY, "'first to' market with no 'None' leg: nobody may do it"
     if catch:
-        if not any(_COVERS_NONE.match(l) for l in catch) and _DEADLINE.search(rules):
+        if not covers_none and _DEADLINE.search(rules):
             return RISKY, f"'{catch[0]}' covers unlisted names, but the deadline means no one may qualify"
         return EXHAUSTIVE, f"catch-all leg '{catch[0]}'"
 
@@ -121,4 +142,6 @@ def classify(event: dict, now: datetime | None = None) -> tuple[str, str]:
         if years > LONG_DATED_YEARS:
             return RISKY, f"settles in {years:.0f} years: the event may never happen"
 
+    if _CANDIDATES.search(rules) or _CANDIDATES.search(title):
+        return UNKNOWN, CANDIDATE_REASON
     return UNKNOWN, "no structural signal"

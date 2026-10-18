@@ -44,6 +44,30 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(classify(ev({**r, "yes_sub_title": "Qwen"}, {**r, "yes_sub_title": "Other"}), NOW)[0], RISKY)
         self.assertEqual(classify(ev({**r, "yes_sub_title": "Qwen"}, {**r, "yes_sub_title": "No one"}), NOW)[0], EXHAUSTIVE)
 
+    def test_resolve_to_zero_tie_rule(self):  # KXNFLGAME / KXUFCFIGHT wording
+        nfl = {"strike_type": "structured", "rules_secondary": "If the game ends in a tie, the market will resolve to $0."}
+        self.assertEqual(classify(ev({**nfl, "yes_sub_title": "Cleveland"}, {**nfl, "yes_sub_title": "Baltimore"}), NOW)[0], NOT_EXHAUSTIVE)
+
+    def test_combat_sport_needs_a_draw_leg(self):  # KXBOXING-26DEC11FURYJOSHUA
+        fight = {"series_ticker": "KXBOXING", "event_ticker": "KXBOXING-26DEC11FURYJOSHUA",
+                 "markets": [{"strike_type": "structured", "yes_sub_title": n, "result": ""} for n in ("Tyson Fury", "Anthony Joshua")]}
+        self.assertEqual(classify(fight, NOW)[0], NOT_EXHAUSTIVE)
+        fight["markets"].append({"strike_type": "structured", "yes_sub_title": "Draw", "result": ""})
+        self.assertEqual(classify(fight, NOW)[0], EXHAUSTIVE)
+
+    def test_first_to_needs_a_none_leg(self):
+        e = ev({"strike_type": "custom", "yes_sub_title": "Indiana"}, {"strike_type": "custom", "yes_sub_title": "Ohio St."})
+        e["title"] = "Which team scores the first touchdown?"
+        self.assertEqual(classify(e, NOW)[0], RISKY)
+        e["markets"].append({"strike_type": "custom", "yes_sub_title": "No team", "result": ""})
+        self.assertEqual(classify(e, NOW)[0], EXHAUSTIVE)
+
+    def test_candidate_lists_are_flagged_for_approval(self):  # KXLEXMAYOR-26
+        from classifier import CANDIDATE_REASON
+        e = ev({"strike_type": "custom", "yes_sub_title": "Linda Gorton"}, {"strike_type": "custom", "yes_sub_title": "Raquel Carter"})
+        e["title"] = "Lexington Mayor winner?"
+        self.assertEqual(classify(e, NOW), (UNKNOWN, CANDIDATE_REASON))
+
     def test_catch_all_leg(self):
         e = ev({"strike_type": "custom", "yes_sub_title": "Smith"}, {"strike_type": "custom", "yes_sub_title": "Other"})
         self.assertEqual(classify(e, NOW)[0], EXHAUSTIVE)

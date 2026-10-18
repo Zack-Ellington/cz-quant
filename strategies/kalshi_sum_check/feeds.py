@@ -74,13 +74,18 @@ class OrderBookStore:
 
     A paper fill takes no real liquidity, so without this overlay the engine would
     "fill" the same resting orders over and over. Consumed quantity is subtracted
-    when a book is read and dropped once the real level disappears.
+    when a book is read. It's only forgotten once the real level has been absent for
+    `refill_seconds`: a level that flickers out of one snapshot (or is cancelled and
+    re-posted by the same maker) is still the liquidity that was already taken.
+    The engine rebuilds the overlay from open trades in the ledger on start.
     """
 
-    def __init__(self, on_update=None):
+    def __init__(self, on_update=None, refill_seconds: float = 300.0):
         self.books: dict[str, LocalBook] = defaultdict(LocalBook)
-        self.consumed: dict[str, dict[tuple[str, float], float]] = defaultdict(dict)
+        # ticker -> {(side, price): [qty, gone_since or None]}
+        self.consumed: dict[str, dict[tuple[str, float], list]] = defaultdict(dict)
         self.on_update = on_update  # callback(ticker)
+        self.refill_seconds = refill_seconds
         self.messages = 0
 
     def _changed(self, ticker):
@@ -88,9 +93,15 @@ class OrderBookStore:
         b = self.books[ticker]
         overlay = self.consumed.get(ticker)
         if overlay:
-            for (side, price) in list(overlay):
-                if price not in (b.yes if side == "yes" else b.no):
-                    del overlay[(side, price)]
+            now = time.time()
+            for key, entry in list(overlay.items()):
+                side, price = key
+                if price in (b.yes if side == "yes" else b.no):
+                    entry[1] = None
+                elif entry[1] is None:
+                    entry[1] = now
+                if entry[1] is not None and now - entry[1] >= self.refill_seconds:
+                    del overlay[key]
         if self.on_update:
             self.on_update(ticker)
 
@@ -107,8 +118,8 @@ class OrderBookStore:
         if b is None or not b.updated:
             return None
         overlay = self.consumed.get(ticker) or {}
-        yes = {p: q - overlay.get(("yes", p), 0.0) for p, q in b.yes.items()}
-        no = {p: q - overlay.get(("no", p), 0.0) for p, q in b.no.items()}
+        yes = {p: q - overlay.get(("yes", p), (0.0,))[0] for p, q in b.yes.items()}
+        no = {p: q - overlay.get(("no", p), (0.0,))[0] for p, q in b.no.items()}
         return parse_book({"yes_dollars": [(p, q) for p, q in yes.items() if q > 1e-9],
                            "no_dollars": [(p, q) for p, q in no.items() if q > 1e-9]})
 
@@ -116,7 +127,12 @@ class OrderBookStore:
         """Record a paper fill. side_book is the YES-view side taken: 'ask' or 'bid'.
         A YES ask at p is a NO bid at 1 - p; a YES bid at p is a YES bid."""
         key = ("no", round(1 - price, 6)) if side_book == "ask" else ("yes", round(price, 6))
-        self.consumed[ticker][key] = self.consumed[ticker].get(key, 0.0) + qty
+        entry = self.consumed[ticker].setdefault(key, [0.0, None])
+        entry[0] += qty
+        entry[1] = None
+
+    def consumed_qty(self, ticker) -> float:
+        return sum(e[0] for e in (self.consumed.get(ticker) or {}).values())
 
     def age(self, ticker) -> float:
         b = self.books.get(ticker)
