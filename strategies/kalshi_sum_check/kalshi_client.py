@@ -19,41 +19,50 @@ BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 ORDERBOOK_BATCH = 100  # max tickers per GET /markets/orderbooks call
 
 
+def load_credentials():
+    """(key_id, private_key) from KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH, or (None, None)."""
+    key_id, key_path = os.environ.get("KALSHI_API_KEY_ID"), os.environ.get("KALSHI_PRIVATE_KEY_PATH")
+    if not (key_id and key_path):
+        return None, None
+    from cryptography.hazmat.primitives import serialization
+
+    with open(key_path, "rb") as f:
+        return key_id, serialization.load_pem_private_key(f.read(), password=None)
+
+
+def signed_headers(key_id, private_key, method: str, path: str) -> dict:
+    """Kalshi auth headers: RSA-PSS/SHA-256 over timestamp_ms + METHOD + path (no query)."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    ts = str(int(time.time() * 1000))
+    sig = private_key.sign(
+        (ts + method + path).encode(),
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256(),
+    )
+    return {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+    }
+
+
 class KalshiClient:
     def __init__(self, base_url: str = BASE_URL, max_rps: float = 10.0, retries: int = 5):
         self.base_url = base_url.rstrip("/")
         self.min_interval = 1.0 / max_rps
         self.retries = retries
         self._last = 0.0
-        self._key_id = os.environ.get("KALSHI_API_KEY_ID")
-        self._private_key = None
-        key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
-        if self._key_id and key_path:
-            from cryptography.hazmat.primitives import serialization
-
-            with open(key_path, "rb") as f:
-                self._private_key = serialization.load_pem_private_key(f.read(), password=None)
+        self._key_id, self._private_key = load_credentials()
 
     # -- transport ---------------------------------------------------------
 
     def _auth_headers(self, method: str, path: str) -> dict:
         if not self._private_key:
             return {}
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-
-        ts = str(int(time.time() * 1000))
         sign_path = urllib.parse.urlparse(self.base_url + path).path  # no query string
-        sig = self._private_key.sign(
-            (ts + method + sign_path).encode(),
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-            hashes.SHA256(),
-        )
-        return {
-            "KALSHI-ACCESS-KEY": self._key_id,
-            "KALSHI-ACCESS-TIMESTAMP": ts,
-            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
-        }
+        return signed_headers(self._key_id, self._private_key, method, sign_path)
 
     def get(self, path: str, params=None) -> dict:
         query = urllib.parse.urlencode(params or [], doseq=True)

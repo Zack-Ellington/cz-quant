@@ -85,14 +85,77 @@ also counts events whose edge was positive before fees but wiped out by them.
 All ROI and APR figures are after fees unless labeled otherwise. It's a snapshot, not a running total,
 because the same opportunity usually persists across scans.
 
+## WebSocket paper trader
+
+`paper_ws.py` trades the sum check on paper in real time. **It never sends an
+order.**
+
+```bash
+uv sync                                            # websockets + cryptography
+uv run python paper_ws.py                          # WebSocket if a key is set, else REST polling
+uv run python paper_ws.py --feed rest --duration 1:00
+uv run python ledger_dash.py                       # dashboard at http://localhost:8780
+```
+
+**Feed.** Kalshi's `orderbook_delta` WebSocket rejects connections without an API
+key. Set `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` to a **production** key;
+demo keys only see demo markets. Without a key, `--feed rest` streams the same
+books by polling `GET /markets/orderbooks`, which takes a few seconds per sweep
+instead of milliseconds.
+
+**What it trades.** Every check below must pass:
+- **Eligible events:** open, mutually exclusive, and classed EXHAUSTIVE or UNKNOWN.
+  Unknowns are treated as capable for now.
+- **Discovery:** the universe is refreshed every 10 minutes, keeping events whose
+  top-of-book sums are within `--band` (0.03) of $1, plus every event already held.
+- **Both trades are checked:** buy YES on every leg, or buy NO on every leg. Each is
+  walked through the books with Kalshi's taker fee on every leg, and sized to
+  maximize profit above the hurdle.
+- **Risk-free hurdle:** `net > capital × ((1 + 0.05)^(days/365) − 1)`, where
+  `days` runs to the latest expected settlement of any leg. In other words, the
+  compounded APR to payout must beat 5% (`--risk-free`).
+- **Minimum profit:** at least `--min-net` ($0.10) after fees.
+- **Priority:** candidates are taken highest APR first.
+- **Limits:** per event `--max-event-frac` (20% of bankroll), total
+  `--max-total-frac`, `--max-open-events` (25), cash on hand, and a 30 s per-event
+  cooldown.
+- **Fills:** after `--latency` (0.3 s), the trade is re-checked on the newest books.
+  Every leg fills at those prices or nothing does. Paper fills are netted from the
+  local books until the real level changes, so the same resting orders can't be
+  filled twice.
+- **Kill switch:** a file named `KILL` in `runs/kalshi_sum_check/ws/` halts new
+  trades. So does any settled trade that loses money.
+- **Settlement cross-check:** a trade settles only once every leg is `finalized`
+  on Kalshi. The payout uses Kalshi's `settlement_value_dollars` (a NO contract
+  pays 1 − value) and is compared with what the yes/no results imply. Any
+  disagreement, a missing value, or a market added after the trade that won is
+  written as a `settlement_mismatch` warning, and the settle record carries
+  `verified: false`. Settlement keeps being
+  tracked either way, and the engine warns if Kalshi adds a market to an event
+  that's already held.
+
+**Ledger.** Each run writes `runs/kalshi_sum_check/ws/<UTC>/` with `run.json`,
+`ledger.jsonl` (append-only and fsync'd: run_start, universe, opportunity, trade,
+reject, settle, warning, halt, heartbeat, run_stop) and `run.log`. A new run
+rebuilds open positions and cash from all earlier ledgers.
+
+**Dashboard.** `ledger_dash.py` serves `dashboard/ledger.html` and re-reads the
+ledgers on every request. The page polls every 2 seconds, so it is always as
+current as the ledger. No artifact or scheduled task is involved.
+
 ## Caveats (read before trading anything this flags)
 
-1. **Mutually exclusive is not the same as exhaustive.** The API has no exhaustiveness
-   field. "Which country becomes the 51st state?" is mutually exclusive, but every leg
-   can resolve NO, and then a long "arb" loses everything. Events whose mid prices sum
-   below `1 − 0.10` are flagged `likely_non_exhaustive` and hidden from the console
-   table, though they stay in the CSV. Even unflagged two-party races (Dem vs Rep)
-   lose if a third party wins. Read the rules for each event.
+1. **Mutually exclusive is not the same as exhaustive.** `classifier.py` sorts each
+   event into EXHAUSTIVE (numeric strikes that cover every value, or a catch-all leg
+   such as "Other" or "Tie"), GAP, NOT_EXHAUSTIVE (a tie or no-winner rule),
+   RISKY (party or sworn-in legs, or decades-long events), or UNKNOWN. Only
+   EXHAUSTIVE events, and UNKNOWN events whose mid prices sum to 0.90 or more,
+   count toward the totals. `python reclassify.py` re-scores the monitor's
+   history this way.
+   The API has no exhaustiveness field, so this is inferred, and the
+   rules-text patterns can miss unusual wording. Read the rules before trading.
+   Excluded events are flagged `likely_non_exhaustive`, hidden from the console
+   table, and kept in the CSV.
 2. **Maker numbers assume every leg fills.** They show what quoting inside the spread
    would earn, not a locked-in arb. Partial fills leave you with outright directional
    risk. Rankings (`best_taker`) use taker trades only.
@@ -108,6 +171,11 @@ because the same opportunity usually persists across scans.
 - `sum_check.py`: event analysis and the CLI
 - `pricing.py`: book parsing (NO bids converted to YES asks), book walking, fees, ticks
 - `kalshi_client.py`: stdlib HTTP client with pagination, batching, retry and rate limiting, plus optional signing
+- `classifier.py`: decides whether exactly one outcome must win
+- `reclassify.py`: re-scores the monitor's history by that classification
+- `paper_ws.py`: WebSocket paper trader (engine, sizing, limits, settlement, ledger)
+- `feeds.py`: order-book store, Kalshi WebSocket feed, REST polling fallback
+- `ledger_dash.py`, `dashboard/ledger.html`: local paper-trade dashboard
 - `monitor.py`: repeated scans, running statistics, dashboard JSON
 - `dashboard/index.html`: the dashboard artifact's source
 - `tests/`: unit tests on synthetic books and monitor state

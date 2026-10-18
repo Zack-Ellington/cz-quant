@@ -461,7 +461,8 @@ td .tk { font-family: var(--font-data); font-size: .75rem; color: var(--muted); 
       const netCls = e.net != null && e.net > 0 ? "pos" : "neg";
       const chips = [
         !e.live ? '<span class="chip">closed or not seen</span>' : "",
-        e.exh === false ? '<span class="chip warn">likely non-exhaustive</span>' : "",
+        e.exh === false ? `<span class="chip warn" title="${esc(e.win_why || "")}">${({ NOT_EXHAUSTIVE: "tie or no-winner rule", RISKY: "third-party or never-happens risk", GAP: "bracket gap" })[e.win] || "likely non-exhaustive"}</span>` : "",
+        e.win === "EXHAUSTIVE" ? `<span class="chip" title="${esc(e.win_why || "")}">exactly one winner</span>` : "",
         /depth_only/.test(e.flags || "") ? '<span class="chip">thin book</span>' : "",
       ].join("");
       return `<tr>

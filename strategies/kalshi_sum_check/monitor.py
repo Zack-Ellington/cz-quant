@@ -121,6 +121,8 @@ def update_state(state: dict, rows: list, scanned_at: str, size: float) -> dict:
             apr=_r(r["best_apr"]),
             days=_r(r["days_to_settle"], 2),
             exh=exh,
+            win=r.get("winner_class"),
+            win_why=r.get("winner_reason"),
             flags=r["flags"],
         )
         e["obs"] += 1
@@ -229,7 +231,7 @@ def build_summary(state: dict) -> dict:
         "events": [
             {"ticker": k, "live": e["last_seen"] == last, **{f: e.get(f) for f in (
                 "title", "category", "n", "obs", "under", "over", "positive", "last_ask", "last_bid",
-                "ask_lo", "ask_hi", "bid_lo", "bid_hi", "best", "gross", "fees", "net", "roi", "apr", "days", "exh", "flags",
+                "ask_lo", "ask_hi", "bid_lo", "bid_hi", "best", "gross", "fees", "net", "roi", "apr", "days", "exh", "win", "win_why", "flags",
             )}}
             for k, e in top
         ],

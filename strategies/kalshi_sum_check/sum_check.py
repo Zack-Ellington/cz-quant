@@ -26,6 +26,7 @@ import math
 import sys
 from datetime import datetime, timezone
 
+from classifier import EXHAUSTIVE, UNKNOWN, classify
 from kalshi_client import KalshiClient
 from pricing import (
     KNOWN_FEE_TYPES,
@@ -112,7 +113,9 @@ def analyze_event(event: dict, books: dict, series: dict, size: float, now: date
     top_ask = sum(b.best_ask for _, b in parsed) if "leg_without_ask" not in flags else None
     top_bid = sum(b.best_bid or 0.0 for _, b in parsed)
     mid_sum = sum(((b.best_bid or 0.0) + (b.best_ask if b.best_ask is not None else 1.0)) / 2 for _, b in parsed)
-    if mid_sum < 1 - non_exhaustive_gap:
+    # Can every leg lose? Structural check first, market-implied fallback for UNKNOWN.
+    win_class, win_reason = classify(event, now)
+    if win_class not in (EXHAUSTIVE, UNKNOWN) or (win_class == UNKNOWN and mid_sum < 1 - non_exhaustive_gap):
         flags.append("likely_non_exhaustive")
 
     # --- taker long: lift YES asks on every leg, walked to N (or the thinnest leg's depth)
@@ -181,6 +184,8 @@ def analyze_event(event: dict, books: dict, series: dict, size: float, now: date
         "top_sum_ask": top_ask,
         "top_sum_bid": top_bid,
         "mid_sum": mid_sum,
+        "winner_class": win_class,
+        "winner_reason": win_reason,
         "sum_ask": tl_sum,
         "sum_bid": ts_sum,
         "dev_ask": tl_sum - 1 if tl_sum is not None else None,
