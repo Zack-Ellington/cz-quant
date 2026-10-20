@@ -1,0 +1,16 @@
+[project]
+name = "kalshi-sum-check"
+version = "0.1.0"
+description = "Sum-to-$1 scanner, monitor and WebSocket paper trader for mutually exclusive Kalshi events."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=13",
+    "cryptography>=42",
+]
+
+[tool.uv]
+# Plain scripts, not an installable package: `uv run python paper_ws.py`.
+package = false
+# OneDrive rejects the hardlinks uv uses by default, which leaves a half-built .venv.
+link-mode = "copy"
