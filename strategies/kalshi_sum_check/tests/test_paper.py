@@ -243,14 +243,14 @@ class SigningTests(unittest.TestCase):
 class ReserveTests(unittest.TestCase):
     def test_priority_needs_both_short_and_high_apr(self):
         from paper_ws import Config, is_priority
-        c = Config()
+        c = Config(reserve_frac=0.30, reserve_max_days=7.0, reserve_min_apr=1.0)  # pinned, not branch defaults
         self.assertTrue(is_priority(0.2, 5.0, c))
         self.assertFalse(is_priority(0.2, 0.5, c))   # fast but under 100% APR
         self.assertFalse(is_priority(30, 5.0, c))    # high APR but slow
 
     def test_reserve_need_shrinks_as_priority_trades_use_it(self):
         from paper_ws import Config, reserve_need
-        c = Config()
+        c = Config(reserve_frac=0.30, reserve_max_days=7.0, reserve_min_apr=1.0)  # pinned, not branch defaults
         self.assertAlmostEqual(reserve_need(1000, 0, c), 300)
         self.assertAlmostEqual(reserve_need(1000, 200, c), 100)  # $200 of the reserve is in a game
         self.assertAlmostEqual(reserve_need(1000, 450, c), 0)    # priority trades beyond the reserve
