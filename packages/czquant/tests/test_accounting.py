@@ -216,3 +216,9 @@ def test_live_amend_cancel_keep_context_and_wait_for_reconciliation(tmp_path):
     assert next(iter(b.state().lots.values()))['context']=={'custom':{'nested':True}}
     b.finish('one','canceled')
     assert store.reserved('p')==0
+
+def test_empty_portfolio_probe_does_not_require_ephemeral_market_detail(tmp_path):
+    store,_,venue=setup(tmp_path)
+    def disappeared(ticker): raise AssertionError('no held market should need detail')
+    venue.market=disappeared
+    assert market_pass(store,venue)['status']=='healthy'

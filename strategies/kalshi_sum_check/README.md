@@ -80,14 +80,10 @@ uv run python paper_ws.py --feed rest --duration 1:00
 uv run python ledger_dash.py                       # dashboard at http://localhost:8780
 ```
 
-**Credentials.** Put the key ID and its private key (RSA or Ed25519) in this folder's `.env`
-(see `.env.example`). The key ID can be `KALSHI_API_KEY_ID` or `KALSHI-ACCESS-KEY`.
-The private key can be a file path (`KALSHI_PRIVATE_KEY_PATH`) or the PEM text with
-`
-` for newlines (`KALSHI_PRIVATE_KEY`). Environment variables take precedence.
-`uv run python check_auth.py` reports which names it found (never values), makes a
-signed `GET /portfolio/balance`, and opens a signed WebSocket subscription. It
-places no orders.
+Credentials come from exported environment variables. Use KALSHI_API_KEY_ID
+and an absolute KALSHI_PRIVATE_KEY_PATH. After editing .env, explicitly export
+it with `set -a; source .env; set +a`. The application does not load this file.
+See [account setup](../../docs/kalshi-setup.md).
 
 **Feed.** Kalshi's `orderbook_delta` WebSocket rejects connections without an API
 key. Set `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` to a **production** key;
@@ -117,45 +113,15 @@ instead of milliseconds.
   level's liquidity only counts as new after the level has been gone for
   `--refill-seconds` (300), so neither a restart nor a level that flickers out of
   one snapshot lets the same resting orders be filled twice.
-- **Fresh fills:** on the REST feed, every leg is fetched again in one call just
-  before filling, so a fill never mixes legs read at different moments. Fills are
-  rejected (`legs_out_of_sync`) if the legs' books were read more than
-  `--max-leg-skew` (2 s) apart.
-- **Voids:** `uv run python void_trade.py TRADE_ID --reason "..."` removes a fill
-  that couldn't have happened. The engine applies it within one heartbeat (or at
-  start): the trade leaves the book, its capital returns to cash, and a `void`
-  record goes in the ledger. The dashboard drops voided trades from every total.
-- **Reserve (R2):** `--reserve-frac` (30%) of equity is kept for priority
-  trades: those settling within `--reserve-max-days` (7) with APR of at least
-  `--reserve-min-apr` (100%). Priority trades can use any cash. General trades can
-  only use cash beyond what the reserve still needs (the 30% minus what priority
-  trades already hold). Nothing is sold to refill the reserve: priority trades
-  settle quickly, and settled cash tops up the reserve before general trades can
-  use it. Rejections show as `reserve_held`; trades carry `pool`.
-- **Approvals:** UNKNOWN candidate lists (elections, nominations, mayors) trade
-  only if their event or series ticker is in `approvals.json`; add one only after
-  reading its rules. `--allow-unapproved-candidates` turns this off. Held positions
-  that become ineligible are kept to settlement and get a `held_event_ineligible`
-  warning.
-- **Kill switch:** a file named `KILL` in `runs/kalshi_sum_check/ws/` halts new
-  trades. So does any settled trade that loses money.
-- **Settlement cross-check:** a trade settles only once every leg is `finalized`
-  on Kalshi. The payout uses Kalshi's `settlement_value_dollars` (a NO contract
-  pays 1 − value) and is compared with what the yes/no results imply. Any
-  disagreement, a missing value, or a market added after the trade that won is
-  written as a `settlement_mismatch` warning, and the settle record carries
-  `verified: false`. Settlement keeps being
-  tracked either way, and the engine warns if Kalshi adds a market to an event
-  that's already held.
-
-**Ledger.** Each run writes `runs/kalshi_sum_check/ws/<UTC>/` with `run.json`,
-`ledger.jsonl` (append-only and fsync'd: run_start, universe, opportunity, trade,
-reject, settle, warning, halt, heartbeat, run_stop) and `run.log`. A new run
-rebuilds open positions and cash from all earlier ledgers.
-
-**Dashboard.** `ledger_dash.py` serves `dashboard/ledger.html` and re-reads the
-ledgers on every request. The page polls every 2 seconds, so it is always as
-current as the ledger. No artifact or scheduled task is involved.
+- Execution uses the shared broker's independent IOC depth policy. Each leg
+  can partially fill. Context preserves the intended basket and actual outcomes.
+- The independent market monitor settles individual held contracts using
+  confirmed payout values. The strategy resumes actual inventory from the
+  shared store. A fully settled losing basket halts new submissions, including
+  after restart.
+- Use the shared report for cash, open positions, realized and unrealized P&L,
+  fees, drawdown, and coverage. Historical JSONL dashboards and void requests
+  do not apply to broker portfolios.
 
 ## Caveats (read before trading anything this flags)
 

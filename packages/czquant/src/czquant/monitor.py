@@ -30,7 +30,9 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
     if not tickers:
         # A real public-data probe, even for no-trade portfolios.
         probe = api.get("/markets", {"limit": 1, "status": "open"}).get("markets", [])
-        tickers.update(m["ticker"] for m in probe)
+        # Listing may include short-lived generated markets that disappear before
+        # their detail request. With no exposure, the listing itself is the probe.
+        store.append("market_probe", {"returned": len(probe)})
     errors = []
     for ticker in sorted(tickers):
         try:
