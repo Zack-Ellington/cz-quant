@@ -328,7 +328,8 @@ def trade(
         if broker.mode != "paper":
             raise ValueError("Election strategy CLI is paper only")
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-        broker.start(run.strategy, revision, {"model":model.name, "max_position":str(policy.max_position), "contracts":contracts})
+        broker.start(run.strategy, revision, {"run_metadata":run.meta, "model":model.name,
+            "max_position":str(policy.max_position), "min_edge":str(policy.min_edge), "contracts":contracts})
         state = broker.state()
         open_baskets = {lot["context"]["basket"]: lot["context"]["position_id"] for lot in state.lots.values()}
         cash = broker.available
@@ -392,6 +393,7 @@ def trade(
                     "count":str(quantity), "price":str(leg.price if leg.side=="yes" else 1-leg.price),
                     "time_in_force":"immediate_or_cancel", "self_trade_prevention_type":"taker_at_cross"},
                     {"basket":c.basket,"position_id":pid,"model":model.name,"expected_edge":str(cc.edge(quantity)),
+                     "model_probabilities":dict(model.combo),"model_uncertainty":dict(model.uncertainty),
                      "intended_quantity":quantity,"intended_markets":[item.ticker for item in cc.legs],
                      "payout_by_state":dict(cc.payout_by_state)})
                 depth[(leg.ticker, leg.side)] -= float(result.get("filled",0))

@@ -142,7 +142,7 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
     store.backup(snapshot)
     store.close()
     frozen = Store(destination)
-    recorded = utc()
+    recorded = frozen.db.execute("SELECT MAX(recorded_at) FROM events").fetchone()[0] or utc()
     metrics, curves = compare(frozen, start, end, recorded)
     for name, rows in [('metrics',metrics),('equity',curves)]:
         with (destination/f'{name}.csv').open('w') as f:
@@ -157,7 +157,7 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
                        y=[float(r['equity']) if r['equity'] is not None else None for r in rows], connectgaps=False)
     fig.update_layout(title='Portfolio equity · midpoint marks · paper results', yaxis_title='USD')
     fig.write_html(destination/'report.html', include_plotlyjs=True)
-    manifest = {'schema_version':1, 'start':start, 'cutoff':end, 'recorded_cutoff':recorded,
+    manifest = {'schema_version':1, 'generated_at':utc(), 'start':start, 'cutoff':end, 'recorded_cutoff':recorded,
         'valuation':'midpoint-v1; one-minute grid; maximum book age 120 seconds',
         'cost_basis':'FIFO, fees included', 'metrics':metrics,
         'limitations':['Paper fills do not establish real execution quality.',

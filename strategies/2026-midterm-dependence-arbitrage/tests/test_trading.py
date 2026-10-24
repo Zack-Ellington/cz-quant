@@ -292,6 +292,7 @@ def test_shared_broker_records_actual_fills_and_preserves_candidate_decisions(tm
     state=Broker(store,'election').state()
     assert state.lots and state.cash<1000 and not rows
     assert all(lot['context']['basket'] in accepted for lot in state.lots.values())
+    assert all(lot['context']['model_probabilities']==dict(MODEL.combo) for lot in state.lots.values())
     before=state.cash
     _trade(tmp_path/'diagnostics')
     assert Broker(store,'election').state().cash==before
