@@ -1,0 +1,24 @@
+name: Broker and strategy validation
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - packages/czquant
+          - strategies/kalshi_sum_check
+          - strategies/2026-midterm-prediction-arbitrage
+          - strategies/2026-midterm-dependence-arbitrage
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uv sync --locked
+      - run: uv run pytest -q
+      - run: uv run basedpyright

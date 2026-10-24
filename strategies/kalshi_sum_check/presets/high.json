@@ -1,0 +1,6 @@
+{
+  "min_apr": 20.0001,
+  "max_apr": null,
+  "reserve_frac": 0.5,
+  "reserve_min_apr": 100
+}

@@ -1,5 +1,14 @@
 # cz-quant
 
+## Shared broker experiments
+
+The [broker and reporting guide](docs/broker-and-reporting.md) describes the
+common economic log, persistent portfolios, independent market/account
+monitors, and offline comparison. It supports both sum presets and the two
+election strategies. Strategies retain their own market readers and models.
+The trial and recovery instructions are in [experiment operations](docs/experiment-operations.md).
+
+
 Quantitative trading strategies. The first venue is the Kalshi prediction
 market.
 

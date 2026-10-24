@@ -1,8 +1,8 @@
 # Strategy broker and independent reporting implementation plan
 
-Status: proposed implementation, written 2026-10-24. No broker implementation,
-new experiment processes, report timer, or implementation PR exists from
-this plan yet. The work is an MVP for common execution accounting and a
+Status: implementation plan approved on 2026-10-24. Current behavior and
+known limits are documented in broker-and-reporting.md; deployment evidence
+and the Sunday schedule are recorded in experiment-operations.md. The work is an MVP for common execution accounting and a
 refinement of the comparison metric, not an optimization of strategy returns.
 
 ## Goal and completion criteria
@@ -56,11 +56,10 @@ pretend they are two independent directories that can both be copied unchanged.
    order ID and every resulting fill. Preserve nested data without imposing
    strategy-specific fields. Large inputs use immutable artifact references.
    Context is diagnostic, not an input to the report's P&L calculation.
-5. Preserve sum-strategy execution assumptions explicitly. Its current paper
-   model fills all legs together after a recheck. Keep this as a named,
-   versioned paper execution policy with one accounting record per leg. Batch
-   submission does not imply atomic live execution. Do not silently change
-   the sum analysis by replacing its basket fill with sequential fills.
+5. Record independent per-leg fills. The user approved empirical evaluation
+   of coordinated-fill failures. Replace the source atomic paper basket with
+   the common IOC depth policy, preserve intended basket context, and value
+   all actual holdings, including partial baskets.
 6. Keep both sum presets as written. The low preset has max APR 20, reserve
    fraction 0.30, and reserve minimum APR 1. The high preset has min APR
    20.0001, reserve fraction 0.50, and reserve minimum APR 100. Other strategy
@@ -178,7 +177,7 @@ account monitor is operational.
 
 Port the common sum implementation from the two source PRs. Replace its private
 accounting and ledger writes with broker operations. Preserve classification,
-pricing, sizing, approvals, and the named paper fill assumptions. Persist the
+pricing, sizing, and approvals. Use the agreed independent per-leg fill policy. Persist the
 loss-triggered halt across restart and propagate task failures, addressing the
 faults reproduced in the initial review.
 
@@ -301,18 +300,8 @@ report at the planned time instead. Do not fabricate a trial start or move the
 window silently. Continue monitors for remaining positions after the report;
 the reporting cutoff does not liquidate them or imply settlement.
 
-## Current dependencies
+## Deployment record
 
-At planning time, no Kalshi credential variables were exported and no .env
-files were found under the cz-quant project directory. A credential location
-has been requested, without requesting secret values in chat. This blocks
-the authorized account upgrade and actual live-account monitoring, but not
-the schema work, tests, reporting implementation, or public-data paper tests.
-
-The upgrade also has an API-order-history prerequisite, documented in
-[Kalshi setup](kalshi-setup.md). If unmet, surface it without submitting an
-order to manufacture eligibility. API setup changes are separate from funding
-or running live strategies.
-
-No implementation PR has been opened, no new sustained trial has been
-launched, and no Sunday timer has been installed by this planning change.
+See [experiment operations](experiment-operations.md) for current validation,
+service names, trial data, limitations, and the scheduled Sunday comparison.
+The authenticated account collector is independent of the paper portfolios.

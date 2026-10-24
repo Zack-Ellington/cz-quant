@@ -30,15 +30,21 @@ requirement to place an order on every setup.
 1. Make an authenticated GET request to /account/limits. Record the usage
    tier and grants. Skip the upgrade if the account already has Advanced
    access or a higher tier.
-2. If required, make an authenticated POST request, without a request body,
+2. If required, make an authenticated POST request, with JSON content type and an empty JSON object,
    to /account/api_usage_level/upgrade. A successful response is HTTP 201.
 3. Repeat GET /account/limits and verify Advanced or higher access before
    attempting subaccount creation.
 4. If the upgrade fails, retain the sanitized error and resolve the stated
    prerequisite. Do not create a real order automatically as part of setup.
 
-These are API operations, not existing repository CLI commands. The broker
-implementation plan includes a setup command for them.
+From packages/czquant, `uv run czquant setup` checks account access.
+`uv run czquant setup --upgrade` attempts the authorized upgrade and verifies
+the resulting tier. The command never places a qualifying order.
+
+On 2026-10-24, authenticated production reads succeeded. The upgrade returned
+HTTP 403 with an empty response and the tier remained basic. The response did
+not identify the reason; do not assume the account-history prerequisite is
+the cause. Paper trading and account monitoring work at the existing tier.
 
 Sources, checked 2026-10-24:
 [upgrade endpoint](https://docs.kalshi.com/api-reference/account/upgrade-account-api-usage-level),
