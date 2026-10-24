@@ -19,6 +19,10 @@ or retired without an effect on the others.
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct
 Python version for each strategy.
 
+For authenticated monitoring and future live subaccounts, see
+[Kalshi account setup](docs/kalshi-setup.md). Advanced API access is required
+to create subaccounts; public-data paper runs do not require it.
+
 ```bash
 git clone git@github.com:Zack-Ellington/cz-quant.git
 cd cz-quant
