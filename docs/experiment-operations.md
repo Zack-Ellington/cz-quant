@@ -95,10 +95,32 @@ changed election execution modules. The pre-existing election code outside
 those modules is not newly claimed to be type-clean. All existing strategy
 tests remain in CI.
 
-The production key supports authenticated reads. Advanced upgrade returned
-HTTP 403 with an empty body; the account remains basic. No eligibility order
-was placed. Live fills/transfers/cancels are fixture-tested only. Full netting
-and pre-existing live inventory require additional normalization; account
+Live fills/transfers/cancels have fixture validation. Full netting and
+pre-existing live inventory require additional normalization; account
 mismatches are explicit gaps and exclude live complete-period comparisons.
 Resting/maker paper execution is not implemented. These limits do not alter the
-schema or require a strategy base class.
+schema or require a strategy base class. Account-specific setup results are
+recorded only in the private trial manifest.
+
+## Recorded rollout, 2026-10-24
+
+[The non-sensitive trial manifest](trials/20261024.json) records the fixed paper
+window. It began at 05:20:43.775064 UTC on October 24. Both sum presets are
+running continuously; both election strategies completed their first scheduled
+scan. The independent election strategy generated three paper fills. The other
+three configurations had no fills in their first scans. These observations
+validate operation, not comparative profitability.
+
+The market monitor passed a forced crash/restart exercise before the window.
+An early empty-portfolio probe encountered a disappearing generated market;
+revision 2f615ed changed that probe to use the successful market-list response
+itself. The degraded interval remains in the log and coverage metric. Strategy
+policies and the comparison window were unchanged.
+
+The private backup was uploaded, downloaded into a separate directory, checked
+against SHA256SUMS, and used to run the same Sunday report script with an
+immediate cutoff and no credentials. The actual persistent Sunday timer is
+installed for 18:05 UTC on October 25. All four CI jobs passed; 24 shared,
+48 sum, 146 independent-election, and 167 dependence-election tests pass.
+The implementation PR remains unmerged. Remaining live-normalization work is
+tracked in [issue 18](https://github.com/Zack-Ellington/cz-quant/issues/18).

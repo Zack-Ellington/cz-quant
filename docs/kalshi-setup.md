@@ -41,10 +41,8 @@ From packages/czquant, `uv run czquant setup` checks account access.
 `uv run czquant setup --upgrade` attempts the authorized upgrade and verifies
 the resulting tier. The command never places a qualifying order.
 
-On 2026-10-24, authenticated production reads succeeded. The upgrade returned
-HTTP 403 with an empty response and the tier remained basic. The response did
-not identify the reason; do not assume the account-history prerequisite is
-the cause. Paper trading and account monitoring work at the existing tier.
+Account-specific setup results belong in the private trial manifest, not in
+public documentation or issue reports.
 
 Sources, checked 2026-10-24:
 [upgrade endpoint](https://docs.kalshi.com/api-reference/account/upgrade-account-api-usage-level),
