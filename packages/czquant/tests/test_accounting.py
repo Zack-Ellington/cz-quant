@@ -197,3 +197,22 @@ def test_multi_price_fill_cash_is_exact(tmp_path):
     v.book=lambda ticker: {'orderbook_fp':{'yes_dollars':[['.39','10']], 'no_dollars':[['.60','2'],['.59','1']]}}
     b.submit(order(count='3',price='.41'))
     assert b.state().cash==D('98.73')  # 1.21 premium + .06 fee
+
+def test_live_amend_cancel_keep_context_and_wait_for_reconciliation(tmp_path):
+    store=Store(tmp_path);store.create('p',mode='live',subaccount=2)
+    class Adapter:
+        def create_order(self,request):return {'order':{'order_id':'venue-id'}}
+        def amend_order(self,identifier,changes):
+            assert identifier=='venue-id'
+            return {'order_id':identifier}
+        def cancel_order(self,identifier,params):
+            assert identifier=='venue-id' and params['subaccount']==2
+            return {'order_id':identifier}
+    b=Broker(store,'p',Adapter());b.submit(order(client_order_id='one'),{'custom':{'nested':True}})
+    b.amend('one',{'count':'12','price':'.41'})
+    b.cancel('one')
+    assert store.reserved('p')>0
+    b.fill('one','1','.4','.02','fill',{})
+    assert next(iter(b.state().lots.values()))['context']=={'custom':{'nested':True}}
+    b.finish('one','canceled')
+    assert store.reserved('p')==0

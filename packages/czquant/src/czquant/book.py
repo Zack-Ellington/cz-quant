@@ -14,4 +14,3 @@ def levels(raw: dict[str, Any]) -> dict[str, list[tuple[Decimal, Decimal]]]:
         out[side] = sorted([(decimal(p) / (1 if dollars else 100), decimal(q)) for p, q in (rows or [])
                             if decimal(q) > 0], reverse=True)
     return out
-
