@@ -269,3 +269,30 @@ def test_unresolved_positions_stay_open(tmp_path):
 def test_no_cash_no_fills(tmp_path, policy):
     _, rows, _ = _trade(tmp_path, policy=policy)
     assert not rows
+
+def test_shared_broker_records_actual_fills_and_preserves_candidate_decisions(tmp_path, monkeypatch):
+    from czquant import Store, Broker
+    import strategy.trading as trading
+    _, _, legacy_events = _trade(tmp_path/'legacy')
+    baseline = {e['basket'] for e in legacy_events if e['type']=='signal' and e.get('accepted')}
+    class Venue:
+        def __init__(self, **kwargs): pass
+        def book(self,ticker):
+            bid,ask,n=BOOK[ticker]
+            return {'orderbook_fp':{'yes_dollars':[[str(bid),str(n)]], 'no_dollars':[[str(round(1-ask,4)),str(n)]]}}
+        def market(self,ticker): return {'ticker':ticker,'status':'active','series_ticker':'SERIES'}
+        def get(self,path): return {'series':{'fee_type':'quadratic','fee_multiplier':1}}
+    monkeypatch.setattr(trading,'Kalshi',Venue)
+    monkeypatch.setenv('STRATEGY_RUNS_DIR',str(tmp_path/'common'))
+    monkeypatch.setenv('CZQUANT_PORTFOLIO','election')
+    store=Store(tmp_path/'common');store.create('election')
+    _, rows, events = _trade(tmp_path/'diagnostics')
+    accepted={e['basket'] for e in events if e['type']=='signal' and e.get('accepted')}
+    assert accepted==baseline
+    state=Broker(store,'election').state()
+    assert state.lots and state.cash<1000 and not rows
+    assert all(lot['context']['basket'] in accepted for lot in state.lots.values())
+    assert all(lot['context']['model_probabilities']==dict(MODEL.combo) for lot in state.lots.values())
+    before=state.cash
+    _trade(tmp_path/'diagnostics')
+    assert Broker(store,'election').state().cash==before

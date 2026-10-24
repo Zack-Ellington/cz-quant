@@ -44,10 +44,15 @@ unmarked for that run.
 from __future__ import annotations
 
 import math
+import os
+import subprocess
+from czquant import Broker, Store
+from czquant.kalshi import Kalshi
+from czquant.paper import Paper
 import time
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Mapping, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from strategy import money
 from strategy.api import Client
@@ -86,7 +91,10 @@ def market_state_probs(markets: AggregateMarkets) -> dict[str, float] | None:
     The combo pays nothing when a leader is neither party, so its prices put
     nothing on those states either. None if a leg has no quote.
     """
-    mids = {code: markets.combo[code].mid for code in DR_STATES}
+    mids_raw = {code: markets.combo[code].mid for code in DR_STATES}
+    if any(m is None for m in mids_raw.values()):
+        return None
+    mids = {code: m for code, m in mids_raw.items() if m is not None}
     if any(m is None for m in mids.values()) or sum(mids.values()) <= 0:
         return None
     total = sum(mids.values())
@@ -314,11 +322,23 @@ def trade(
     confirm_delay: float = 0.0,
 ) -> None:
     """Settle, generate signals, confirm, fill, and mark the open book."""
-    settle(run, markets, client)
-    rows = read_ledger(run.directory.parent.parent, run.strategy)
-    positions = positions_from_ledger(rows)
-    open_baskets = {p.basket: p.position_id for p in positions.values() if p.is_open}
-    cash = free_cash(rows, policy.bankroll)
+    broker = None
+    if os.environ.get("CZQUANT_PORTFOLIO"):
+        broker = Broker(Store(), os.environ["CZQUANT_PORTFOLIO"], Paper(Kalshi(authenticated=False)), run.run_id)
+        if broker.mode != "paper":
+            raise ValueError("Election strategy CLI is paper only")
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        broker.start(run.strategy, revision, {"run_metadata":run.meta, "model":model.name,
+            "max_position":str(policy.max_position), "min_edge":str(policy.min_edge), "contracts":contracts})
+        state = broker.state()
+        open_baskets = {lot["context"]["basket"]: lot["context"]["position_id"] for lot in state.lots.values()}
+        cash = broker.available
+    else:
+        settle(run, markets, client)
+        rows = read_ledger(run.directory.parent.parent, run.strategy)
+        positions = positions_from_ledger(rows)
+        open_baskets = {p.basket: p.position_id for p in positions.values() if p.is_open}
+        cash = free_cash(rows, policy.bankroll)
 
     cands = arbitrage_candidates(checks) + model_candidates(markets, model, fees, policy, contracts)
     cands.sort(key=lambda c: (c.blocked is not None, -_scan_edge(c, contracts), c.basket))
@@ -336,7 +356,7 @@ def trade(
 
     opened = 0
     for c in cands:
-        base = dict(basket=c.basket, kind=c.kind, value=c.value, threshold=c.threshold,
+        base: dict[str, Any] = dict(basket=c.basket, kind=c.kind, value=c.value, threshold=c.threshold,
                     scan_edge=_scan_edge(c, contracts))
         if c.blocked is not None:
             run.event("signal", accepted=False, reason=c.blocked, **base)
@@ -368,12 +388,26 @@ def trade(
             **base,
         )
         for leg in cc.legs:
-            cost = leg.schedule.order(leg.price, quantity, "buy")
-            run.ledger("fill", pid, c.basket, leg.ticker, leg.side, quantity, cost.price, cost.fee,
-                       cost.cash_delta)
-            depth[(leg.ticker, leg.side)] -= quantity
-            cash += cost.cash_delta
-    mark(run, markets)
+            if broker:
+                result = broker.submit({"ticker":leg.ticker, "side":"bid" if leg.side=="yes" else "ask",
+                    "count":str(quantity), "price":str(leg.price if leg.side=="yes" else 1-leg.price),
+                    "time_in_force":"immediate_or_cancel", "self_trade_prevention_type":"taker_at_cross"},
+                    {"basket":c.basket,"position_id":pid,"model":model.name,"expected_edge":str(cc.edge(quantity)),
+                     "model_probabilities":dict(model.combo),"model_uncertainty":dict(model.uncertainty),
+                     "intended_quantity":quantity,"intended_markets":[item.ticker for item in cc.legs],
+                     "payout_by_state":dict(cc.payout_by_state)})
+                depth[(leg.ticker, leg.side)] -= float(result.get("filled",0))
+                cash = broker.available
+            else:
+                cost = leg.schedule.order(leg.price, quantity, "buy")
+                run.ledger("fill", pid, c.basket, leg.ticker, leg.side, quantity, cost.price, cost.fee, cost.cash_delta)
+                depth[(leg.ticker, leg.side)] -= quantity
+                cash += cost.cash_delta
+    if broker:
+        broker.observe("scan_complete", {"candidates":len(cands), "submitted_baskets":opened})
+        broker.store.close()
+    else:
+        mark(run, markets)
 
 
 def _scan_edge(c: Candidate, contracts: int) -> Decimal:

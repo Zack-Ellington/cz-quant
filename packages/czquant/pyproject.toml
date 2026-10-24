@@ -1,0 +1,25 @@
+[project]
+name = "czquant"
+version = "0.1.0"
+description = "Kalshi broker accounting, independent monitors, and offline comparison"
+requires-python = ">=3.12"
+dependencies = ["cryptography>=42", "httpx>=0.27", "plotly>=5.24"]
+
+[project.scripts]
+czquant = "czquant.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "basedpyright>=1.30"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.basedpyright]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+exclude = ["tests", ".venv"]
+
+[tool.uv]
+link-mode = "copy"

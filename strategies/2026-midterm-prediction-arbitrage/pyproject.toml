@@ -5,6 +5,7 @@ description = "Independent-race model of 2026 Congress control vs. Kalshi's comb
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "czquant",
     "httpx>=0.27",
     "numpy>=2.0",
 ]
@@ -15,6 +16,7 @@ strategy = "strategy.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "basedpyright>=1.30",
 ]
 
 [build-system]
@@ -28,3 +30,12 @@ packages = ["src/strategy"]
 # OneDrive and some synced folders reject the hardlinks uv uses by default,
 # which leaves a half-installed .venv. Copying always works.
 link-mode = "copy"
+
+[tool.uv.sources]
+czquant = { path = "../../packages/czquant", editable = true }
+
+[tool.basedpyright]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+include = ["src/strategy/trading.py"]

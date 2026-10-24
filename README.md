@@ -1,5 +1,14 @@
 # cz-quant
 
+## Shared broker experiments
+
+The [broker and reporting guide](docs/broker-and-reporting.md) describes the
+common economic log, persistent portfolios, independent market/account
+monitors, and offline comparison. It supports both sum presets and the two
+election strategies. Strategies retain their own market readers and models.
+The trial and recovery instructions are in [experiment operations](docs/experiment-operations.md).
+
+
 Quantitative trading strategies. The first venue is the Kalshi prediction
 market.
 
@@ -18,6 +27,10 @@ or retired without an effect on the others.
 
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct
 Python version for each strategy.
+
+For authenticated monitoring and future live subaccounts, see
+[Kalshi account setup](docs/kalshi-setup.md). Advanced API access is required
+to create subaccounts; public-data paper runs do not require it.
 
 ```bash
 git clone git@github.com:Zack-Ellington/cz-quant.git

@@ -1,0 +1,17 @@
+{
+  "mode": "paper",
+  "start": "2026-10-24T05:20:43.775064+00:00",
+  "cutoff": "2026-10-25T18:00:00Z",
+  "report_at": "2026-10-25T18:05:00Z",
+  "strategy_revision": "d4d9c79116bb61893b1546172a1bbd0685f28ef4",
+  "monitor_revision": "2f615ed",
+  "initial_cash_each": "1000",
+  "portfolios": ["sum-low", "sum-high", "election-independent", "election-dependence", "cash"],
+  "execution_policy": "ioc-depth-v1",
+  "election_seed": 20261024,
+  "election_interval_minutes": 15,
+  "report_timer": "czq-sunday.timer",
+  "pull_request": "https://github.com/Zack-Ellington/cz-quant/pull/17",
+  "source_pull_requests": [15, 16],
+  "limitations_issue": "https://github.com/Zack-Ellington/cz-quant/issues/18"
+}

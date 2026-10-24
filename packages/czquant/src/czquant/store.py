@@ -1,0 +1,134 @@
+"""Append-only facts. SQLite transactions serialize portfolio reservations."""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Iterator
+
+
+def utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def canonical_time(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp requires a UTC offset")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def encode(value: Any) -> str:
+    return json.dumps(value, default=lambda x: str(x) if isinstance(x, (Decimal, Path)) else _unsupported(x),
+                      allow_nan=False, separators=(",", ":"), sort_keys=True)
+
+
+def _unsupported(value: Any) -> Any:
+    raise TypeError(f"not JSON-compatible: {type(value).__name__}")
+
+
+def decimal(value: Any) -> Decimal:
+    result = Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError("nonfinite monetary value")
+    return result
+
+
+class Store:
+    def __init__(self, root: str | Path | None = None):
+        self.root = Path(root or os.environ.get("STRATEGY_RUNS_DIR", "runs"))
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path = self.root / "accounting.sqlite3"
+        self.db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS portfolios (
+                id TEXT PRIMARY KEY, mode TEXT NOT NULL, created_at TEXT NOT NULL,
+                metadata TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS events (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_id TEXT NOT NULL UNIQUE, source_key TEXT UNIQUE,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                portfolio_id TEXT, run_id TEXT, type TEXT NOT NULL,
+                effective_at TEXT NOT NULL, recorded_at TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS events_portfolio ON events(portfolio_id, sequence);
+            CREATE INDEX IF NOT EXISTS events_type ON events(type, effective_at);
+            CREATE TABLE IF NOT EXISTS orders (
+                id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL, run_id TEXT,
+                request TEXT NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL,
+                reserved TEXT NOT NULL, filled TEXT NOT NULL DEFAULT '0', venue_id TEXT);
+            CREATE TABLE IF NOT EXISTS checkpoints (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        if self.db.in_transaction:
+            yield
+            return
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.db.rollback()
+            raise
+        else:
+            self.db.commit()
+
+    def append(self, kind: str, data: dict[str, Any], portfolio: str | None = None,
+               run: str | None = None, source: str | None = None,
+               at: str | None = None) -> str:
+        payload = encode(data)  # Validate before insertion, even on duplicate delivery.
+        if source:
+            prior = self.db.execute("SELECT record_id,data,type,portfolio_id FROM events WHERE source_key=?", (source,)).fetchone()
+            if prior:
+                if prior["data"] != payload or prior["type"] != kind or prior["portfolio_id"] != portfolio:
+                    raise ValueError(f"conflicting evidence for source {source}")
+                return prior["record_id"]
+        identifier, now = uuid.uuid4().hex, utc()
+        self.db.execute("INSERT INTO events(record_id,source_key,portfolio_id,run_id,type,effective_at,recorded_at,data) VALUES(?,?,?,?,?,?,?,?)",
+                        (identifier, source, portfolio, run, kind, canonical_time(at) if at else now, now, payload))
+        return identifier
+
+    def create(self, identifier: str, cash: str = "1000", mode: str = "paper", **metadata: Any) -> None:
+        if mode not in ("paper", "live") or decimal(cash) < 0:
+            raise ValueError("invalid portfolio mode or initial cash")
+        with self.transaction():
+            if self.db.execute("SELECT 1 FROM portfolios WHERE id=?", (identifier,)).fetchone():
+                raise ValueError(f"portfolio already exists: {identifier}; reopen it instead")
+            self.db.execute("INSERT INTO portfolios VALUES(?,?,?,?)", (identifier, mode, utc(), encode(metadata)))
+            if mode == "paper":
+                self.append("transaction", {"reason": "funding", "cash_delta": str(decimal(cash)),
+                            "external_delta": str(decimal(cash)), "fee": "0", "legs": []}, identifier,
+                            source=f"initial-funding:{identifier}")
+
+    def portfolios(self) -> list[dict[str, Any]]:
+        return [{**dict(r), "metadata": json.loads(r["metadata"])} for r in self.db.execute("SELECT * FROM portfolios ORDER BY id")]
+
+    def events(self, portfolio: str | None = None, until: str | None = None,
+               recorded_until: str | None = None) -> list[dict[str, Any]]:
+        conditions, args = [], []
+        for col, value in (("portfolio_id", portfolio), ("effective_at", until), ("recorded_at", recorded_until)):
+            if value is not None:
+                conditions.append(col + ("=?" if col == "portfolio_id" else "<=?"))
+                args.append(value if col == "portfolio_id" else canonical_time(value))
+        sql = "SELECT * FROM events" + (" WHERE " + " AND ".join(conditions) if conditions else "")
+        return [{**dict(r), "data": json.loads(r["data"])} for r in self.db.execute(sql + " ORDER BY effective_at,sequence", args)]
+
+    def reserved(self, portfolio: str) -> Decimal:
+        return sum((decimal(r[0]) for r in self.db.execute("SELECT reserved FROM orders WHERE portfolio_id=?", (portfolio,))), Decimal(0))
+
+    def backup(self, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(destination) as target:
+            self.db.backup(target)
+
+    def close(self) -> None:
+        self.db.close()

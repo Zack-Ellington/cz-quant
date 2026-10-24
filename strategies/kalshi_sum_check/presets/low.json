@@ -1,0 +1,5 @@
+{
+  "max_apr": 20,
+  "reserve_frac": 0.3,
+  "reserve_min_apr": 1
+}
