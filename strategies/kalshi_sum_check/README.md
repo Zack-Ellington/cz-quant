@@ -117,8 +117,10 @@ instead of milliseconds.
   can partially fill. Context preserves the intended basket and actual outcomes.
 - The independent market monitor settles individual held contracts using
   confirmed payout values. The strategy resumes actual inventory from the
-  shared store. A fully settled losing basket halts new submissions, including
-  after restart.
+  shared store. A fully filled basket that settles at a loss halts new submissions,
+  including after restart. Partial-fill losses are recorded as execution
+  outcomes and remain in P&L; they do not halt the paper experiment. The
+  basket_settled observation records the fill classification and net P&L.
 - Use the shared report for cash, open positions, realized and unrealized P&L,
   fees, drawdown, and coverage. Historical JSONL dashboards and void requests
   do not apply to broker portfolios.

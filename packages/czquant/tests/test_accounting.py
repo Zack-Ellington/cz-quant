@@ -222,3 +222,44 @@ def test_empty_portfolio_probe_does_not_require_ephemeral_market_detail(tmp_path
     def disappeared(ticker): raise AssertionError('no held market should need detail')
     venue.market=disappeared
     assert market_pass(store,venue)['status']=='healthy'
+
+@pytest.mark.parametrize('side,book,low,high', [
+    ('bid', {'yes_dollars': [], 'no_dollars': [['.60','10']]}, '95.83', '99.83'),
+    ('bid', {'yes_dollars': [['.39','10']], 'no_dollars': []}, '99.73', '105.83'),
+    ('ask', {'yes_dollars': [['.39','10']], 'no_dollars': []}, '93.73', '99.83'),
+    ('ask', {'yes_dollars': [], 'no_dollars': [['.60','10']]}, '99.73', '103.73'),
+    ('bid', {'yes_dollars': [], 'no_dollars': []}, '95.83', '105.83'),
+])
+def test_one_sided_quote_ranges_do_not_invent_midpoints(tmp_path,side,book,low,high):
+    store,b,_=setup(tmp_path);start=utc()
+    b.submit(order(side=side,price='.4' if side=='bid' else '.39'))
+    store.append('market',{'ticker':'M','market':{'status':'active'},'book':{'orderbook_fp':book}})
+    metrics,curves=compare(store,start,utc());m=metrics[0];end=curves[-1]
+    assert m['net_pnl'] is None and not m['complete']
+    assert end['equity_lower']==D(low) and end['equity_upper']==D(high)
+    assert m['net_pnl_lower']==D(low)-100 and m['net_pnl_upper']==D(high)-100
+    assert m['range_coverage']==1 and m['valuation_coverage']<1
+
+
+def test_quote_ranges_reject_stale_or_crossed_references(tmp_path):
+    store,b,_=setup(tmp_path);start=utc();b.submit(order())
+    stale=(datetime.fromisoformat(utc())+timedelta(minutes=5)).isoformat()
+    assert compare(store,start,stale)[0][0]['net_pnl_lower'] is None
+    store.append('market',{'ticker':'M','market':{'status':'active'},
+                          'book':{'yes_dollars':[['.8','10']],'no_dollars':[['.6','10']]}})
+    assert compare(store,start,utc())[0][0]['net_pnl_upper'] is None
+
+
+def test_range_change_uses_opposite_opening_bound_and_external_flows(tmp_path):
+    store,b,_=setup(tmp_path);b.submit(order());start=utc()
+    store.append('transaction',{'reason':'funding','cash_delta':'10','external_delta':'10','fee':'0','legs':[]},'p')
+    m=compare(store,start,utc())[0][0]
+    assert m['net_pnl_lower']==D('-.1') and m['net_pnl_upper']==D('.1')
+
+
+def test_finalized_value_collapses_range_without_fresh_book(tmp_path):
+    store,b,_=setup(tmp_path);start=utc();b.submit(order())
+    store.append('market',{'ticker':'M','market':{'status':'finalized','settlement_value_dollars':'.5'},'book':{}})
+    end=(datetime.fromisoformat(utc())+timedelta(minutes=5)).isoformat()
+    m=compare(store,start,end)[0][0]
+    assert m['net_pnl_lower']==m['net_pnl_upper']==m['net_pnl']==D('.83')

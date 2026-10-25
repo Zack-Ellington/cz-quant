@@ -122,8 +122,11 @@ presets. The imported analysis is from Zack's PRs 15 and 16. Unlike their
 original atomic paper basket, each leg now executes independently, as agreed.
 Context records the intended basket, expected profit/APR, classification,
 settlement estimate, reserve pool, and actual per-leg outcomes. Reporting
-values actual holdings, including incomplete baskets. A fully settled losing
-basket halts the strategy; that halt survives restart. Timed runs propagate
+values actual holdings, including incomplete baskets. A fully filled basket that settles at a loss
+halts the strategy; that halt survives restart. Partial-fill losses remain in
+P&L and produce a basket_settled observation with intended and actual quantities,
+but do not halt the experiment. An operator-reviewed halt_cleared observation
+references one halt record; it takes effect on restart and does not erase losses. Timed runs propagate
 task failures.
 
 From strategies/kalshi_sum_check, after creating the portfolio:
@@ -163,6 +166,20 @@ same one-minute grid plus funding boundaries. YES midpoint is the average of
 the best YES bid and implied YES ask; NO is its complement. Crossed books,
 missing two-sided quotes, or books older than 120 seconds are missing marks.
 Final confirmed payout values remain valid without a live quote.
+
+The report also shows a quote-based valuation range. For YES, the lower value
+uses the best YES bid, or zero when that side is empty; the upper value uses
+one minus the best NO bid, or one when that side is empty. NO uses the
+complementary range. Both sides missing yields [0, 1] per contract. A fresh
+one-sided book therefore retains a range without inventing a midpoint.
+Absent, stale, invalid, or crossed books invalidate the range as well.
+
+Portfolio ranges sum actual quantities and cash, including entry fees. P&L
+ranges subtract the opposite opening bound and external funding. They are
+quote envelopes, not executable liquidation values or guaranteed settlement
+values: displayed depth and exit fees are not modeled. Midpoint and range
+coverage are reported separately. Missing midpoints still exclude point-return
+and drawdown rankings; settlement-only realized P&L remains available.
 
 Metrics include net P&L (ending equity minus opening equity minus net external
 funding), return on opening equity for fixed-capital windows, time-weighted

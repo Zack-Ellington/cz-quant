@@ -26,7 +26,7 @@ Constraints on every trade
     cash beyond what the reserve still needs; nothing is sold to refill it
   * each leg uses independent IOC simulation; partial baskets remain open
   * kill switch: a file named KILL in runs/kalshi_sum_check/ws/ halts new trades, and so
-    does any settled trade that loses money (it would mean an event wasn't exhaustive)
+    does a fully filled basket that settles at a loss; partial-fill losses are recorded
 
 Usage
   uv run python paper_ws.py                      # websocket if a key is set, else REST polling
@@ -45,6 +45,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from classifier import CANDIDATE_REASON, EXHAUSTIVE, UNKNOWN, classify
 from feeds import KalshiWSFeed, OrderBookStore, RestPollFeed
@@ -442,16 +443,41 @@ class Engine:
             position = self.positions.setdefault(tid, {**context, "capital": 0.0, "legs": []})
             position["capital"] += float(lot["cost"])
             position["legs"].append({"ticker": lot["market"], "quantity": float(lot["quantity"])})
-        totals = {}
-        for event in active_events(self.account.events(self.broker.portfolio)):
+        events = active_events(self.account.events(self.broker.portfolio))
+        cleared = {e["data"]["halt_id"] for e in events
+                   if e["type"] == "observation" and e["data"].get("kind") == "halt_cleared"}
+        reported = {e["data"]["trade_id"] for e in events
+                    if e["type"] == "observation" and e["data"].get("kind") == "basket_settled"}
+        totals, contexts, quantities = {}, {}, {}
+        for event in events:
             d = event["data"]
-            if event["type"] == "observation" and d.get("kind") == "halt":
+            if event["type"] == "observation" and d.get("kind") == "halt" and event["record_id"] not in cleared:
                 self.halted = d["reason"]
-            tid = d.get("context", {}).get("trade_id")
+            context = d.get("context", {})
+            tid = context.get("trade_id")
             if event["type"] == "transaction" and tid:
-                totals[tid] = totals.get(tid, 0.0) + float(d["cash_delta"])
+                totals[tid] = totals.get(tid, Decimal(0)) + Decimal(d["cash_delta"])
+                contexts[tid] = context
+                for leg in d.get("legs", []):
+                    if d["reason"] == "fill" and Decimal(leg["quantity_delta"]) > 0:
+                        key = (leg["market"], leg["side"])
+                        filled = quantities.setdefault(tid, {})
+                        filled[key] = filled.get(key, Decimal(0)) + Decimal(leg["quantity_delta"])
         for tid, pnl in totals.items():
-            if tid not in self.positions and pnl < -0.005:
+            if tid in self.positions:
+                continue
+            context = contexts[tid]
+            intended = {(leg["ticker"], leg["contract"].lower()): Decimal(str(leg["qty"]))
+                        for leg in context.get("intended_legs", [])}
+            status = ("complete" if quantities.get(tid) == intended else "partial") if intended else "unknown"
+            if tid not in reported:
+                self.broker.observe("basket_settled", {"trade_id": tid, "net_pnl": str(pnl),
+                    "fill_status": status, "context": context,
+                    "filled_legs": [{"ticker": ticker, "side": side, "quantity": str(qty)}
+                                    for (ticker, side), qty in quantities.get(tid, {}).items()]})
+            # A partial basket has directional exposure. Its loss is a measured
+            # execution outcome, not evidence against the full basket's payoff.
+            if pnl < Decimal("-0.005") and status != "partial":
                 self.halt(f"settled trade {tid} lost ${-pnl:.2f}")
 
     def exposure(self, event=None):

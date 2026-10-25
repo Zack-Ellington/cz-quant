@@ -62,7 +62,9 @@ cutoff and the later ingestion time.
 The private archive bucket is gs://pambot-1613449701904-cz-quant-private, in the
 pambot infrastructure project. Uniform bucket-level access and public-access
 prevention are enabled. Hourly archives use SQLite's consistent backup API,
-include trial.json and checksums, and write timestamped directories. They do
+include trial.json and checksums, and write timestamped directories. New
+archives compress the SQLite backup with gzip; the checksum covers its
+uncompressed content. RESTORE.txt records the restoration commands. They do
 not copy an open database/WAL pair. Raw account evidence is never published.
 
 ```bash
@@ -71,6 +73,7 @@ scripts/experiments/archive.sh
 # Restore into a new directory, never over an active database:
 gcloud storage cp --recursive gs://BUCKET/PREFIX/archives/STAMP /absolute/restore
 cd /absolute/restore/STAMP
+gunzip -k accounting.sqlite3.gz
 sha256sum -c SHA256SUMS
 ```
 
@@ -124,3 +127,20 @@ installed for 18:05 UTC on October 25. All four CI jobs passed; 24 shared,
 48 sum, 146 independent-election, and 167 dependence-election tests pass.
 The implementation PR remains unmerged. Remaining live-normalization work is
 tracked in [issue 18](https://github.com/Zack-Ellington/cz-quant/issues/18).
+
+## Recovery after disk exhaustion
+
+Check free space, SQLite integrity, outstanding order reservations, and fresh
+market/account health before interpreting resumed results. Restart failed
+one-shot election scans and the archive service explicitly; continuous
+services restart themselves. Preserve the existing portfolios and losses.
+An outage leaves historical reference gaps, even after collection resumes.
+
+The sum strategy records partial-fill basket losses without halting. A losing
+fully filled basket, unknown fill provenance, or the kill switch still halts
+new submissions. To resume a previously halted paper portfolio after reviewing
+its loss, append a halt_cleared observation with the exact halt_id and a reason,
+then restart that strategy. Do not delete a halt or accounting transaction.
+Verify the next heartbeat has no halt and that the run records the deployed
+revision. Retain the original comparison window and record the recovery time
+separately; interrupted periods are not uninterrupted performance tests.

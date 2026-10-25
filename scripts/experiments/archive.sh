@@ -8,4 +8,6 @@ mkdir -p "$archive_dir"
 "$repo_dir/packages/czquant/.venv/bin/czquant" --runs-dir "$STRATEGY_RUNS_DIR" backup --output "$archive_dir/accounting.sqlite3"
 cp "$STRATEGY_RUNS_DIR/trial.json" "$archive_dir/trial.json"
 (cd "$archive_dir" && sha256sum accounting.sqlite3 trial.json > SHA256SUMS)
+gzip "$archive_dir/accounting.sqlite3"
+printf 'Restore with: gunzip -k accounting.sqlite3.gz\nThen verify: sha256sum -c SHA256SUMS\n' > "$archive_dir/RESTORE.txt"
 gcloud storage cp --recursive "$archive_dir" "$CZQUANT_BUCKET/archives/"
