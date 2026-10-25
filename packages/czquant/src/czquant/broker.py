@@ -24,7 +24,7 @@ class Broker:
         self.mode, self.metadata = rows[0]["mode"], rows[0]["metadata"]
 
     def state(self) -> State:
-        return replay(self.store.events(self.portfolio))
+        return replay(self.store.events(self.portfolio, kinds=("transaction", "correction")))
 
     @property
     def available(self) -> Decimal:
@@ -190,7 +190,7 @@ class Broker:
         if not reason:
             raise ValueError("correction reason required")
         with self.store.transaction():
-            known = {e["record_id"]: e for e in self.store.events(self.portfolio)}
+            known = {e["record_id"]: e for e in self.store.events(self.portfolio, kinds=("transaction", "correction"))}
             if not targets or not set(targets) <= known.keys():
                 raise ValueError("correction targets must belong to this portfolio")
             if any(known[t]["type"] != "transaction" for t in targets):

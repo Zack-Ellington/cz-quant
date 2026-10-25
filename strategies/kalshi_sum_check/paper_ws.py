@@ -443,7 +443,7 @@ class Engine:
             position = self.positions.setdefault(tid, {**context, "capital": 0.0, "legs": []})
             position["capital"] += float(lot["cost"])
             position["legs"].append({"ticker": lot["market"], "quantity": float(lot["quantity"])})
-        events = active_events(self.account.events(self.broker.portfolio))
+        events = active_events(self.account.events(self.broker.portfolio, kinds=("transaction", "observation", "correction")))
         cleared = {e["data"]["halt_id"] for e in events
                    if e["type"] == "observation" and e["data"].get("kind") == "halt_cleared"}
         reported = {e["data"]["trade_id"] for e in events

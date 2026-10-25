@@ -263,3 +263,18 @@ def test_finalized_value_collapses_range_without_fresh_book(tmp_path):
     end=(datetime.fromisoformat(utc())+timedelta(minutes=5)).isoformat()
     m=compare(store,start,end)[0][0]
     assert m['net_pnl_lower']==m['net_pnl_upper']==m['net_pnl']==D('.83')
+
+
+def test_filtered_replay_preserves_corrections_without_parsing_snapshots(tmp_path):
+    store,b,_=setup(tmp_path);b.submit(order());target=next(iter(b.state().lots))
+    # Corrupt diagnostic JSON must not affect the transaction-only replay.
+    identifier=store.append('snapshot',{'large_diagnostic':'unused'},'p')
+    store.db.execute("UPDATE events SET data='not json' WHERE record_id=?",(identifier,))
+    assert b.state().cash==D('95.83')
+    b.correct([target],'fixture correction')
+    assert b.state().cash==100
+    assert store.events('p',kinds=())==[]
+    selected=store.events('p',until=utc(),recorded_until=utc(),kinds=('transaction','correction'))
+    assert {e['type'] for e in selected}=={'transaction','correction'}
+    market_pass(store,Venue())
+    compare(store,utc(),utc())

@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 def market_pass(store: Store, api: Any) -> dict[str, Any]:
     portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
-    states = {p["id"]: replay(store.events(p["id"])) for p in portfolios}
+    states = {p["id"]: replay(store.events(p["id"], kinds=("transaction", "correction"))) for p in portfolios}
     tickers = {lot["market"] for state in states.values() for lot in state.lots.values()}
     for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
         tickers.add(json.loads(row[0])["ticker"])
@@ -57,7 +57,7 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
             errors.append({"market": ticker, "reason": type(exc).__name__})
             log.exception("market observation failed for %s", ticker)
     for p in portfolios:
-        state = replay(store.events(p["id"]))
+        state = replay(store.events(p["id"], kinds=("transaction", "correction")))
         store.append("snapshot", {"source": "paper_replay", "cash": state.cash, "realized": state.realized,
             "reserved": store.reserved(p["id"]), "lots": list(state.lots.values())}, p["id"])
     status = {"component": "market", "status": "healthy" if not errors else "degraded",
@@ -146,7 +146,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
             source = f"settlement:{settlement.get('exchange_index',0)}:{sub}:{settlement['ticker']}:{settlement['settled_time']}"
             if store.db.execute("SELECT 1 FROM events WHERE source_key=?",(source,)).fetchone():
                 continue
-            state = replay(store.events(p["id"]))
+            state = replay(store.events(p["id"], kinds=("transaction", "correction")))
             lots = [lot for lot in state.lots.values() if lot["market"]==settlement["ticker"]]
             yes = decimal(settlement['value'])/100 if settlement.get('value') is not None else (Decimal(1) if settlement['market_result']=='yes' else Decimal(0))
             expected = sum((lot['quantity']*(yes if lot['side']=='yes' else 1-yes) for lot in lots),Decimal(0))
@@ -165,7 +165,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                         source=source+':'+lot['record_id'],at=settlement['settled_time'])
                 store.append('account_evidence',{'kind':'settlement','raw':settlement},p['id'],source=source)
         actual = api.get("/portfolio/balance", {"subaccount": sub})
-        state = replay(store.events(p["id"]))
+        state = replay(store.events(p["id"], kinds=("transaction", "correction")))
         cash = decimal(actual["balance_dollars"]) if "balance_dollars" in actual else decimal(actual["balance"]) / 100
         observed_positions = list(api.pages("/portfolio/positions", "market_positions", subaccount=sub, limit=1000))
         expected_positions = {}

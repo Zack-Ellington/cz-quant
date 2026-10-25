@@ -70,7 +70,8 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
     first, last = timestamp(start), timestamp(end)
     if last < first:
         raise ValueError('end precedes start')
-    events = active_events(store.events(until=last.isoformat(timespec='microseconds'), recorded_until=recorded))
+    events = active_events(store.events(until=last.isoformat(timespec='microseconds'), recorded_until=recorded,
+        kinds=('transaction','correction','market','execution','observation','health')))
     points = [first]
     while points[-1] + timedelta(minutes=1) < last:
         points.append(points[-1] + timedelta(minutes=1))
@@ -195,7 +196,7 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
             'Quote ranges are neither executable liquidation values nor guaranteed settlement values; exit fees and depth are not modeled.',
             'Fixed-capital return unavailable across funding changes; time-weighted return uses funding-time valuations.',
             'Short trials cannot establish long-run profitability.'],
-        'health':[e for e in frozen.events(until=end,recorded_until=recorded) if e['type']=='health']}
+        'health':[e for e in frozen.events(until=end,recorded_until=recorded,kinds=('health',)) if e['type']=='health']}
     lines = ['# Experiment comparison', '', f'Window: {start} to {end}.', '',
              'Paper portfolios; midpoint and quote-range valuation with 120-second maximum book age.', '',
              '| Portfolio | Net P&L | P&L range | Realized | Fees | Fills | Midpoint coverage | Range coverage |',

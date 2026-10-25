@@ -144,3 +144,9 @@ then restart that strategy. Do not delete a halt or accounting transaction.
 Verify the next heartbeat has no halt and that the run records the deployed
 revision. Retain the original comparison window and record the recovery time
 separately; interrupted periods are not uninterrupted performance tests.
+
+Recovery validation also covers filtered event replay. Inventory reconstruction
+reads transactions and corrections, not repeated diagnostic snapshots. Offline
+reports read only the event types they use. The original records remain in the
+store and backup, so this reduces recovery memory and temporary disk use
+without changing accounting or audit history.

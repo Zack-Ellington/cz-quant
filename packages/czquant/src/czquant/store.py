@@ -113,12 +113,17 @@ class Store:
         return [{**dict(r), "metadata": json.loads(r["metadata"])} for r in self.db.execute("SELECT * FROM portfolios ORDER BY id")]
 
     def events(self, portfolio: str | None = None, until: str | None = None,
-               recorded_until: str | None = None) -> list[dict[str, Any]]:
+               recorded_until: str | None = None, kinds: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
         conditions, args = [], []
         for col, value in (("portfolio_id", portfolio), ("effective_at", until), ("recorded_at", recorded_until)):
             if value is not None:
                 conditions.append(col + ("=?" if col == "portfolio_id" else "<=?"))
                 args.append(value if col == "portfolio_id" else canonical_time(value))
+        if kinds is not None:
+            if not kinds:
+                return []
+            conditions.append("type IN (" + ",".join("?" for _ in kinds) + ")")
+            args.extend(kinds)
         sql = "SELECT * FROM events" + (" WHERE " + " AND ".join(conditions) if conditions else "")
         return [{**dict(r), "data": json.loads(r["data"])} for r in self.db.execute(sql + " ORDER BY effective_at,sequence", args)]
 
