@@ -1,5 +1,14 @@
 # cz-quant
 
+## Shared broker experiments
+
+The [broker and reporting guide](docs/broker-and-reporting.md) describes the
+common economic log, persistent portfolios, independent market/account
+monitors, and offline comparison. It supports both sum presets and the two
+election strategies. Strategies retain their own market readers and models.
+The trial and recovery instructions are in [experiment operations](docs/experiment-operations.md).
+
+
 Quantitative trading strategies. The first venue is the Kalshi prediction
 market.
 
@@ -10,12 +19,18 @@ or retired without an effect on the others.
 
 ## Strategies
 
-- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): arbitrage on Kalshi markets for the 2026 US midterm elections. Scaffold only.
+- [2026-midterm-prediction-arbitrage](strategies/2026-midterm-prediction-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets drawn independently, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
+
+- [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
 ## Quickstart
 
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct
 Python version for each strategy.
+
+For authenticated monitoring and future live subaccounts, see
+[Kalshi account setup](docs/kalshi-setup.md). Advanced API access is required
+to create subaccounts; public-data paper runs do not require it.
 
 ```bash
 git clone git@github.com:Zack-Ellington/cz-quant.git
@@ -58,8 +73,58 @@ cd cz-quant
    uv run strategy
    ```
 
-The strategy is a scaffold, so the command exits with no output. The strategy
-logic goes in `src/strategy/runner.py`.
+This strategy is implemented: the command reads the live Kalshi markets, runs
+the model-free checks and the independent Monte Carlo, prints the
+model-vs-market table, and paper-trades into `runs/` (nothing is ever sent). See its
+[README](strategies/2026-midterm-prediction-arbitrage/README.md) for the method,
+a sample report, and the reproducible `--snapshot-in` run.
+
+## Runs and reporting
+
+Every `uv run strategy` writes one directory, `runs/<strategy-id>/<UTC time>/`,
+at the repo root (gitignored). The strategies share nothing but this layout,
+and it is what makes them comparable.
+
+| File | Content |
+| --- | --- |
+| `ledger.jsonl` | the accounting record: one flat row per cash flow or mark, the only file reporting reads |
+| `events.jsonl` | what the strategy saw and decided (scans, accepted and rejected signals, notes); diagnostics |
+| `run.json` | strategy id, start and end, git commit, command line, API base URL, mode, paper policy, status |
+| `run.log` | what the run printed |
+
+Every ledger row has the same thirteen columns, so the ledgers of every run of
+every strategy concatenate into one table:
+
+| Column | |
+| --- | --- |
+| `ts`, `run_id`, `strategy` | when, which run, which strategy |
+| `type` | `fill` (a leg bought), `settlement` (a leg paid out), `mark` (an open leg valued at the current market) |
+| `position_id`, `basket` | the position the row belongs to; a position is open until a settlement row appears |
+| `ticker`, `side`, `quantity` | the contract (`yes` or `no`) and how many |
+| `price` | dollars per contract paid (fill), $1 or $0 (settlement), or what a buyer pays now (mark) |
+| `fee`, `cash_delta` | the net Kalshi fee, and the change in the account balance (0 for a mark) |
+| `simulated` | true in paper mode |
+
+From the rows alone: capital committed is minus the sum of fill cash deltas;
+cash is the sum of fill and settlement cash deltas; the value of the open book
+is quantity times the latest mark per open leg; P&L is cash plus value; return
+is P&L over capital committed. The schema is documented in each strategy's
+`src/strategy/ledger.py`.
+
+`scripts/` is a small uv project that reads the tree:
+
+```bash
+cd scripts
+uv sync
+uv run pnl csv -o ../ledger.csv                  # every row of every strategy, one CSV
+uv run pnl report                                # latest capital, cash, value, P&L, return per strategy
+uv run pnl plot --strategies 2026-midterm-prediction-arbitrage,2026-midterm-dependence-arbitrage \
+    --since 2026-10-01 --until 2026-12-31 -o ../pnl.html   # P&L and return over time, plus pnl.csv
+```
+
+`--since` and `--until` select positions by entry date; every later mark and
+settlement of a selected position is kept. The plot has one point per run per
+strategy. Tests: `uv run --group dev pytest` from `scripts/`.
 
 ### Create a new strategy
 
@@ -106,7 +171,14 @@ logic goes in `src/strategy/runner.py`.
 cz-quant/
 ├── README.md
 ├── scripts/
-│   └── new-strategy.sh          # creates a strategy from the template
+│   ├── new-strategy.sh          # creates a strategy from the template
+│   └── pnl.py                   # `uv run pnl`: one CSV, a P&L table, a P&L plot across strategies
+├── runs/                        # gitignored; one directory per run, per strategy
+│   └── <strategy-id>/<UTC time>/
+│       ├── ledger.jsonl         # flat accounting rows: fill, settlement, mark
+│       ├── events.jsonl         # scans and signals, diagnostics
+│       ├── run.json             # run metadata
+│       └── run.log              # what the run printed
 └── strategies/
     ├── _template/               # the template that every strategy starts from
     └── <strategy-id>/

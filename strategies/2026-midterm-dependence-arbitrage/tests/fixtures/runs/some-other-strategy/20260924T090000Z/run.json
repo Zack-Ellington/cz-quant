@@ -1,0 +1,17 @@
+{
+  "api_base_url": "fixture",
+  "command": [
+    "strategy"
+  ],
+  "ended_at": "2026-09-24T09:00:00.000000Z",
+  "git": {
+    "commit": null,
+    "dirty": null
+  },
+  "mode": "paper",
+  "run_id": "20260924T090000Z",
+  "snapshot_in": "fixture",
+  "started_at": "2026-09-24T09:00:00.000000Z",
+  "status": "ok",
+  "strategy": "some-other-strategy"
+}

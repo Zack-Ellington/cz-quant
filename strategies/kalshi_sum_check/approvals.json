@@ -1,0 +1,5 @@
+{
+  "_comment": "UNKNOWN candidate-list events (elections, nominations) the paper trader may buy. Add an event or series ticker only after reading its rules: a write-in, withdrawal or cancelled race must not be able to make every listed outcome lose.",
+  "events": [],
+  "series": []
+}
