@@ -56,6 +56,8 @@ from czquant.kalshi import Kalshi
 from czquant.paper import Paper
 from czquant.accounting import active_events
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WS_RUNS = os.path.join(os.environ.get("STRATEGY_RUNS_DIR", os.path.join(REPO_ROOT, "runs")), "diagnostics", os.environ.get("CZQUANT_PORTFOLIO", "sum"))
@@ -406,6 +408,11 @@ class Engine:
         if self.broker.mode != "paper":
             raise ValueError("This strategy entry point is paper only")
         self.ledger = Diagnostics(self.broker)
+        # Basket legs are submitted concurrently, each thread with its own store
+        # connection (SQLite connections can't cross threads); writes still serialize
+        # through the store's BEGIN IMMEDIATE transactions.
+        self._leg_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="leg")
+        self._leg_local = threading.local()
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
         self.broker.start("kalshi_sum_check", revision, asdict(cfg))
         self.store = OrderBookStore(on_update=self._on_book, refill_seconds=cfg.refill_seconds)
@@ -443,7 +450,10 @@ class Engine:
             position = self.positions.setdefault(tid, {**context, "capital": 0.0, "legs": []})
             position["capital"] += float(lot["cost"])
             position["legs"].append({"ticker": lot["market"], "quantity": float(lot["quantity"])})
-        events = active_events(self.account.events(self.broker.portfolio, kinds=("transaction", "observation", "correction")))
+        # Only the observation kinds read below: heartbeats and other diagnostics grow
+        # without bound and used to be reloaded on every heartbeat and every basket.
+        events = active_events(self.account.events(self.broker.portfolio, kinds=("transaction", "observation", "correction"),
+                                                   observations=("halt", "halt_cleared", "basket_settled")))
         cleared = {e["data"]["halt_id"] for e in events
                    if e["type"] == "observation" and e["data"].get("kind") == "halt_cleared"}
         reported = {e["data"]["trade_id"] for e in events
@@ -721,21 +731,44 @@ class Engine:
                    "sets": r.sets, "intended_legs": r.legs, "expected_net": r.net,
                    "apr": r.apr, "days": r.days, "settle_source": u.get("settle_source"),
                    "pool": "priority" if is_priority(r.days, r.apr, self.cfg) else "general"}
-        outcomes = []
+        orders = []
         for leg in r.legs:
             prices = [price for price, qty in leg["levels"] if qty > 0]
             limit = max(prices) if r.side == "long" else min(prices)
-            result = self.broker.submit({"ticker": leg["ticker"], "side": "bid" if r.side == "long" else "ask",
+            orders.append({"ticker": leg["ticker"], "side": "bid" if r.side == "long" else "ask",
                 "count": str(r.sets), "price": str(round(limit, 6)),
-                "time_in_force": "immediate_or_cancel", "self_trade_prevention_type": "taker_at_cross"}, context)
-            outcomes.append({"ticker": leg["ticker"], "filled": result.get("filled", "0"), "status": result["status"]})
+                "time_in_force": "immediate_or_cancel", "self_trade_prevention_type": "taker_at_cross"})
+        # All legs at once, off the event loop: each leg's book is read at nearly the same
+        # moment (sequential legs drifted ~0.4 s apart each) and the feed keeps running.
+        loop = asyncio.get_running_loop()
+        results = await asyncio.gather(*(loop.run_in_executor(self._leg_pool, self._submit_leg, order, context)
+                                         for order in orders), return_exceptions=True)
+        outcomes, failure = [], None
+        for order, result in zip(orders, results):
+            if isinstance(result, BaseException):
+                failure = failure or result
+                outcomes.append({"ticker": order["ticker"], "filled": "0", "status": "error",
+                                 "error": f"{type(result).__name__}: {result}"[:200]})
+            else:
+                outcomes.append({"ticker": order["ticker"], "filled": result.get("filled", "0"), "status": result["status"]})
         self.broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
+        if failure is not None:
+            self._resume()
+            raise failure
         self._resume()
         if any(float(result["filled"]) > 0 for result in outcomes):
             self.counters["trades"] += 1
         self.cooldown_until[r.event] = time.time() + self.cfg.cooldown
         self.dirty.add(r.event)
         log.info("BASKET %s %s intended %s sets; actual %s", r.event, r.side, r.sets, outcomes)
+
+    def _submit_leg(self, order, context):
+        """Submit one leg on a pool thread, through that thread's own broker."""
+        broker = getattr(self._leg_local, "broker", None)
+        if broker is None:
+            broker = Broker(Store(self.account.root), self.broker.portfolio, self.broker.adapter, self.run_id)
+            self._leg_local.broker = broker
+        return broker.submit(order, context)
 
     # -- settlement ------------------------------------------------------------
 
@@ -796,6 +829,7 @@ class Engine:
             self.ledger.write("run_stop", cash=round(self.cash, 2), exposure=round(self.exposure(), 2),
                               realized=round(self.realized, 2), counters=dict(self.counters))
             self.ledger.close()
+            self._leg_pool.shutdown(wait=True)
 
 
 def _duration(s):

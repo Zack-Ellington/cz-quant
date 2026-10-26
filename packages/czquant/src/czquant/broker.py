@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .accounting import State, replay
+from .accounting import State, portfolio_state
 from .store import Store, decimal, encode
 
 
@@ -24,7 +24,19 @@ class Broker:
         self.mode, self.metadata = rows[0]["mode"], rows[0]["metadata"]
 
     def state(self) -> State:
-        return replay(self.store.events(self.portfolio, kinds=("transaction", "correction")))
+        return portfolio_state(self.store, self.portfolio)
+
+    def _reservation(self, order: dict[str, Any]) -> Decimal:
+        """Cash to hold for an order: the cost of the contracts it opens (net of any
+        opposite position it closes) plus a conservative fee allowance."""
+        quantity, price = decimal(order["count"]), decimal(order["price"])
+        closing_side = "no" if order["side"] == "bid" else "yes"
+        held = sum((lot["quantity"] for lot in self.state().lots.values()
+                    if lot["market"] == order["ticker"] and lot["side"] == closing_side), Decimal(0))
+        opening = max(Decimal(0), quantity - held)
+        cost = opening * (price if order["side"] == "bid" else 1 - price)
+        # Paper's exact fee is checked before execution. Reserve a conservative default fee.
+        return cost + (quantity * Decimal("0.0175")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
 
     @property
     def available(self) -> Decimal:
@@ -62,14 +74,7 @@ class Broker:
                 if prior["portfolio_id"] != self.portfolio or prior["request"] != encode(order) or prior["context"] != encode(context):
                     raise ValueError("client order ID reused for a different request")
                 return dict(prior)  # Never resubmit an uncertain write implicitly.
-            state = self.state()
-            closing_side = "no" if order["side"] == "bid" else "yes"
-            held = sum((lot["quantity"] for lot in state.lots.values()
-                        if lot["market"] == order["ticker"] and lot["side"] == closing_side), Decimal(0))
-            opening = max(Decimal(0), quantity - held)
-            cost = opening * (price if order["side"] == "bid" else 1 - price)
-            # Paper's exact fee is checked before execution. Reserve a conservative default fee.
-            reserve = cost + (quantity * Decimal("0.0175")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+            reserve = self._reservation(order)
             if self.mode == "paper" and reserve > self.available:
                 self.observe("order_rejected", {"reason": "insufficient_cash", "order": order, "context": context})
                 return {"client_order_id": identifier, "status": "rejected", "filled": "0"}
@@ -109,24 +114,55 @@ class Broker:
         if self.mode == "paper":
             self.finish(identifier, "canceled")
             return {"status": "canceled"}
+        self._require_venue_id(row)
         response = self.adapter.cancel_order(row["venue_id"], {"subaccount": self.metadata["subaccount"]})
         self.observe("cancel_acknowledged", {"client_order_id": identifier, "response": response})
         # Account monitor releases reservations after fills and terminal status reconcile.
         return response
 
     def amend(self, identifier: str, changes: dict[str, Any]) -> dict[str, Any]:
-        row = self._order(identifier)
+        """Amend a resting live order and resize its cash reservation.
+
+        Before the venue call the reservation is raised to cover the larger of the old
+        and new order, so a lost acknowledgement never leaves the order under-reserved.
+        After the acknowledgement it is set to the amended order's own requirement.
+        """
         if self.mode == "paper":
             raise NotImplementedError("IOC paper orders do not rest; submit a new order")
         if changes.get("subaccount", self.metadata["subaccount"]) != self.metadata["subaccount"]:
             raise ValueError("cannot change portfolio ownership")
+        if any(k in changes for k in ("ticker", "side", "client_order_id")):
+            raise ValueError("amend can change count and price only; submit a new order instead")
         request = {**changes, "subaccount": self.metadata["subaccount"]}
-        self.observe("amend_intent", {"client_order_id": identifier, "changes": request})
+        with self.store.transaction():
+            row = self._order(identifier)
+            self._require_venue_id(row)
+            if row["status"] not in ("acknowledged", "pending"):
+                raise ValueError(f"cannot amend an order that is {row['status']}")
+            amended = {**json.loads(row["request"]), **changes}
+            quantity, price = decimal(amended["count"]), decimal(amended["price"])
+            if quantity <= 0 or not 0 <= price <= 1 or quantity < decimal(row["filled"]):
+                raise ValueError("invalid amended quantity or price")
+            # Like submit, live cash sufficiency is the exchange's call; the ledger only
+            # keeps the reservation honest so `available` never overstates free cash.
+            old, new = decimal(row["reserved"]), self._reservation(amended)
+            held = max(old, new)
+            self.store.db.execute("UPDATE orders SET reserved=? WHERE id=?", (str(held), identifier))
+            self.observe("amend_intent", {"client_order_id": identifier, "changes": request,
+                                          "reserved_before": str(old), "reserved_during": str(held)})
         result = self.adapter.amend_order(row["venue_id"], request)
-        amended = {**json.loads(row["request"]), **changes}
-        self.store.db.execute("UPDATE orders SET request=? WHERE id=?", (encode(amended), identifier))
-        self.observe("amend_acknowledged", {"client_order_id": identifier, "response": result})
+        with self.store.transaction():
+            self.store.db.execute("UPDATE orders SET request=?,reserved=? WHERE id=?",
+                                  (encode(amended), str(new), identifier))
+            self.observe("amend_acknowledged", {"client_order_id": identifier, "response": result,
+                                                "reserved": str(new)})
         return result
+
+    @staticmethod
+    def _require_venue_id(row: dict[str, Any]) -> None:
+        if not row.get("venue_id"):
+            raise ValueError("the venue order ID is unknown (acknowledgement not received); "
+                             "wait for the account monitor to recover it")
 
     def _order(self, identifier: str) -> dict[str, Any]:
         row = self.store.db.execute("SELECT * FROM orders WHERE id=? AND portfolio_id=?", (identifier, self.portfolio)).fetchone()
@@ -197,5 +233,17 @@ class Broker:
                 raise ValueError("corrections target economic transactions")
             identifier = self.store.append("correction", {"targets": targets, "reason": reason}, self.portfolio, self.run_id,
                                            at=min(known[t]["effective_at"] for t in targets))
+            # A corrected fill no longer counts toward its order, so the genuine fill can
+            # still be booked and the order's overfill check stays accurate.
+            removed: dict[str, Decimal] = {}
+            for target in targets:
+                data = known[target]["data"]
+                if data.get("reason") == "fill" and data.get("order_id"):
+                    qty = sum((abs(decimal(leg["quantity_delta"])) for leg in data.get("legs", [])), Decimal(0))
+                    removed[data["order_id"]] = removed.get(data["order_id"], Decimal(0)) + qty
+            for order_id, qty in removed.items():
+                row = self._order(order_id)
+                self.store.db.execute("UPDATE orders SET filled=? WHERE id=?",
+                                      (str(max(Decimal(0), decimal(row["filled"]) - qty)), order_id))
             self.state()  # Roll back if dependent inventory events would become invalid.
             return identifier

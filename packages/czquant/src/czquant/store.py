@@ -5,16 +5,33 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterator
 
 
+_clock_lock = threading.Lock()
+_last_time = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def utc() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    """Current UTC time, strictly increasing within the process.
+
+    Windows' clock can return the same value for many consecutive calls, which made
+    events written back to back share a timestamp and fall on report-window edges.
+    Each call is at least one microsecond after the previous one.
+    """
+    global _last_time
+    with _clock_lock:
+        now = datetime.now(timezone.utc)
+        if now <= _last_time:
+            now = _last_time + timedelta(microseconds=1)
+        _last_time = now
+    return now.isoformat(timespec="microseconds")
 
 
 def canonical_time(value: str) -> str:
@@ -47,6 +64,8 @@ class Store:
         self.path = self.root / "accounting.sqlite3"
         self.db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        # portfolio -> cached accounting replay (see accounting.portfolio_state).
+        self.state_cache: dict[str, Any] = {}
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
@@ -78,6 +97,8 @@ class Store:
             yield
         except BaseException:
             self.db.rollback()
+            # Cached replays may include rows this transaction wrote and just discarded.
+            self.state_cache.clear()
             raise
         else:
             self.db.commit()
@@ -113,8 +134,23 @@ class Store:
         return [{**dict(r), "metadata": json.loads(r["metadata"])} for r in self.db.execute("SELECT * FROM portfolios ORDER BY id")]
 
     def events(self, portfolio: str | None = None, until: str | None = None,
-               recorded_until: str | None = None, kinds: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+               recorded_until: str | None = None, kinds: tuple[str, ...] | None = None,
+               observations: tuple[str, ...] | None = None,
+               after_sequence: int | None = None) -> list[dict[str, Any]]:
+        """Events in effective-time order.
+
+        `observations` keeps only observations whose data `kind` is listed (other event
+        types are unaffected), so callers can skip heartbeats and diagnostics.
+        `after_sequence` returns only events recorded after that sequence number.
+        """
         conditions, args = [], []
+        if observations is not None:
+            conditions.append("(type != 'observation' OR json_extract(data, '$.kind') IN ("
+                              + ",".join("?" for _ in observations) + "))" if observations else "type != 'observation'")
+            args.extend(observations)
+        if after_sequence is not None:
+            conditions.append("sequence > ?")
+            args.append(after_sequence)
         for col, value in (("portfolio_id", portfolio), ("effective_at", until), ("recorded_at", recorded_until)):
             if value is not None:
                 conditions.append(col + ("=?" if col == "portfolio_id" else "<=?"))

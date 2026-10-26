@@ -94,3 +94,39 @@ def replay(events: list[dict[str, Any]]) -> State:
     for event in active_events(events):
         state.apply(event)
     return state
+
+
+ECONOMIC = ("transaction", "correction")
+
+
+def portfolio_state(store: Any, portfolio: str) -> State:
+    """The portfolio's replayed state, extended incrementally from a per-store cache.
+
+    A full replay reads every transaction, which made each submit, fill and correction
+    slower as the ledger grew. New rows are applied on top of the cached state only
+    when that is guaranteed to equal a full replay: no new correction, and no new row
+    effective before the latest row already applied (FIFO lots depend on order).
+    Anything else, including a rolled-back transaction (the store clears the cache),
+    falls back to a full replay. The returned State is shared; treat it as read-only.
+    """
+    cached = store.state_cache.get(portfolio)
+    if cached is not None:
+        sequence, latest, state = cached
+        new = store.events(portfolio, kinds=ECONOMIC, after_sequence=sequence)
+        if not new:
+            return state
+        if all(e["type"] == "transaction" and e["effective_at"] >= latest for e in new):
+            try:
+                for event in sorted(new, key=lambda e: (e["effective_at"], e["sequence"])):
+                    state.apply(event)
+            except Exception:
+                store.state_cache.pop(portfolio, None)  # partly applied: never reuse it
+                raise
+            store.state_cache[portfolio] = (max(e["sequence"] for e in new),
+                                            max(latest, max(e["effective_at"] for e in new)), state)
+            return state
+    events = store.events(portfolio, kinds=ECONOMIC)
+    state = replay(events)
+    if events:
+        store.state_cache[portfolio] = (max(e["sequence"] for e in events), max(e["effective_at"] for e in events), state)
+    return state
