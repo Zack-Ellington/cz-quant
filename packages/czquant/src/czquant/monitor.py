@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from .accounting import replay
+from .accounting import portfolio_state, replay
 from .broker import Broker
 from .kalshi import Kalshi
 from .book import levels
@@ -97,7 +97,8 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                              (order["order_id"], client_id, p["id"]))
         fills += list(api.pages("/portfolio/fills", "fills", subaccount=sub, min_ts=since, limit=1000))
     fills = sorted({(f.get("exchange_index",0),f["fill_id"]):f for f in fills}.values(), key=fill_time)
-    mapped, unattributed = 0, 0
+    mapped, unattributed, quarantined = 0, 0, 0
+    discrepancies: list[dict[str, Any]] = []
     for fill in fills:
         # REST and stream adapters must normalize to this trade/order/shard identity.
         key = f"kalshi-fill:{fill.get('exchange_index',0)}:{fill['order_id']}:{fill.get('trade_id') or fill['fill_id']}"
@@ -106,12 +107,22 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         if row:
             side = json.loads(row["request"])["side"]
             price = fill.get("yes_price_dollars")
-            if price is None:
-                raise ValueError("fill lacks a precise YES price")
-            broker = Broker(store, row["portfolio_id"], run_id=row["run_id"])
-            broker.fill(row["id"], fill["count_fp"], price, fill["fee_cost"], key,
-                        {"venue": "kalshi", "trade_id": fill.get("trade_id"), "book_side": side}, fill_time(fill))
-            mapped += 1
+            try:
+                if price is None:
+                    raise ValueError("fill lacks a precise YES price")
+                broker = Broker(store, row["portfolio_id"], run_id=row["run_id"])
+                broker.fill(row["id"], fill["count_fp"], price, fill["fee_cost"], key,
+                            {"venue": "kalshi", "trade_id": fill.get("trade_id"), "book_side": side}, fill_time(fill))
+                mapped += 1
+            except ValueError as exc:
+                # One fill the ledger can't accept (an overfill, a conflicting receipt, a
+                # missing price) must not stop reconciliation for every other fill and
+                # portfolio. It is set aside, once, for an operator to resolve.
+                quarantined += 1
+                discrepancies.append({"portfolio": row["portfolio_id"], "kind": "fill_quarantined",
+                                      "order": row["id"], "fill": key, "reason": str(exc)})
+                store.append("quarantine", {"kind": "fill", "reason": str(exc), "order": row["id"], "raw": fill},
+                             row["portfolio_id"], source=key + ":quarantine", at=fill_time(fill))
         else:
             unattributed += 1
         store.append("account_evidence", {"kind": "fill", "raw": fill}, source=key + ":raw", at=fill_time(fill))
@@ -122,7 +133,6 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
     orders = list(api.pages("/portfolio/orders", "orders", limit=1000))
     store.append("account_snapshot", {"balance": balance, "positions": positions, "orders": orders,
                                      "settlements": settlements, "history_from": since})
-    discrepancies = []
     if live:
         for transfer in api.pages("/portfolio/subaccounts/transfers", "transfers", limit=1000):
             at = datetime.fromtimestamp(transfer["created_ts"],timezone.utc).isoformat()
@@ -146,7 +156,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
             source = f"settlement:{settlement.get('exchange_index',0)}:{sub}:{settlement['ticker']}:{settlement['settled_time']}"
             if store.db.execute("SELECT 1 FROM events WHERE source_key=?",(source,)).fetchone():
                 continue
-            state = replay(store.events(p["id"], kinds=("transaction", "correction")))
+            state = portfolio_state(store, p["id"])
             lots = [lot for lot in state.lots.values() if lot["market"]==settlement["ticker"]]
             yes = decimal(settlement['value'])/100 if settlement.get('value') is not None else (Decimal(1) if settlement['market_result']=='yes' else Decimal(0))
             expected = sum((lot['quantity']*(yes if lot['side']=='yes' else 1-yes) for lot in lots),Decimal(0))
@@ -165,7 +175,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                         source=source+':'+lot['record_id'],at=settlement['settled_time'])
                 store.append('account_evidence',{'kind':'settlement','raw':settlement},p['id'],source=source)
         actual = api.get("/portfolio/balance", {"subaccount": sub})
-        state = replay(store.events(p["id"], kinds=("transaction", "correction")))
+        state = portfolio_state(store, p["id"])
         cash = decimal(actual["balance_dollars"]) if "balance_dollars" in actual else decimal(actual["balance"]) / 100
         observed_positions = list(api.pages("/portfolio/positions", "market_positions", subaccount=sub, limit=1000))
         expected_positions = {}
@@ -184,7 +194,8 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                     Broker(store, p["id"]).finish(row["id"], order["status"])
     store.db.execute("INSERT OR REPLACE INTO checkpoints VALUES('account',?)", (str(watermark),))
     status = {"component": "account", "status": "healthy" if not discrepancies else "degraded",
-              "mapped_fills": mapped, "unattributed_fills": unattributed, "discrepancies": discrepancies}
+              "mapped_fills": mapped, "unattributed_fills": unattributed, "quarantined_fills": quarantined,
+              "discrepancies": discrepancies}
     store.append("health", status)
     return status
 
