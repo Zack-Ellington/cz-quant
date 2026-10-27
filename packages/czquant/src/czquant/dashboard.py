@@ -195,7 +195,13 @@ async def serve(root: str | None, host: str = "127.0.0.1", port: int = 8790, int
     ledger.tick()
     clients: set[Any] = set()
 
+    from plotly.offline import get_plotlyjs
+    plotly_js = get_plotlyjs().encode()  # the copy bundled with plotly: no CDN, works offline
+
     def process_request(connection: Any, request: Any) -> Any:
+        if request.path == "/plotly.min.js":
+            return Response(200, "OK", Headers([("Content-Type", "application/javascript; charset=utf-8"),
+                                                ("Cache-Control", "max-age=86400")]), plotly_js)
         if request.path in ("/", "/index.html"):
             return Response(200, "OK", Headers([("Content-Type", "text/html; charset=utf-8"),
                                                 ("Cache-Control", "no-store")]), PAGE.encode())
@@ -227,7 +233,7 @@ async def serve(root: str | None, host: str = "127.0.0.1", port: int = 8790, int
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Strategy Ledger</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.2/plotly.min.js"></script>
+<script src="/plotly.min.js"></script>
 <style>
 :root{--bg:#f7f7f5;--panel:#fff;--ink:#1d1f21;--muted:#6b7075;--line:#e3e3df;--good:#1f7a4d;--bad:#b3261e;--warn:#9a6700}
 @media (prefers-color-scheme:dark){:root{--bg:#141517;--panel:#1c1d20;--ink:#e8e8e6;--muted:#9a9ea3;--line:#2c2e32;--good:#5cc28d;--bad:#ff8a80;--warn:#e0b341}}
@@ -270,7 +276,7 @@ const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim
 function layout(title){return{title:{text:title,font:{size:14}},margin:{l:56,r:12,t:36,b:36},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',
  font:{color:css('--ink')},xaxis:{gridcolor:css('--line')},yaxis:{gridcolor:css('--line'),tickprefix:'$',zerolinecolor:css('--muted')},legend:{orientation:'h',y:-0.18},hovermode:'x unified'}}
 const name=p=>`${p.strategy} · ${p.id}`;
-function draw(){if(!state)return;const ps=state.portfolios;
+function draw(){if(!state)return;if(!window.Plotly){['realized','unrealized','net'].forEach(id=>$(id).innerHTML='<p class="muted">Charts unavailable: the chart library did not load.</p>');return}const ps=state.portfolios;
  const line=(key)=>ps.map(p=>({name:name(p),x:(series[p.id]||[]).map(r=>r.t),y:(series[p.id]||[]).map(r=>num(r[key])),mode:'lines',connectgaps:false}));
  Plotly.react('realized',line('realized'),layout('Realized P&L'),{displayModeBar:false,responsive:true});
  Plotly.react('unrealized',line('unrealized_marked'),layout('Unrealized P&L, marked lots'),{displayModeBar:false,responsive:true});

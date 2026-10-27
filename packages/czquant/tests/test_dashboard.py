@@ -144,6 +144,9 @@ def test_server_serves_the_page_and_streams_snapshot_then_ticks(tmp_path):
             except httpx.ConnectError:
                 continue
         assert page.status_code == 200 and "Strategy ledger" in page.text
+        async with httpx.AsyncClient() as client:
+            script = await client.get("http://127.0.0.1:8799/plotly.min.js")
+        assert script.status_code == 200 and "Plotly" in script.text[:5000] and len(script.content) > 1_000_000
         async with websockets.connect("ws://127.0.0.1:8799/ws") as ws:
             first = json.loads(await ws.recv())
             second = json.loads(await ws.recv())
