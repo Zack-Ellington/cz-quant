@@ -20,6 +20,8 @@ from matching import EASTERN, kalshi_game, match, name_matches
     ("Tampa Bay", "TB", "Tampa Bay Rays", True),
     ("Columbus", "CBJ", "COL Avalanche", False),       # no reverse prefixes
     ("Columbus", "CBJ", "CBJ Blue Jackets", True),
+    ("Montreal", "MTL", "Montréal Canadiens", True),    # accents are ignored
+    ("St. Louis", "STL", "St Louis Blues", True),
     ("", "X", "Boston Celtics", False),
 ])
 def test_name_matches(kalshi, abbr, book, ok):

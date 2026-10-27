@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -37,7 +38,8 @@ PAIRS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pairs.json")
 
 def tokens(name: str) -> list[str]:
     out = []
-    for raw in re.findall(r"[a-z0-9]+", name.lower().replace("&", " ")):
+    plain = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()  # "Montréal" -> "Montreal"
+    for raw in re.findall(r"[a-z0-9]+", plain.lower().replace("&", " ")):
         out.extend(ALIASES.get(raw, [raw]))
     return out
 
