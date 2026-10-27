@@ -75,10 +75,33 @@ uv run python trader.py --once --leagues nba     # one scan
 uv run python trader.py --duration 4:00
 ```
 
-Each scan makes one odds request per league. The defaults (three leagues every 120 s)
-use about 2,200 credits a day, plus 2 per DraftKings monitor pass with a finished game
-to settle. Use `--interval` and `--leagues` to fit your plan's quota.
-`scan_complete` observations record the credits remaining.
+### Odds credits
+
+The Odds API's free plan gives 500 credits a month. An odds read costs 1 credit per
+league, and a results read costs 2. Only two things spend credits:
+
+| Who | What it pays for | When |
+|---|---|---|
+| `trader.py` | One league's odds | When the next read is due, for one league with a game starting within `--horizon` hours (12). The league read longest ago goes first |
+| `trader.py` (fill) | The bet's own odds check | Once per basket it actually tries to place |
+| `czquant monitor draftkings` | Results, all held games of a league at once | At most every 30 minutes per league, and only 2.5 hours after a held game started |
+
+Everything else is free. The monitor marks held bets from the newest read any process
+cached in `$STRATEGY_RUNS_DIR/odds_cache/`, dated by when that read was made. The
+dashboard reads files and the store only.
+
+The trader spreads reads so the credits last the trial. The next read waits
+(trial end − now) ÷ (credits − reserve), never less than `--interval`. With 499
+credits, a reserve of 40, and a 7-day trial, that is one read about every 22 minutes,
+and unused hours (no upcoming games) leave more credits for later. The trial end is
+saved in `odds_cache/trial.json`, so a restart keeps it. `--trial-days N` starts a new
+one. Odds reads stop at `--odds-reserve` (40) credits. Those are kept for results
+reads, so held bets can still settle. Each results read uses 2 of the 40, so the
+reserve covers about 20. The dashboard shows the credits remaining and the trial end.
+
+```bash
+uv run python trader.py --trial-days 7 --leagues nba,nhl     # fewer leagues, more reads per league
+```
 
 ## What it trades
 
@@ -94,7 +117,8 @@ Every check below must pass:
   unmatched games are counted and never traded. `pairs.json` can pin a pair (with
   explicit roles) or block a Kalshi event.
 - **Pre-game only.** A game that starts within `--min-lead` minutes (10) is skipped.
-  So is a game with suspended odds or odds older than `--max-odds-age` (180 s).
+  So is a game with suspended odds, or odds DraftKings last updated more than
+  `--max-odds-age` (1800 s) ago according to the source.
 - **Edge.** The basket must clear `--min-edge` (0.01 per $1 set) and `--min-net`
   ($0.25), and beat the risk-free hurdle `--risk-free` (5%) compounded to the game's
   expected end. Kalshi legs are walked through the book. Each pays the series taker
@@ -104,8 +128,8 @@ Every check below must pass:
   game (10%), `--max-total-frac`, `--max-open-events`, cash, and `--max-stake` per
   DraftKings selection ($500). The last stands in for DraftKings' unpublished
   account limits.
-- **Execution.** After a re-check on fresh odds and books, the DraftKings legs go
-  first. Each is a fill-or-kill bet, declined whole if the odds shortened, the game
+- **Execution.** After a re-check on fresh Kalshi books (the odds are the read the
+  scan just paid for), the DraftKings legs go first. Each is a fill-or-kill bet, declined whole if the odds shortened, the game
   started, or the quote went stale. Better odds are taken at the better price.
   Only when every bet is accepted are the Kalshi legs bought: IOC through the shared
   depth policy, concurrently, for the same number of sets. A declined bet costs

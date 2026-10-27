@@ -95,8 +95,8 @@ def test_scan_backs_draftkings_then_buys_kalshi(tmp_path, monkeypatch):
 
 
 def test_declined_bet_sends_no_kalshi_order(tmp_path, monkeypatch):
-    # The scan and the re-check see 4.0; when the bet is placed the odds are 3.0.
-    eng, store = engine(tmp_path, monkeypatch, Source((1.25, 4.0), (1.25, 4.0), (1.30, 3.0)))
+    # The scan sees 4.0; when the bet is placed (the only other odds read) they are 3.0.
+    eng, store = engine(tmp_path, monkeypatch, Source((1.25, 4.0), (1.30, 3.0)))
     eng.run(once=True)
     assert not portfolio_state(store, "xm").lots
     orders = [dict(r) for r in store.db.execute("SELECT request,status FROM orders")]
@@ -137,3 +137,56 @@ def test_league_selection():
         trader.load_leagues(("cricket",))
     assert set(trader.load_leagues()) == {"nba", "nhl", "mlb"}  # NFL stays off: ties push on DraftKings
     assert set(trader.load_leagues(("nfl",))) == {"nfl"}
+
+
+class Metered:
+    """A quota source with raw reads, for the pacer."""
+    name = "oddsapi"
+
+    def __init__(self, credits):
+        self.remaining, self.remaining_at, self.fetches = credits, 0.0, []
+
+    def fetch(self, league):
+        import time as t
+        self.fetches.append(league)
+        self.remaining -= 1
+        self.remaining_at = t.time()
+        return []
+
+    def parse(self, raw, league, fetched_at):
+        return []
+
+    def results(self, league, events):
+        return {}
+
+
+def test_pacer_spreads_credits_over_the_trial_and_survives_restart(tmp_path):
+    source = Metered(140)
+    book = DraftKings(source, cache_dir=tmp_path, reserve=40)
+    pacer = trader.OddsPacer(book, trader.Config(trial_days=1, interval_seconds=60))
+    assert pacer.pick(["nba", "nhl"], ["nba", "nhl", "mlb"], str) == ["nba"]  # metered: one league per read
+    book.selections("nba", fresh=True)  # the first read learns the quota: 139 left
+    spacing = pacer.spacing()
+    assert 86400 / 99 * 0.99 < spacing <= 86400 / 99  # 99 credits above the reserve over one day
+    assert pacer.pick(["nba", "nhl"], ["nba", "nhl", "mlb"], str) == []  # not yet due
+    restarted = trader.OddsPacer(DraftKings(source, cache_dir=tmp_path, reserve=40), trader.Config())
+    assert abs(restarted.end - pacer.end) < 1  # the saved trial end is kept
+    source.remaining = 40
+    assert pacer.spacing() == float("inf")  # only the settlement reserve is left
+
+
+def test_due_read_takes_the_league_read_longest_ago(tmp_path):
+    source = Metered(500)
+    book = DraftKings(source, cache_dir=tmp_path, reserve=40)
+    pacer = trader.OddsPacer(book, trader.Config(trial_days=1, interval_seconds=0))
+    book.selections("nba", fresh=True)
+    pacer.spacing = lambda: 0.0
+    assert pacer.pick(["nba", "nhl"], ["nba", "nhl", "mlb"], str) == ["nhl"]
+    assert pacer.pick([], ["nba", "nhl", "mlb"], str) == []  # no upcoming games: no read
+
+
+def test_leagues_without_upcoming_games_cost_nothing(tmp_path, monkeypatch):
+    eng, store = engine(tmp_path, monkeypatch, Source((1.25, 4.0)))
+    eng.cfg.horizon_hours = 1  # the fixture game starts in six hours
+    eng.run(once=True)
+    assert eng.book.source.reads == 0 and not store.db.execute("SELECT 1 FROM orders").fetchone()

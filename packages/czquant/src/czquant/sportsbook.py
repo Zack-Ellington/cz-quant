@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from .broker import Broker
-from .draftkings import DraftKings, is_sportsbook, parse_ticker
+from .draftkings import DraftKings, OutOfCredits, is_sportsbook, parse_ticker
 from .store import Store, decimal, utc
 
 
@@ -16,8 +16,8 @@ class SportsbookPaper:
     """A bet is accepted whole at the current odds or not at all.
 
     After `latency` the selection is read fresh. The bet is declined if the
-    selection is gone, suspended, in play (unless allowed), quoted longer ago than
-    `max_age` seconds, or now costs more than the limit price (the odds shortened).
+    selection is gone, suspended, in play (unless allowed), last updated by the
+    source more than `max_age` seconds ago, refused for lack of odds credits, or now costs more than the limit price (the odds shortened).
     Better odds are accepted at the new price, like a sportsbook's "accept better
     odds" setting. Each selection takes at most `max_stake` per portfolio, a stand-in
     for the book's unpublished account limits. The margin is in the price; the fee is 0.
@@ -26,7 +26,7 @@ class SportsbookPaper:
     policy = "sportsbook-fixed-odds-v1"
 
     def __init__(self, client: DraftKings, latency: float = 1.0, max_stake: str | None = None,
-                 max_age: float = 180.0, allow_in_play: bool = False):
+                 max_age: float = 1800.0, allow_in_play: bool = False):
         self.client, self.latency, self.max_age, self.allow_in_play = client, latency, max_age, allow_in_play
         self.max_stake = decimal(max_stake) if max_stake is not None else client.max_stake
 
@@ -37,14 +37,19 @@ class SportsbookPaper:
             broker.finish(identifier, "rejected")
             raise NotImplementedError("sportsbook paper accepts fill-or-kill backs (side bid) only; a bet cannot be sold")
         time.sleep(self.latency)
-        selection = self.client.selection(ticker, fresh=True)
+        try:
+            selection, unavailable = self.client.selection(ticker, fresh=True), None
+        except OutOfCredits:
+            selection, unavailable = None, "no_credits"
         observed = utc()
         market, book = self.client.market(ticker, selection), self.client.book(selection)
         store = broker.store
         store.append("market", {"ticker": ticker, "market": market, "book": book}, source=None, at=observed)
         limit, quantity = decimal(order["price"]), decimal(order["count"])
         reason = None
-        if selection is None:
+        if unavailable:
+            reason = unavailable
+        elif selection is None:
             reason = "not_offered"
         elif selection.suspended:
             reason = "suspended"

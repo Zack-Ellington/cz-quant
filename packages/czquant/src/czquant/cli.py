@@ -22,6 +22,11 @@ def main() -> None:
     settle.add_argument('ticker')
     settle.add_argument('--result', choices=['yes','no','void'], required=True)
     settle.add_argument('--note', required=True, help='the evidence: source and final score')
+    dashboard = commands.add_parser('dashboard', help='live portfolio comparison in the browser (read-only)')
+    dashboard.add_argument('--host', default='127.0.0.1')
+    dashboard.add_argument('--port', type=int, default=8790)
+    dashboard.add_argument('--interval', type=float, default=5, help='seconds between updates')
+    dashboard.add_argument('--step', type=float, default=300, help='seconds between chart points')
     report = commands.add_parser('report')
     report.add_argument('--since', required=True)
     report.add_argument('--until', required=True)
@@ -54,6 +59,13 @@ def main() -> None:
     elif args.command == 'settle-sportsbook':
         from .sportsbook import operator_settle
         print(encode({'settled_lots': operator_settle(store, args.ticker, args.result, args.note)}))
+    elif args.command == 'dashboard':
+        import asyncio
+        from .dashboard import serve
+        try:
+            asyncio.run(serve(str(store.root), args.host, args.port, args.interval, args.step))
+        except KeyboardInterrupt:
+            pass
     elif args.command == 'report':
         from .report import generate
         result = generate(str(store.root),args.since,args.until,args.output)

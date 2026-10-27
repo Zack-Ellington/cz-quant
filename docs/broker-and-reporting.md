@@ -159,7 +159,10 @@ current odds, declined whole when the odds shortened, the game started, or the
 quote is stale; a per-selection stake limit; no fee) and sends every other ticker
 to the Kalshi paper adapter.
 
-The Kalshi market monitor skips `DK:` tickers. A separate component reads them:
+The Kalshi market monitor skips `DK:` tickers. A separate component reads them.
+It never pays for odds: marks come from the newest read cached in
+`$STRATEGY_RUNS_DIR/odds_cache/` (dated by that read), and it pays only for results,
+per league, at most every 30 minutes, for games that started 2.5 hours earlier:
 
 ```bash
 export DRAFTKINGS_SOURCE=oddsapi ODDS_API_KEY=...
@@ -173,6 +176,26 @@ gives open bets the range [0, 1/d] and no midpoint. It settles from source resul
 selection with no result after it is withdrawn keeps the monitor degraded
 (awaiting_result) until a result arrives or an operator settles it. Live
 sportsbook execution does not exist and the broker cannot route to it.
+
+## Live dashboard
+
+```bash
+uv run czquant dashboard            # http://127.0.0.1:8790/
+```
+
+A read-only websocket view of every portfolio in the store, for watching a trial
+while it runs. It applies the report's valuation: the same FIFO state, 120-second
+marks, midpoints only from two-sided books, and quote ranges otherwise. For each
+portfolio it shows realized P&L and unrealized P&L. Unrealized is given in full only
+when every open lot has a midpoint; otherwise it covers the marked lots, with the
+remaining cost basis listed separately. It also shows net P&L as a point and a
+range, fees, fills, settlements, midpoint coverage, the last heartbeat, and halts.
+Above the table are each monitor's health and the odds credits left. History is
+replayed once on a grid of `--step` seconds (300); after that it reads only new
+events. Portfolios appear without configuration and are named after their latest
+run record. It needs no credentials, sends no requests to venues, and spends no
+odds credits. It is not a substitute for `czquant report`, which freezes a snapshot
+and computes the ranked metrics.
 
 ## Independent comparison
 

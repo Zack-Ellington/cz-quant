@@ -21,3 +21,5 @@ build/
 
 # Paper-trading run directories (one per run, per strategy); see issue #7.
 /runs/
+# Runs created from inside a strategy directory when STRATEGY_RUNS_DIR is unset.
+strategies/*/runs/

@@ -7,7 +7,7 @@ import pytest
 
 from czquant import Broker, Store
 from czquant.accounting import portfolio_state
-from czquant.draftkings import (Blocked, DraftKings, Nash, OddsApi, Result, implied_price, make_ticker,
+from czquant.draftkings import (Blocked, DraftKings, Nash, OddsApi, OutOfCredits, Result, implied_price, make_ticker,
                                 parse_nash, parse_oddsapi, parse_ticker, payout)
 from czquant.monitor import market_pass, sportsbook_pass
 from czquant.paper import Paper
@@ -132,7 +132,7 @@ def test_oddsapi_scores_become_results_and_never_log_the_key():
     source = OddsApi("k", httpx.Client(transport=httpx.MockTransport(handler)))
     results = source.results("basketball_nba", ["e1", "e2", "e3"])
     assert results["e1"].winner == "home" and results["e2"].winner == "draw" and "e3" not in results
-    assert source.remaining == "480" and "apiKey" not in str(results["e1"].evidence)
+    assert source.remaining == 480 and "apiKey" not in str(results["e1"].evidence)
     assert len(source.selections("basketball_nba")) == 2
 
 
@@ -241,26 +241,75 @@ def test_kalshi_market_monitor_ignores_sportsbook_lots(tmp_path):
     assert status["status"] == "healthy" and status["markets"] == 0
 
 
-def test_sportsbook_monitor_marks_then_settles_win_loss_and_push(tmp_path):
-    source = Source([oddsapi_event(), oddsapi_event("e2", home_odds="2", away_odds="2")])
-    store, broker = bet(tmp_path, source)
+class Paid(Source):
+    """A quota-metered source with raw reads: odds cost 1 credit, results 2."""
+
+    def __init__(self, events, credits=100):
+        super().__init__(events)
+        self.remaining, self.remaining_at, self.fetches, self.result_calls = credits, 0.0, 0, 0
+
+    def _spend(self, cost):
+        self.remaining -= cost
+        self.remaining_at = __import__("time").time()
+
+    def fetch(self, league):
+        self.fetches += 1
+        self._spend(1)
+        return list(self.events)
+
+    def parse(self, raw, league, fetched_at):
+        return parse_oddsapi(raw, league, "draftkings", fetched_at)
+
+    def results(self, league, events):
+        self.result_calls += 1
+        self._spend(2)
+        return super().results(league, events)
+
+
+def test_monitor_marks_from_the_shared_cache_and_pays_only_for_paced_results(tmp_path):
+    source = Paid([oddsapi_event(), oddsapi_event("e2", home_odds="2", away_odds="2")])
+    cache = tmp_path / "odds_cache"
+    store = Store(tmp_path)
+    store.create("p", "1000")
+    broker = Broker(store, "p", SportsbookPaper(DraftKings(source, cache_dir=cache), latency=0))
     back(broker, T_AWAY, 100, "0.3")
     back(broker, T_HOME, 100, "0.9")
     push = make_ticker("oddsapi", "basketball_nba", "e2", "ML2", "home")
     back(broker, push, 10, "0.5")
-    status = sportsbook_pass(store, DraftKings(source))
+    assert source.fetches == 3  # one paid read per bet, at the fill
+    monitor = DraftKings(source, cache_dir=cache)  # another process: shares only the cache directory
+    monitor.settle_after_hours = -10  # treat every game as finished long enough to check
+    status = sportsbook_pass(store, monitor)
     assert status["status"] == "healthy" and status["markets"] == 3 and status["settled_lots"] == 0
-    source.events = []  # games over: no longer offered
-    status = sportsbook_pass(store, DraftKings(source))
-    assert status["status"] == "degraded" and {e["reason"] for e in status["errors"]} == {"awaiting_result"}
+    assert source.fetches == 3 and source.result_calls == 1 and status["credits_remaining"] == 95
+    marks = len([e for e in store.events() if e["type"] == "market"])
+    status = sportsbook_pass(store, monitor)  # within results_minutes: nothing paid, nothing new to mark
+    assert source.result_calls == 1 and len([e for e in store.events() if e["type"] == "market"]) == marks
     source.result_map = {"e1": Result("away", False, {"fixture": 1}), "e2": Result("draw", False, {"fixture": 2})}
-    status = sportsbook_pass(store, DraftKings(source))
-    assert status["settled_lots"] == 3 and status["status"] == "healthy"
+    monitor.results_checked.clear()  # 30 minutes later
+    status = sportsbook_pass(store, monitor)
+    assert status["settled_lots"] == 3 and status["status"] == "healthy" and source.result_calls == 2
     state = portfolio_state(store, "p")
     assert not state.lots and state.settlements == 3
     staked = 100 * implied_price(D("4.4")) + 100 * implied_price(D("1.25")) + 5
     assert state.cash == D("1000") - staked + 100 + 5  # away won; the tie returned its stake
-    assert sportsbook_pass(store, DraftKings(source))["markets"] == 0
+    assert sportsbook_pass(store, monitor)["markets"] == 0 and source.fetches == 3
+
+
+def test_odds_reads_stop_at_the_reserve_but_results_may_spend_it(tmp_path):
+    source = Paid([oddsapi_event()], credits=41)
+    book = DraftKings(source, cache_dir=tmp_path, reserve=40)
+    assert book.selections("basketball_nba", fresh=True)  # 41 -> 40, exactly the reserve
+    with pytest.raises(OutOfCredits):
+        book.selections("basketball_nba", fresh=True)  # a further read would dip into the reserve
+    assert book.selections("basketball_nba", fetch=False)  # the cached read is free
+    assert DraftKings(source, cache_dir=tmp_path, reserve=40).credits() == 40  # shared through the cache
+    book.results("basketball_nba", ["e1"])
+    assert source.remaining == 38
+    store, broker = bet(tmp_path / "s", source)
+    broker.adapter.client.reserve = 40
+    broker.adapter.client.source = source
+    assert back(broker, T_AWAY, 1, "0.3")["reason"] == "no_credits"
 
 
 def test_operator_settles_a_void_with_evidence(tmp_path):

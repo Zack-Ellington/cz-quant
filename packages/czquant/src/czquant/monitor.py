@@ -13,7 +13,7 @@ from .accounting import portfolio_state, replay
 from .broker import Broker
 from .kalshi import Kalshi
 from .book import levels
-from .draftkings import DraftKings, is_sportsbook
+from .draftkings import DraftKings, is_sportsbook, parse_ticker
 from .paper import update_consumed
 from .sportsbook import settle_lots
 from .store import Store, decimal, utc
@@ -73,11 +73,13 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
 def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
     """Reference odds and paper settlement for held or pending sportsbook selections.
 
-    Each pass records a market event per selection (the quote while offered, the
-    result once known). Finalized selections settle every paper lot: 1 or 0, or the
-    lot's own price on a void, which returns the stake. A selection that is no
-    longer offered and has no result yet is reported until a result arrives or the
-    operator settles it.
+    Odds cost credits, so this pass never buys them: it marks held selections from
+    the newest read any process cached (the trader's), dated when that read was
+    made, so a mark is as stale as it really is. It records a mark only when a newer
+    read or a status change arrives. Results are the one paid read: once per league
+    every `results_minutes`, only for games that started at least `settle_after_hours`
+    ago, all of a league's events in one call. Finalized selections settle every
+    paper lot: 1 or 0, or the lot's own price on a void, which returns the stake.
     """
     portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
     tickers = {lot["market"] for p in portfolios
@@ -88,8 +90,20 @@ def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
         tickers.update(p["metadata"].get("watch", []))
     tickers = {t for t in tickers if is_sportsbook(t)}
     errors: list[dict[str, Any]] = []
+    now = time.time()
+    due: set[str] = set()
+    for ticker in tickers:
+        parts = parse_ticker(ticker)
+        if now - book.results_checked.get(parts["league"], -1e18) < book.results_minutes * 60:
+            continue
+        start = _start(store, book, ticker)
+        if start is not None and now - start >= book.settle_after_hours * 3600:
+            due.add(parts["event"])
     try:
-        markets = book.markets(sorted(tickers)) if tickers else {}
+        markets = book.markets(sorted(tickers), results_for=due, fetch=False) if tickers else {}
+        for ticker in tickers:
+            if parse_ticker(ticker)["event"] in due:
+                book.results_checked[parse_ticker(ticker)["league"]] = now
     except Exception as exc:
         log.exception("sportsbook read failed")
         markets = {}
@@ -101,18 +115,36 @@ def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
                 errors.append({"market": ticker, "reason": "missing"})
             continue
         market, raw = markets[ticker]
-        observed = utc()
-        store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=observed)
+        key = (market.get("fetched_at"), market["status"])
+        if market["status"] == "finalized" or book.last_marked.get(ticker) != key:
+            observed = utc()
+            # Date the mark by its read, not by this pass, so report staleness rules apply honestly.
+            at = market.get("fetched_at") if market["status"] != "finalized" and market.get("fetched_at") else observed
+            store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=at)
+            book.last_marked[ticker] = key
         if market["status"] == "finalized":
-            settled += settle_lots(store, ticker, market, {"market": market, "observed_at": observed},
+            settled += settle_lots(store, ticker, market, {"market": market, "observed_at": utc()},
                                    "sportsbook-monitor")
         elif market["status"] == "closed":
             errors.append({"market": ticker, "reason": "awaiting_result"})
     status = {"component": "draftkings", "source": book.source.name,
               "status": "healthy" if not errors else "degraded", "markets": len(tickers),
-              "settled_lots": settled, "errors": errors}
+              "settled_lots": settled, "results_checked": sorted(due), "credits_remaining": book.credits(),
+              "errors": errors}
     store.append("health", status)
     return status
+
+
+def _start(store: Store, book: DraftKings, ticker: str) -> float | None:
+    """A selection's start time: from the newest cached read, else its last recorded mark."""
+    parts = parse_ticker(ticker)
+    selection = next((s for s in book.selections(parts["league"], fetch=False) if s.ticker == ticker), None)
+    if selection is not None:
+        return datetime.fromisoformat(selection.start).timestamp()
+    row = store.db.execute("SELECT json_extract(data,'$.market.start') FROM events WHERE type='market' AND "
+                           "json_extract(data,'$.ticker')=? AND json_extract(data,'$.market.start') IS NOT NULL "
+                           "ORDER BY sequence DESC LIMIT 1", (ticker,)).fetchone()
+    return datetime.fromisoformat(row[0]).timestamp() if row else None
 
 
 def fill_time(fill: dict[str, Any]) -> str:

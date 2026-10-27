@@ -4,11 +4,14 @@ moneylines. Paper only: nothing here can place a real order or a real bet.
 Each scan
   discover  every --discover minutes, the open Kalshi game events of each enabled
             league in leagues.json, and each series' fee schedule
-  odds      DraftKings moneylines for those leagues, one request per league
+  odds      DraftKings moneylines, one paid read per league. Reads are paced so the
+            source's credits (above a reserve kept for settlement) last until the
+            end of the trial, and only leagues with a game starting within
+            --horizon hours are read: one league per read, the longest unread first
   pair      each Kalshi game with exactly one DraftKings game (matching.py, pairs.json)
   price     Kalshi books for the paired games; the best basket with legs on both
             venues that beats the hurdle (sum_check.py)
-  execute   highest APR first, within limits: re-check on fresh odds and books, back
+  execute   highest APR first, within limits: re-check on fresh Kalshi books, back
             the DraftKings legs (fill or kill), then buy the Kalshi legs (IOC) for the
             sets DraftKings accepted. A declined bet costs nothing; the visible Kalshi
             book is the leg more likely to fill, so it goes second.
@@ -39,7 +42,7 @@ from typing import Any
 
 from czquant import Broker, Store
 from czquant.accounting import active_events
-from czquant.draftkings import Blocked, DraftKings
+from czquant.draftkings import Blocked, DraftKings, OutOfCredits
 from czquant.kalshi import Kalshi
 from czquant.paper import Paper
 from czquant.sportsbook import Route, SportsbookPaper
@@ -59,7 +62,10 @@ log = logging.getLogger("cross_market")
 @dataclass
 class Config:
     leagues: tuple[str, ...] = ()  # empty: every league enabled in leagues.json
-    interval_seconds: float = 120.0
+    interval_seconds: float = 60.0  # loop tick, and the shortest gap between odds reads
+    trial_days: float | None = None  # odds budget horizon; None: keep the saved trial end (default 7 days)
+    odds_reserve: int = 40  # credits never spent on odds: they pay for results (2 each)
+    horizon_hours: float = 12.0  # read a league only when one of its games starts this soon
     discover_minutes: float = 10.0
     max_event_frac: float = 0.10
     max_total_frac: float = 1.00
@@ -70,7 +76,7 @@ class Config:
     min_edge: float = 0.01  # per $1 set: margin for rule and settlement risk between venues
     max_apr: float | None = None
     max_stake: float = 500.0  # per DraftKings selection
-    max_odds_age: float = 180.0
+    max_odds_age: float = 1800.0  # since DraftKings last updated the price, per the source
     min_lead_minutes: float = 10.0  # pre-game only: skip games starting sooner
     kalshi_latency: float = 0.30
     book_latency: float = 1.00
@@ -101,6 +107,8 @@ class Engine:
         self.kalshi = kalshi or Kalshi(authenticated=False)
         self.book = book or DraftKings.from_env()
         self.book.max_stake = decimal(cfg.max_stake)
+        self.book.reserve = cfg.odds_reserve
+        self.pacer = OddsPacer(self.book, cfg)
         adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
                         SportsbookPaper(self.book, latency=cfg.book_latency, max_stake=str(cfg.max_stake),
                                         max_age=cfg.max_odds_age))
@@ -269,13 +277,37 @@ class Engine:
         return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, max(cap, Decimal(0)),
                     Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr)
 
+    def upcoming(self, league: str) -> bool:
+        """Does the league have a game starting between min_lead and horizon from now?
+        Kalshi gives the expected end; a game is taken to start three hours before it."""
+        now = time.time()
+        for game in self.games.get(league, []):
+            ends = [m["market"].get("expected_expiration_time") for m in game.teams]
+            end = max((datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() for t in ends if t), default=None)
+            if end is None:
+                continue
+            start = end - 3 * 3600
+            if now + self.cfg.min_lead_minutes * 60 <= start <= now + self.cfg.horizon_hours * 3600:
+                return True
+        return False
+
     def scan(self) -> list[tuple[Basket, Pair, str]]:
-        self.counters["scans"] += 1
         counts: dict[str, int] = {}
         candidates = []
-        for league in self.leagues:
+        eligible = [league for league in self.leagues if self.upcoming(league)]
+        reading = self.pacer.pick(eligible, list(self.leagues), self.league_id)
+        if not reading:
+            return []
+        self.counters["scans"] += 1
+        for league in reading:
             try:
                 selections = self.book.selections(self.league_id(league), fresh=True)
+            except OutOfCredits as exc:
+                if not self._throttled(("credits",), 3600):
+                    self.broker.observe("error", {"where": "odds", "league": league, "out_of_credits": True,
+                                                  "error": str(exc)})
+                counts["odds_reserve_reached"] = counts.get("odds_reserve_reached", 0) + 1
+                continue
             except Blocked as exc:
                 if not self._throttled(("blocked", league), 3600):
                     self.broker.observe("error", {"where": "odds", "league": league, "blocked": True, "error": str(exc)})
@@ -307,10 +339,11 @@ class Engine:
                         self.broker.observe("opportunity", {"league": league, "kalshi_event": pair.game.event,
                                                             "book_event": pair.book_event, **basket.summary()})
         top = max((b for b, _, _ in candidates), key=lambda b: b.apr, default=None)
-        self.broker.observe("scan_complete", {"counts": counts, "candidates": len(candidates),
+        self.broker.observe("scan_complete", {"counts": counts, "candidates": len(candidates), "read": reading,
+                                              "eligible": eligible, "next_read_in_s": round(self.pacer.spacing()),
                                               "best_apr": top.apr if top else None,
                                               "best_edge": str(top.edge) if top else None,
-                                              "odds_credits_remaining": getattr(self.book.source, "remaining", None)})
+                                              "odds_credits_remaining": self.book.credits()})
         return candidates
 
     # -- execution -------------------------------------------------------------
@@ -323,14 +356,17 @@ class Engine:
             return "max_open_events"
         if self.limits(event) < 1:
             return "no_cash" if self.cash < 1 else "capital_limit"
+        if not self.book.spendable():
+            return "odds_reserve_reached"  # the bet's own odds read would spend the settlement reserve
         return None
 
     def execute(self, basket: Basket, pair: Pair, league: str) -> None:
         event = pair.game.event
         self.cooldown_until[event] = time.time() + self.cfg.cooldown
         intended = {leg["ticker"] for leg in basket.legs}
-        # Re-check on fresh odds and books, within the current limits.
-        fresh = {s.ticker: s for s in self.book.selections(self.league_id(league), fresh=True)}
+        # Re-check on fresh Kalshi books, within the current limits. The odds are the read
+        # this scan just paid for; the bet itself re-reads them once (the adapter's fill check).
+        fresh = {s.ticker: s for s in self.book.selections(self.league_id(league), fetch=False)}
         if any(s.ticker not in fresh for s in pair.selections.values()):
             self.reject(event, "recheck_failed", why="selection_withdrawn")
             return
@@ -417,7 +453,8 @@ class Engine:
                 self.step()
                 self.broker.observe("heartbeat", {"cash": str(self.cash), "exposure": str(self.exposure()),
                                                   "open_trades": len(self.positions), "halted": self.halted,
-                                                  "counters": dict(self.counters)})
+                                                  "odds_credits_remaining": self.book.credits(),
+                                                  "trial_end": self.pacer.end_iso(), "counters": dict(self.counters)})
                 if once or (deadline and time.monotonic() >= deadline):
                     break
                 wait = max(1.0, self.cfg.interval_seconds - (time.monotonic() - started))
@@ -425,6 +462,59 @@ class Engine:
         finally:
             self.broker.observe("run_stop", {"cash": str(self.cash), "counters": dict(self.counters)})
             self._pool.shutdown(wait=True)
+
+
+class OddsPacer:
+    """Spreads paid odds reads so the credits last until the trial ends.
+
+    The next read waits (trial end - now) / (credits above the reserve), never less
+    than the loop interval. The gap is recomputed from what is left, so hours with no
+    upcoming games leave more credits for later ones. Reads by any process count (the
+    shared cache records them), and the trial end is saved beside the cache, so a
+    restart neither resets the budget nor reads early. A source without a quota is
+    read every interval.
+    """
+
+    def __init__(self, book: DraftKings, cfg: Config):
+        self.book, self.floor = book, cfg.interval_seconds
+        path = book.cache_dir / "trial.json" if book.cache_dir else None
+        saved = None
+        if path and path.exists():
+            try:
+                saved = float(json.loads(path.read_text())["end"])
+            except (ValueError, KeyError, OSError):
+                saved = None
+        if cfg.trial_days is not None or saved is None or saved <= time.time():
+            self.end = time.time() + 86400 * (7 if cfg.trial_days is None else cfg.trial_days)
+            if path:
+                path.write_text(json.dumps({"end": self.end, "end_iso": self.end_iso()}))
+        else:
+            self.end = saved
+
+    def end_iso(self) -> str:
+        return datetime.fromtimestamp(self.end, timezone.utc).isoformat(timespec="seconds")
+
+    def spacing(self) -> float:
+        credits = self.book.credits()
+        if credits is None:
+            return self.floor  # no quota, or not yet known: the first read learns it
+        spendable = credits - self.book.reserve
+        if spendable < 1:
+            return float("inf")
+        return max(self.floor, (self.end - time.time()) / spendable)
+
+    def pick(self, eligible: list[str], every: list[str], league_id) -> list[str]:
+        """The leagues to read now. Nothing until the next read is due (the newest read of
+        any league is older than the spacing); then, on a metered source, the eligible
+        league read longest ago, and on a source without a quota every eligible league."""
+        if not eligible:
+            return []
+        reads = {league: self.book.cached_at(league_id(league)) or 0.0 for league in every}
+        if time.time() - max(reads.values()) < self.spacing():
+            return []
+        if self.book.credits() is None:
+            return eligible
+        return [min(eligible, key=lambda league: reads[league])]
 
 
 def _duration(value: str) -> int:
@@ -437,7 +527,13 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--leagues", default="", help="comma-separated leagues.json keys (default: every enabled league)")
     p.add_argument("--interval", type=float, default=d.interval_seconds,
-                   help="seconds between scans (120). Each scan reads odds once per league; mind the source's quota")
+                   help="loop tick and shortest gap between odds reads, seconds (60)")
+    p.add_argument("--trial-days", type=float, default=None,
+                   help="spread the odds credits over this many days from now (default: keep the saved trial end, else 7)")
+    p.add_argument("--odds-reserve", type=int, default=d.odds_reserve,
+                   help="credits kept for results reads, never spent on odds (40)")
+    p.add_argument("--horizon", type=float, default=d.horizon_hours,
+                   help="read a league's odds only when one of its games starts within this many hours (12)")
     p.add_argument("--discover", type=float, default=d.discover_minutes, help="minutes between Kalshi refreshes (10)")
     p.add_argument("--max-event-frac", type=float, default=d.max_event_frac, help="cap per game, share of bankroll (0.10)")
     p.add_argument("--max-total-frac", type=float, default=d.max_total_frac)
@@ -448,7 +544,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-edge", type=float, default=d.min_edge, help="minimum profit per $1 set (0.01)")
     p.add_argument("--max-apr", type=lambda v: None if v == "none" else float(v), default=d.max_apr)
     p.add_argument("--max-stake", type=float, default=d.max_stake, help="paper stake limit per DraftKings selection, $ (500)")
-    p.add_argument("--max-odds-age", type=float, default=d.max_odds_age, help="seconds since the odds last updated (180)")
+    p.add_argument("--max-odds-age", type=float, default=d.max_odds_age,
+                   help="seconds since DraftKings last updated a price, per the source (1800)")
     p.add_argument("--min-lead", type=float, default=d.min_lead_minutes, help="skip games starting within this many minutes (10)")
     p.add_argument("--kalshi-latency", type=float, default=d.kalshi_latency)
     p.add_argument("--book-latency", type=float, default=d.book_latency, help="seconds before a bet is accepted (1.0)")
@@ -457,6 +554,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--once", action="store_true", help="one scan, then stop")
     a = p.parse_args(argv)
     cfg = Config(leagues=tuple(x for x in a.leagues.split(",") if x), interval_seconds=a.interval,
+                 trial_days=a.trial_days, odds_reserve=a.odds_reserve, horizon_hours=a.horizon,
                  discover_minutes=a.discover, max_event_frac=a.max_event_frac, max_total_frac=a.max_total_frac,
                  max_open_events=a.max_open_events, max_sets=a.max_sets, risk_free=a.risk_free, min_net=a.min_net,
                  min_edge=a.min_edge, max_apr=a.max_apr, max_stake=a.max_stake, max_odds_age=a.max_odds_age,

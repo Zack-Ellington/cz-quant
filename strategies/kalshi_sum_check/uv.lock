@@ -201,6 +201,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "plotly" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -208,6 +209,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "plotly", specifier = ">=5.24" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]
