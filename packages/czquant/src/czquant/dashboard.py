@@ -152,7 +152,7 @@ class Ledger:
             if not history or (now - timestamp(history[-1]["t"])).total_seconds() >= self.step:
                 history.append(point)
                 appended[pid] = point
-            rows.append({"id": pid, "strategy": self.strategy.get(pid, "unknown"), "mode": p["mode"],
+            rows.append({"id": pid, "strategy": self.strategy.get(pid, "not started"), "mode": p["mode"],
                          "label": p["metadata"].get("label") or "", "created_at": p["created_at"], "now": point,
                          "midpoint_coverage": _share(history, "equity"),
                          "range_coverage": _share(history, "net_pnl_lower"),

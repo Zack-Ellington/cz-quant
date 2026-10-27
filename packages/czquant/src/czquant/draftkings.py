@@ -24,7 +24,9 @@ Two sources normalize to the same Selection:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,6 +39,21 @@ import httpx
 from .store import canonical_time, decimal, utc
 
 PREFIX = "DK:"
+
+
+class _RedactKey(logging.Filter):
+    """httpx logs every request URL, and The Odds API takes its key in the URL."""
+    pattern = re.compile(r"(apiKey=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            record.args = tuple(self.pattern.sub(r"\g<1>REDACTED", str(a)) if isinstance(a, (str, httpx.URL)) else a
+                                for a in (record.args if isinstance(record.args, tuple) else (record.args,)))
+        record.msg = self.pattern.sub(r"\g<1>REDACTED", str(record.msg))
+        return True
+
+
+logging.getLogger("httpx").addFilter(_RedactKey())
 ROLES = ("home", "away", "draw")
 
 

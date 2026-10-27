@@ -321,3 +321,15 @@ def test_operator_settles_a_void_with_evidence(tmp_path):
     state = portfolio_state(store, "p")
     assert state.cash == 1000 and state.realized == 0 and not state.lots
     assert operator_settle(store, T_AWAY, "void", "repeat") == 0
+
+
+def test_request_logs_never_show_the_odds_api_key(caplog):
+    import logging
+
+    def handler(request):
+        return httpx.Response(200, json=[])
+    source = OddsApi("secret-key-123", httpx.Client(transport=httpx.MockTransport(handler)))
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        source.fetch("basketball_nba")
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "apiKey=REDACTED" in text and "secret-key-123" not in text
