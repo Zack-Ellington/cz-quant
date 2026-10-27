@@ -23,6 +23,8 @@ or retired without an effect on the others.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
+- [cross-market-sportbook](strategies/cross-market-sportbook/): the sum check across venues. Kalshi NBA, NHL and MLB game markets are priced against DraftKings moneylines, and baskets with legs on both venues are paper-traded through the shared broker. A new `czquant.draftkings` data flow, paper adapter and monitor support it.
+
 ## Quickstart
 
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct

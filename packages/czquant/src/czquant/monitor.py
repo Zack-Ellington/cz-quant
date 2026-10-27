@@ -13,7 +13,9 @@ from .accounting import portfolio_state, replay
 from .broker import Broker
 from .kalshi import Kalshi
 from .book import levels
+from .draftkings import DraftKings, is_sportsbook
 from .paper import update_consumed
+from .sportsbook import settle_lots
 from .store import Store, decimal, utc
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,8 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
         tickers.add(json.loads(row[0])["ticker"])
     for p in portfolios:
         tickers.update(p["metadata"].get("watch", []))
+    # Sportsbook selections have their own reader and monitor (sportsbook_pass).
+    tickers = {t for t in tickers if not is_sportsbook(t)}
     if not tickers:
         # A real public-data probe, even for no-trade portfolios.
         probe = api.get("/markets", {"limit": 1, "status": "open"}).get("markets", [])
@@ -62,6 +66,51 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
             "reserved": store.reserved(p["id"]), "lots": list(state.lots.values())}, p["id"])
     status = {"component": "market", "status": "healthy" if not errors else "degraded",
               "markets": len(tickers), "errors": errors}
+    store.append("health", status)
+    return status
+
+
+def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
+    """Reference odds and paper settlement for held or pending sportsbook selections.
+
+    Each pass records a market event per selection (the quote while offered, the
+    result once known). Finalized selections settle every paper lot: 1 or 0, or the
+    lot's own price on a void, which returns the stake. A selection that is no
+    longer offered and has no result yet is reported until a result arrives or the
+    operator settles it.
+    """
+    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
+    tickers = {lot["market"] for p in portfolios
+               for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
+    for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
+        tickers.add(json.loads(row[0])["ticker"])
+    for p in portfolios:
+        tickers.update(p["metadata"].get("watch", []))
+    tickers = {t for t in tickers if is_sportsbook(t)}
+    errors: list[dict[str, Any]] = []
+    try:
+        markets = book.markets(sorted(tickers)) if tickers else {}
+    except Exception as exc:
+        log.exception("sportsbook read failed")
+        markets = {}
+        errors.append({"reason": type(exc).__name__, "detail": str(exc)[:300]})
+    settled = 0
+    for ticker in sorted(tickers):
+        if ticker not in markets:
+            if not errors:
+                errors.append({"market": ticker, "reason": "missing"})
+            continue
+        market, raw = markets[ticker]
+        observed = utc()
+        store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=observed)
+        if market["status"] == "finalized":
+            settled += settle_lots(store, ticker, market, {"market": market, "observed_at": observed},
+                                   "sportsbook-monitor")
+        elif market["status"] == "closed":
+            errors.append({"market": ticker, "reason": "awaiting_result"})
+    status = {"component": "draftkings", "source": book.source.name,
+              "status": "healthy" if not errors else "degraded", "markets": len(tickers),
+              "settled_lots": settled, "errors": errors}
     store.append("health", status)
     return status
 
@@ -202,11 +251,12 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
 
 def run_monitor(root: str, component: str, interval: float = 60, once: bool = False) -> None:
     store = Store(root)
-    api = Kalshi(authenticated=component == "account")
+    api: Any = DraftKings.from_env() if component == "draftkings" else Kalshi(authenticated=component == "account")
+    passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass}
     while True:
         start = time.monotonic()
         try:
-            status = market_pass(store, api) if component == "market" else account_pass(store, api)
+            status = passes[component](store, api)
             log.info("%s", json.dumps(status))
         except Exception as exc:
             store.append("health", {"component": component, "status": "failed", "error": type(exc).__name__})

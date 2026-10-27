@@ -148,6 +148,32 @@ Their candidate logic is unchanged; shared execution uses the same policy
 as the sum strategies. The old strategy-local P&L display is not the shared
 portfolio report. Each invocation records a run and scan-complete observation.
 
+## Sportsbook legs (DraftKings)
+
+The cross-market-sportbook strategy holds Kalshi contracts and DraftKings bets in
+one portfolio. A bet at decimal odds d is a YES contract bought at 1/d, so the
+broker, accounting and report need no new record types. Tickers starting `DK:`
+belong to the sportsbook. `czquant.sportsbook.Route` sends them to
+`SportsbookPaper` (policy sportsbook-fixed-odds-v1: fill-or-kill backs at the
+current odds, declined whole when the odds shortened, the game started, or the
+quote is stale; a per-selection stake limit; no fee) and sends every other ticker
+to the Kalshi paper adapter.
+
+The Kalshi market monitor skips `DK:` tickers. A separate component reads them:
+
+```bash
+export DRAFTKINGS_SOURCE=oddsapi ODDS_API_KEY=...
+uv run czquant monitor draftkings
+uv run czquant settle-sportsbook DK:... --result yes|no|void --note "evidence"
+```
+
+It records odds as a back-only book (an ask at 1/d, no bid). The report therefore
+gives open bets the range [0, 1/d] and no midpoint. It settles from source results:
+1, 0, or each lot's own price on a push or void, which returns the stake. A
+selection with no result after it is withdrawn keeps the monitor degraded
+(awaiting_result) until a result arrives or an operator settles it. Live
+sportsbook execution does not exist and the broker cannot route to it.
+
 ## Independent comparison
 
 From packages/czquant:

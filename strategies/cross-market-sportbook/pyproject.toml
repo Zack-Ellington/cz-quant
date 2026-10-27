@@ -1,0 +1,32 @@
+[project]
+name = "cross-market-sportbook"
+version = "0.1.0"
+description = "Cross-venue sum check: Kalshi game markets against DraftKings moneylines, paper traded through the shared broker."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "czquant",
+    # zoneinfo has no time zone database on Windows.
+    "tzdata>=2024.1",
+]
+
+[tool.uv]
+# Plain scripts, not an installable package: `uv run python trader.py`.
+package = false
+# OneDrive rejects the hardlinks uv uses by default, which leaves a half-built .venv.
+link-mode = "copy"
+
+[tool.uv.sources]
+czquant = { path = "../../packages/czquant", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "basedpyright>=1.30"]
+
+[tool.basedpyright]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+exclude = ["tests", ".venv"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
