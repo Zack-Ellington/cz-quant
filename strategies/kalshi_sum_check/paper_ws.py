@@ -319,6 +319,16 @@ def best_quote(event, tickers, books, fee_type, fee_mult, days, rf, max_sets, ma
     return best, ("ok" if best else why)
 
 
+def leg_cost(order: dict, result: dict) -> tuple[float, float]:
+    """(contracts filled, dollars paid including fee) for one submitted leg.
+
+    A bid buys YES at the YES price; an ask buys NO, which costs 1 - the YES price.
+    """
+    levels = (result.get("evidence") or {}).get("levels") or []
+    paid = sum(float(q) * (float(p) if order["side"] == "bid" else 1 - float(p)) for p, q in levels)
+    return float(result.get("filled") or 0), paid + float(result.get("fee") or 0)
+
+
 # --------------------------------------------------------------------------- settlement
 
 FINAL_STATUSES = ("finalized", "settled")
@@ -395,6 +405,9 @@ class Diagnostics:
 
 
 class Engine:
+    strategy = "kalshi_sum_check"
+    config_cls = Config
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
@@ -414,7 +427,7 @@ class Engine:
         self._leg_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="leg")
         self._leg_local = threading.local()
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
-        self.broker.start("kalshi_sum_check", revision, asdict(cfg))
+        self.broker.start(self.strategy, revision, asdict(cfg))
         self.store = OrderBookStore(on_update=self._on_book, refill_seconds=cfg.refill_seconds)
         self.approvals = load_approvals()
         self.discover_client = KalshiClient(max_rps=5)
@@ -755,12 +768,23 @@ class Engine:
         if failure is not None:
             self._resume()
             raise failure
+        if len({Decimal(o["filled"]) for o in outcomes}) > 1:
+            await self.repair(r, context, orders, results)
         self._resume()
         if any(float(result["filled"]) > 0 for result in outcomes):
             self.counters["trades"] += 1
         self.cooldown_until[r.event] = time.time() + self.cfg.cooldown
         self.dirty.add(r.event)
         log.info("BASKET %s %s intended %s sets; actual %s", r.event, r.side, r.sets, outcomes)
+
+    async def repair(self, q: Quote, context: dict, orders: list, results: list):
+        """Called when the legs filled unequal quantities. The base strategy holds them as they are."""
+
+    async def submit_legs(self, orders: list, context: dict) -> list:
+        """Submit orders concurrently on the leg pool; results come back in order."""
+        loop = asyncio.get_running_loop()
+        return await asyncio.gather(*(loop.run_in_executor(self._leg_pool, self._submit_leg, order, context)
+                                      for order in orders))
 
     def _submit_leg(self, order, context):
         """Submit one leg on a pool thread, through that thread's own broker."""
@@ -837,13 +861,15 @@ def _duration(s):
     return int(h) * 60 + int(m)
 
 
-def main(argv=None):
+def main(argv=None, engine_cls=None, add_arguments=None):
+    """Parse flags and run. Variants pass their Engine subclass and a hook for their own flags."""
+    engine_cls = engine_cls or Engine
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--preset", choices=["low", "high"], default="low")
     preset, _ = pre.parse_known_args(argv)
     with open(os.path.join(os.path.dirname(__file__), "presets", preset.preset + ".json")) as f:
-        d = Config(**json.load(f))
+        d = engine_cls.config_cls(**json.load(f))
     p.add_argument("--preset", choices=["low", "high"], default=preset.preset)
     p.add_argument("--feed", choices=["auto", "ws", "rest"], default=d.feed)
     p.add_argument("--bankroll", type=float, default=d.bankroll, help="paper capital in dollars (default 1000)")
@@ -879,16 +905,20 @@ def main(argv=None):
     p.add_argument("--discover", type=float, default=d.discover_minutes, help="minutes between universe refreshes (10)")
     p.add_argument("--settle", type=float, default=d.settle_minutes, help="minutes between settlement checks (5)")
     p.add_argument("--duration", type=_duration, default=None, help="run for H:MM, then stop")
+    if add_arguments:
+        add_arguments(p, d)
     a = p.parse_args(argv)
-    cfg = Config(feed=a.feed, bankroll=a.bankroll, max_event_frac=a.max_event_frac, max_total_frac=a.max_total_frac,
+    extra = {f: getattr(a, f) for f in engine_cls.config_cls.__dataclass_fields__
+             if f not in Config.__dataclass_fields__ and hasattr(a, f)}
+    cfg = engine_cls.config_cls(feed=a.feed, bankroll=a.bankroll, max_event_frac=a.max_event_frac, max_total_frac=a.max_total_frac,
                  max_open_events=a.max_open_events, max_sets=a.max_sets, risk_free=a.risk_free, min_net=a.min_net,
                  min_apr=a.min_apr, max_apr=a.max_apr,
                  latency=a.latency, cooldown=a.cooldown, band=a.band, max_days=a.max_days, unknown_mid_gap=a.unknown_mid_gap,
                  refill_seconds=a.refill_seconds, reserve_frac=a.reserve_frac, max_leg_skew=a.max_leg_skew,
                  reserve_max_days=a.reserve_max_days, reserve_min_apr=a.reserve_min_apr, require_candidate_approval=not a.allow_unapproved_candidates,
                  stale_seconds=a.stale_seconds, discover_minutes=a.discover, settle_minutes=a.settle,
-                 duration_minutes=a.duration)
-    eng = Engine(cfg)
+                 duration_minutes=a.duration, **extra)
+    eng = engine_cls(cfg)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(eng.run_dir, "run.log"))])
     try:

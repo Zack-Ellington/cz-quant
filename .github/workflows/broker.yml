@@ -9,6 +9,8 @@ jobs:
         project:
           - packages/czquant
           - strategies/kalshi_sum_check
+          - strategies/kalshi-sum-check-unwind
+          - strategies/kalshi-sum-check-retry
           - strategies/cross-market-sportbook
           - strategies/2026-midterm-prediction-arbitrage
           - strategies/2026-midterm-dependence-arbitrage
