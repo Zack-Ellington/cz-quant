@@ -7,6 +7,7 @@ from decimal import Decimal as D
 import pytest
 
 from czquant import Store
+from czquant.store import encode
 from czquant.dashboard import Ledger
 from czquant.report import compare
 
@@ -175,3 +176,37 @@ def test_a_nearly_decided_one_sided_book_is_marked_at_the_middle_of_its_range(tm
     store.append("market", {"ticker": "W", "market": {"status": "active"}, "book": book("0.97", None)}, at=iso(1))
     n = ledger.tick()["portfolios"][0]["now"]
     assert n["unrealized"] is None and n["missing"] == ["W"]  # a 3-cent range is still unmarked
+
+
+def test_a_saved_replay_resumes_with_the_same_history_and_values(tmp_path):
+    store = ledger_fixture(tmp_path)
+    full = Ledger(store, step=60)
+    full.backfill()
+    full.save()
+    assert (tmp_path / "dashboard_replay.json").exists()
+    # Recorded after the save: a new mark and a sale. The resumed ledger reads only these.
+    store.append("market", {"ticker": "K1", "market": {"status": "active"}, "book": book("0.60", "0.62")}, at=iso(0))
+    store.append("transaction", {"reason": "fill", "cash_delta": "3", "fee": "0", "context": {},
+                 "legs": [{"market": "K1", "side": "yes", "quantity_delta": "-5", "price": "0.60"}]}, "sum-low")
+    resumed, fresh = Ledger(store, step=60), Ledger(store, step=60)
+    resumed.backfill()
+    fresh.backfill(resume=False)
+    assert resumed.series["sum-low"][:len(full.series["sum-low"])] == json.loads(encode(full.series["sum-low"]))
+    a = {r["id"]: r["now"] for r in resumed.tick()["portfolios"]}
+    b = {r["id"]: r["now"] for r in fresh.tick()["portfolios"]}
+    assert encode(a) == encode(b) and a["sum-low"]["realized"] == D("1.925")  # 0.95 + 5 x (0.60 - 0.405)
+    assert resumed.strategy == fresh.strategy and resumed.health == fresh.health
+
+
+def test_a_correction_or_a_new_step_discards_the_saved_replay(tmp_path):
+    store = ledger_fixture(tmp_path)
+    ledger = Ledger(store, step=60)
+    ledger.backfill()
+    ledger.save()
+    assert Ledger(store, step=60)._load() is not None
+    assert Ledger(store, step=120)._load() is None
+    sale = [e for e in store.events() if e["type"] == "transaction" and e["data"]["cash_delta"] == "5"][0]
+    store.append("correction", {"targets": [sale["record_id"]], "reason": "fixture"}, "sum-low")
+    assert Ledger(store, step=60)._load() is None
+    (tmp_path / "dashboard_replay.json").write_text("{not json")
+    assert Ledger(store, step=60)._load() is None

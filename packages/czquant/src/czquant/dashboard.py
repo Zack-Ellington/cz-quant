@@ -18,7 +18,10 @@ range is at most 2 cents wide), and the quote range otherwise. Per portfolio and
   net P&L             equity minus net external funding (point and range)
 
 History is replayed once at start on a grid of `step` seconds; afterwards each tick
-reads only events recorded since the last one.
+reads only events recorded since the last one. The replay is saved to
+$STRATEGY_RUNS_DIR/dashboard_replay.json (the grid points, the latest mark per market
+and the last event read), so a restart replays only what was recorded since. Any new
+correction, a different step, or a missing or unreadable file means a full replay.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from .store import Store, encode
 
 log = logging.getLogger(__name__)
 MAX_POINTS = 3000
+REPLAY_VERSION = 1
 ACTIVITY = ("heartbeat", "scan_complete", "halt", "halt_cleared", "basket_settled", "error")
 
 
@@ -73,6 +77,11 @@ class Ledger:
         self.activity: dict[str, dict[str, Any]] = {}
         self.halts: dict[str, dict[str, str]] = {}  # portfolio -> {halt record id: reason}
         self.latest: dict[str, Any] = {}
+        self.grid_step: float = step  # the backfill's spacing, wider than step for long histories
+        self.replayed_through = ""  # the last grid time the backfill measured
+        self.market_sequence = 0  # newest market event folded into the saved marks
+        self.path = Path(store.root) / "dashboard_replay.json"
+        self.marks_at_grid: dict[str, dict[str, Any]] = {}
 
     def _mark(self, event: dict[str, Any]) -> None:
         ticker = event["data"].get("ticker")
@@ -99,9 +108,11 @@ class Ledger:
             if kind == "error":
                 self.activity.setdefault(pid, {})["last_error"] = {"at": event["effective_at"], **d}
 
-    def _read_new(self) -> None:
-        events = self.store.events(kinds=("market", "run", "health", "observation"), observations=ACTIVITY,
+    def _read_new(self, marks_after: int = 0) -> None:
+        """Events since the last read. Marks up to `marks_after` are already known."""
+        events = self.store.events(kinds=("run", "health", "observation"), observations=ACTIVITY,
                                    after_sequence=self.sequence)
+        events += self.store.events(kinds=("market",), after_sequence=max(self.sequence, marks_after))
         for event in sorted(events, key=lambda e: e["sequence"]):
             if event["type"] == "market":
                 self._mark(event)
@@ -109,25 +120,64 @@ class Ledger:
                 self._note(event)
             self.sequence = max(self.sequence, event["sequence"])
 
-    def backfill(self) -> None:
-        """Replay history once onto the grid; no more than MAX_POINTS per portfolio."""
+    def _load(self) -> dict[str, Any] | None:
+        """The saved replay, if it is still valid for this store and step."""
+        try:
+            saved = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return None
+        if saved.get("version") != REPLAY_VERSION or saved.get("step") != self.step:
+            return None
+        if self.store.events(kinds=("correction",), after_sequence=saved["sequence"]):
+            return None  # a correction can rewrite history already on the grid
+        return saved
+
+    def save(self) -> None:
+        """Write the replay atomically; the next start resumes from it."""
+        saved = {"version": REPLAY_VERSION, "step": self.step, "grid_step": self.grid_step,
+                 "at": self.replayed_through, "sequence": self.market_sequence,
+                 "marks": self.marks_at_grid, "series": self.series}
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(encode(saved))
+        tmp.replace(self.path)
+
+    def backfill(self, resume: bool = True) -> None:
+        """Replay history onto the grid, from the saved replay when there is one.
+
+        No more than MAX_POINTS per portfolio: a long history gets a wider grid, and
+        a resumed series that outgrows it is thinned to every other point.
+        """
         portfolios = self.store.portfolios()
         now = datetime.now(timezone.utc)
         if not portfolios:
             self._read_new()
             return
+        saved = self._load() if resume else None
         first = min(timestamp(p["created_at"]) for p in portfolios)
-        step = timedelta(seconds=max(self.step, (now - first).total_seconds() / MAX_POINTS))
-        events = active_events(self.store.events(kinds=("transaction", "correction", "market"), until=now.isoformat()))
+        if saved:
+            step = timedelta(seconds=saved["grid_step"])
+            self.series = saved["series"]
+            self.marks = saved["marks"]
+            start = timestamp(saved["at"]) + step
+            sequence = saved["sequence"]
+            log.info("resuming the replay from %s", saved["at"])
+        else:
+            step = timedelta(seconds=max(self.step, (now - first).total_seconds() / MAX_POINTS))
+            self.series, start, sequence = {}, first, 0
+        # Transactions are few and always replayed in full; marks only since the save.
+        economic = active_events(self.store.events(kinds=("transaction", "correction"), until=now.isoformat()))
+        market = self.store.events(kinds=("market",), until=now.isoformat(), after_sequence=sequence)
+        events = sorted(economic + market, key=lambda e: (e["effective_at"], e["sequence"]))
         states = {p["id"]: State() for p in portfolios}
         created = {p["id"]: timestamp(p["created_at"]) for p in portfolios}
-        cursor, at = 0, first
+        cursor, at = 0, start
         while True:
             at = min(at, now)
             while cursor < len(events) and timestamp(events[cursor]["effective_at"]) <= at:
                 event = events[cursor]
                 if event["type"] == "market":
                     self._mark(event)
+                    sequence = max(sequence, event["sequence"])
                 elif event["portfolio_id"] in states:
                     states[event["portfolio_id"]].apply(event)
                 cursor += 1
@@ -137,8 +187,15 @@ class Ledger:
             if at >= now:
                 break
             at += step
-        self.marks.clear()
-        self._read_new()  # marks, runs, health and activity, up to now
+        while max(map(len, self.series.values()), default=0) > MAX_POINTS:
+            for points in self.series.values():
+                points[:] = points[::2]
+            step *= 2
+        self.grid_step, self.replayed_through = step.total_seconds(), at.isoformat()
+        self.market_sequence, self.marks_at_grid = sequence, dict(self.marks)
+        # Runs, health and activity from the start; marks resume from the grid's.
+        self.marks = dict(self.marks_at_grid)
+        self._read_new(marks_after=sequence)
 
     def tick(self) -> dict[str, Any]:
         """The current measure of every portfolio; a new grid point when one is due."""
@@ -158,6 +215,9 @@ class Ledger:
                          "range_coverage": _share(history, "net_pnl_lower"),
                          "activity": self.activity.get(pid, {}),
                          "halted": sorted(self.halts.get(pid, {}).values())})
+        if appended:  # what a restart resumes from: this point, with the marks read so far
+            self.replayed_through, self.market_sequence = now.isoformat(), self.sequence
+            self.marks_at_grid = dict(self.marks)
         self.latest = {"generated_at": now.isoformat(timespec="seconds"), "step": self.step, "portfolios": rows,
                        "health": self.health, "odds": self.odds()}
         return {"type": "tick", **self.latest, "append": appended}
@@ -191,7 +251,9 @@ async def serve(root: str | None, host: str = "127.0.0.1", port: int = 8790, int
 
     store = Store(root)
     ledger = Ledger(store, step)
+    print("Replaying history (saved replays resume where they left off)...", flush=True)
     ledger.backfill()
+    ledger.save()
     ledger.tick()
     clients: set[Any] = set()
 
@@ -223,7 +285,10 @@ async def serve(root: str | None, host: str = "127.0.0.1", port: int = 8790, int
         while True:
             await asyncio.sleep(interval)
             try:
-                message = encode(ledger.tick())
+                tick = ledger.tick()
+                message = encode(tick)
+                if tick["append"]:
+                    await asyncio.to_thread(ledger.save)
             except Exception:
                 log.exception("dashboard tick failed")
                 continue
