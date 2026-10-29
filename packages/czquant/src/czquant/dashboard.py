@@ -5,8 +5,8 @@ Every portfolio in the store appears on its own, so a new strategy needs nothing
 here; its name comes from the portfolio's latest run record.
 
 Valuation is the report's (report.value): FIFO cost basis with fees, marks no older
-than 120 seconds, a midpoint only from a two-sided book, and the quote range
-otherwise. Per portfolio and time:
+than 120 seconds, a midpoint from a two-sided book (or a one-sided book whose quote
+range is at most 2 cents wide), and the quote range otherwise. Per portfolio and time:
 
   realized            FIFO realized P&L (fills closed, settlements, rewards)
   unrealized          midpoint value of open lots minus their cost basis, only when

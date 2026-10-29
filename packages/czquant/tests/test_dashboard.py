@@ -156,3 +156,22 @@ def test_server_serves_the_page_and_streams_snapshot_then_ticks(tmp_path):
     first, second = asyncio.run(scenario())
     assert first["type"] == "snapshot" and set(first["series"]) == {"sum-low", "cross"}
     assert second["type"] == "tick" and len(second["portfolios"]) == 2
+
+
+def test_a_nearly_decided_one_sided_book_is_marked_at_the_middle_of_its_range(tmp_path):
+    store = Store(tmp_path)
+    store.create("p", "100")
+    store.append("transaction", {"reason": "fill", "cash_delta": "-9", "fee": "0", "context": {},
+                 "legs": [{"market": "W", "side": "yes", "quantity_delta": "10", "price": "0.90"}]}, "p")
+    store.append("transaction", {"reason": "fill", "cash_delta": "0", "fee": "0", "context": {},
+                 "legs": [{"market": "L", "side": "no", "quantity_delta": "10", "price": "0"}]}, "p")
+    store.append("market", {"ticker": "W", "market": {"status": "active"}, "book": book("0.99", None)}, at=iso(5))
+    store.append("market", {"ticker": "L", "market": {"status": "active"}, "book": book(None, "0.01")}, at=iso(5))
+    ledger = Ledger(store)
+    ledger.backfill()
+    n = ledger.tick()["portfolios"][0]["now"]
+    # W: YES in [0.99, 1] marks 0.995. L: NO in [0.99, 1] marks 0.995. Basis 9.
+    assert n["unrealized"] == D("19.9") - 9 and n["missing"] == []
+    store.append("market", {"ticker": "W", "market": {"status": "active"}, "book": book("0.97", None)}, at=iso(1))
+    n = ledger.tick()["portfolios"][0]["now"]
+    assert n["unrealized"] is None and n["missing"] == ["W"]  # a 3-cent range is still unmarked

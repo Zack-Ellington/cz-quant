@@ -185,7 +185,8 @@ uv run czquant dashboard            # http://127.0.0.1:8790/
 
 A read-only websocket view of every portfolio in the store, for watching a trial
 while it runs. It applies the report's valuation: the same FIFO state, 120-second
-marks, midpoints only from two-sided books, and quote ranges otherwise. For each
+marks, midpoints from two-sided books (and from one-sided books with a range of at
+most 2 cents), and quote ranges otherwise. For each
 portfolio it shows realized P&L and unrealized P&L. Unrealized is given in full only
 when every open lot has a midpoint; otherwise it covers the marked lots, with the
 remaining cost basis listed separately. It also shows net P&L as a point and a
@@ -214,13 +215,17 @@ history to establish opening holdings. Every portfolio is evaluated on the
 same one-minute grid plus funding boundaries. YES midpoint is the average of
 the best YES bid and implied YES ask; NO is its complement. Crossed books,
 missing two-sided quotes, or books older than 120 seconds are missing marks.
+The one exception is a fresh one-sided book whose quote range (below) is at most
+$0.02 wide, such as a $0.99 YES bid with no seller once an outcome is all but
+decided: it is marked at the middle of that range. The range is unchanged.
 Final confirmed payout values remain valid without a live quote.
 
 The report also shows a quote-based valuation range. For YES, the lower value
 uses the best YES bid, or zero when that side is empty; the upper value uses
 one minus the best NO bid, or one when that side is empty. NO uses the
 complementary range. Both sides missing yields [0, 1] per contract. A fresh
-one-sided book therefore retains a range without inventing a midpoint.
+one-sided book therefore retains a range; it gets a midpoint only when that range
+is at most $0.02 wide.
 Absent, stale, invalid, or crossed books invalidate the range as well.
 
 Portfolio ranges sum actual quantities and cash, including entry fees. P&L

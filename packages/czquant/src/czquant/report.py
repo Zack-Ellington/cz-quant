@@ -14,6 +14,11 @@ from .book import levels
 from .store import Store, decimal, encode, utc
 
 
+# A one-sided book is valued at the middle of its quote range when that range is this
+# tight: a $0.99 YES bid with no seller (the outcome all but decided) marks at $0.995.
+ONE_SIDED_MAX_WIDTH = Decimal('0.02')
+
+
 def timestamp(value: str) -> datetime:
     value = value.replace('Z', '+00:00')
     result = datetime.fromisoformat(value)
@@ -24,6 +29,9 @@ def timestamp(value: str) -> datetime:
 
 def value(state: State, marks: dict[str, dict[str, Any]], at: datetime) -> tuple[Decimal | None, Decimal | None, Decimal | None, list[str]]:
     """Midpoint plus quote envelope; missing sides use the contract bounds 0/1.
+
+    A one-sided book has no midpoint unless its envelope is at most ONE_SIDED_MAX_WIDTH
+    wide; then the envelope's middle is used.
 
     This envelope is not executable liquidation value or a settlement guarantee.
     Stale, absent, or crossed references invalidate both midpoint and envelope.
@@ -48,17 +56,18 @@ def value(state: State, marks: dict[str, dict[str, Any]], at: datetime) -> tuple
                     bid = book['yes'][0][0] if book['yes'] else Decimal(0)
                     ask = 1 - book['no'][0][0] if book['no'] else Decimal(1)
                     if 0 <= bid <= ask <= 1:
-                        prices[ticker] = (bid, ask, bool(book['yes'] and book['no']))
+                        priced = bool(book['yes'] and book['no']) or ask - bid <= ONE_SIDED_MAX_WIDTH
+                        prices[ticker] = (bid, ask, priced)
         quote = prices[ticker]
         if quote is None:
             missing.append(ticker)
             unbounded = True
             continue
-        bid, ask, two_sided = quote
+        bid, ask, priced = quote
         low, high = (bid, ask) if lot['side'] == 'yes' else (1 - ask, 1 - bid)
         lower += lot['quantity'] * low
         upper += lot['quantity'] * high
-        if two_sided:
+        if priced:
             total += lot['quantity'] * (low + high) / 2
         else:
             missing.append(ticker)
