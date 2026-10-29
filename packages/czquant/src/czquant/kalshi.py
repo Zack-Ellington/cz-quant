@@ -13,6 +13,8 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding
 
+from . import ratelimit
+
 
 class Kalshi:
     def __init__(self, authenticated: bool = True, base_url: str | None = None):
@@ -37,7 +39,10 @@ class Kalshi:
                     message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH), hashes.SHA256())
                 headers = {"KALSHI-ACCESS-KEY": self.key_id, "KALSHI-ACCESS-TIMESTAMP": ts,
                            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode()}
+            ratelimit.acquire()
             response = self.http.request(method, url, headers=headers, json=data, params=params)
+            if response.status_code == 429:
+                ratelimit.acquire(penalty=1.0)  # every process backs off, not just this one
             if method == "GET" and response.status_code in (429, 500, 502, 503, 504) and attempt < 4:
                 time.sleep(0.5 * 2**attempt)
                 continue
