@@ -38,6 +38,8 @@ def main() -> None:
     mapping.add_argument('id')
     mapping.add_argument('--subaccount',type=int,required=True)
     mapping.add_argument('--exchange-index',type=int,default=0)
+    mapping.add_argument('--primary-account', action='store_true',
+                         help='with --subaccount 0: dedicate the primary account to this portfolio')
     commands.add_parser('create-subaccount')
     transfer = commands.add_parser('transfer')
     transfer.add_argument('--client-id',required=True)
@@ -68,7 +70,7 @@ def main() -> None:
         from .operator import map_live, transfer
         api = Kalshi()
         if args.command == 'map-live':
-            map_live(store,api,args.id,args.subaccount,args.exchange_index)
+            map_live(store,api,args.id,args.subaccount,args.exchange_index,args.primary_account)
         elif args.command == 'create-subaccount':
             print(encode(api.request('POST','/portfolio/subaccounts',{})))
         else:

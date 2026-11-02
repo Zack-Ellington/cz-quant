@@ -13,6 +13,16 @@ from .accounting import State, portfolio_state
 from .store import Store, decimal, encode
 
 
+PRIMARY = 0  # the account itself; Kalshi's default when no subaccount is named
+
+
+def scope(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Request parameters naming a live portfolio's account. The primary account
+    (mapped with --primary-account) is named by omission: no subaccount field."""
+    sub = metadata["subaccount"]
+    return {} if sub == PRIMARY else {"subaccount": sub}
+
+
 class Broker:
     def __init__(self, store: Store, portfolio: str, adapter: Any = None,
                  run_id: str | None = None):
@@ -63,7 +73,8 @@ class Broker:
             subaccount = self.metadata.get("subaccount")
             if subaccount is None or order.get("subaccount", subaccount) != subaccount:
                 raise ValueError("live order must use the mapped subaccount")
-            order["subaccount"] = subaccount
+            order.pop("subaccount", None)
+            order.update(scope(self.metadata))
             exchange = self.metadata.get("exchange_index", 0)
             if order.get("exchange_index", exchange) != exchange:
                 raise ValueError("cannot change portfolio exchange")
@@ -115,7 +126,7 @@ class Broker:
             self.finish(identifier, "canceled")
             return {"status": "canceled"}
         self._require_venue_id(row)
-        response = self.adapter.cancel_order(row["venue_id"], {"subaccount": self.metadata["subaccount"]})
+        response = self.adapter.cancel_order(row["venue_id"], scope(self.metadata))
         self.observe("cancel_acknowledged", {"client_order_id": identifier, "response": response})
         # Account monitor releases reservations after fills and terminal status reconcile.
         return response
@@ -133,7 +144,7 @@ class Broker:
             raise ValueError("cannot change portfolio ownership")
         if any(k in changes for k in ("ticker", "side", "client_order_id")):
             raise ValueError("amend can change count and price only; submit a new order instead")
-        request = {**changes, "subaccount": self.metadata["subaccount"]}
+        request = {**{k: v for k, v in changes.items() if k != "subaccount"}, **scope(self.metadata)}
         with self.store.transaction():
             row = self._order(identifier)
             self._require_venue_id(row)
