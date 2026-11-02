@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from czquant import Broker
+from czquant.broker import scope
 from czquant.store import decimal
 
 TERMINAL = ("executed", "canceled", "cancelled")
@@ -78,8 +79,7 @@ def order_fill(api: Any, broker: Broker, response: dict[str, Any], wait: float) 
             return None
         time.sleep(0.5)
         try:
-            order = api.get(f"/portfolio/orders/{venue_id}",
-                            {"subaccount": broker.metadata["subaccount"]}).get("order", {})
+            order = api.get(f"/portfolio/orders/{venue_id}", scope(broker.metadata)).get("order", {})
         except Exception:
             order = {"order_id": venue_id}
 

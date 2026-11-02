@@ -2,15 +2,26 @@
 from __future__ import annotations
 import uuid
 from typing import Any
+from .broker import PRIMARY, scope
 from .store import Store, decimal
 
 
-def map_live(store: Store, api: Any, portfolio: str, subaccount: int, exchange: int = 0) -> None:
-    if not 1 <= subaccount <= 63:
-        raise ValueError('Use a dedicated numbered subaccount')
+def map_live(store: Store, api: Any, portfolio: str, subaccount: int, exchange: int = 0,
+             primary: bool = False) -> None:
+    """Map a flat Kalshi account to a new live portfolio, opening it at the account's cash.
+
+    Subaccount 0 is the primary account. It needs `primary=True`, an explicit promise that
+    nothing else trades there while the portfolio is live: the account monitor reconciles
+    the whole account against this portfolio, and manual trades or new deposits show up
+    as mismatches.
+    """
+    if subaccount == PRIMARY and not primary:
+        raise ValueError('Subaccount 0 is the primary account: pass --primary-account to dedicate it to this portfolio')
+    if subaccount != PRIMARY and not 1 <= subaccount <= 63:
+        raise ValueError('Use a dedicated numbered subaccount (1-63), or 0 with --primary-account')
     if any(p['mode']=='live' and p['metadata'].get('subaccount')==subaccount and p['metadata'].get('exchange_index',0)==exchange for p in store.portfolios()):
         raise ValueError('subaccount already mapped')
-    params={'subaccount':subaccount,'exchange_index':exchange}
+    params={**scope({'subaccount':subaccount}),'exchange_index':exchange}
     positions=list(api.pages('/portfolio/positions','market_positions',**params))
     orders=list(api.pages('/portfolio/orders','orders',status='resting',**params))
     if any(decimal(p.get('position_fp','0')) for p in positions) or orders:

@@ -151,6 +151,12 @@ portfolio, mapped to a dedicated Kalshi subaccount.
    `uv run czquant transfer --client-id <uuid> --from-subaccount 0 --to-subaccount N --amount-cents ...`,
    then `uv run czquant map-live election-live --subaccount N`. The subaccount
    must be flat. Its balance is the most a live run can ever use.
+
+   Without subaccount access (Kalshi's basic API tier), dedicate the primary
+   account instead: close or settle every position there, deposit, then
+   `uv run czquant map-live election-live --subaccount 0 --primary-account`.
+   Don't trade that account by hand or deposit more while the portfolio is live;
+   the account monitor would report every such change as a mismatch.
 3. **Account monitor.** Keep `uv run czquant monitor account` running. It
    records fills, settlements and cash from Kalshi; without it the portfolio
    never sees its live positions.
