@@ -1,9 +1,8 @@
 """Paper trading: signals, sizing, a confirming second scan, fills, settlement.
 
-Paper mode is the only mode. Nothing here can send an order: fills are
-simulated at quoted prices and written to the ledger labeled ``simulated``. Live
-execution is issue #5, which needs the capital and position limits decided
-first.
+Paper mode is the default: fills are simulated at quoted prices and written to
+the ledger labeled ``simulated``. Live execution, for a portfolio mapped to a Kalshi
+subaccount, is in ``strategy.live`` and only runs when ``trade`` is given limits.
 
 What the strategy wants to trade (``signal`` events):
 
@@ -54,6 +53,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Mapping, NamedTuple
 
+from strategy import live as live_exec
 from strategy import money
 from strategy.api import Client
 from strategy.checks import DR_STATES, STATES, Check, Leg
@@ -320,13 +320,33 @@ def trade(
     policy: Policy,
     contracts: int,
     confirm_delay: float = 0.0,
+    live: live_exec.LiveLimits | None = None,
 ) -> None:
-    """Settle, generate signals, confirm, fill, and mark the open book."""
-    broker = None
-    if os.environ.get("CZQUANT_PORTFOLIO"):
+    """Settle, generate signals, confirm, fill, and mark the open book.
+
+    With ``live`` the orders go to Kalshi through a portfolio mapped to a subaccount
+    (see ``strategy.live``); without it nothing changes: paper fills as before.
+    """
+    broker, api = None, None
+    if live is not None and not os.environ.get("CZQUANT_PORTFOLIO"):
+        raise ValueError("live mode needs CZQUANT_PORTFOLIO set to a portfolio mapped with czquant map-live")
+    if os.environ.get("CZQUANT_PORTFOLIO") and live is not None:
+        api = Kalshi()
+        broker = Broker(Store(), os.environ["CZQUANT_PORTFOLIO"], api, run.run_id)
+        if broker.mode != "live":
+            raise ValueError("live mode needs a portfolio mapped with czquant map-live, not a paper portfolio")
+        live.halted = live_exec.standing_halt(broker)
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        broker.start(run.strategy, revision, {"run_metadata": run.meta, "model": model.name, "mode": "live",
+            "send_orders": live.send_orders, "max_spend": str(live.max_spend),
+            "unwind_slippage": str(live.unwind_slippage), "max_position": str(policy.max_position),
+            "min_edge": str(policy.min_edge), "contracts": contracts})
+        open_baskets = live_exec.open_baskets(broker)
+        cash = broker.available
+    elif os.environ.get("CZQUANT_PORTFOLIO"):
         broker = Broker(Store(), os.environ["CZQUANT_PORTFOLIO"], Paper(Kalshi(authenticated=False)), run.run_id)
         if broker.mode != "paper":
-            raise ValueError("Election strategy CLI is paper only")
+            raise ValueError("this portfolio is live: run with --mode live")
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         broker.start(run.strategy, revision, {"run_metadata":run.meta, "model":model.name,
             "max_position":str(policy.max_position), "min_edge":str(policy.min_edge), "contracts":contracts})
@@ -368,6 +388,12 @@ def trade(
         if isinstance(cc, str):
             run.event("signal", accepted=False, reason=cc, **base)
             continue
+        if live is not None:
+            reason = live_exec.stopped(live)
+            if reason:
+                run.event("signal", accepted=False, reason=reason, **base)
+                continue
+            cash = min(cash, live.max_spend - live.spent)  # the run's spend cap is a cash limit
         sizing = size(cc, depth, cash, policy)
         if not sizing.quantity:
             run.event("signal", accepted=False, reason=sizing.reason, limit=sizing.limit, **base)
@@ -387,6 +413,17 @@ def trade(
             legs=[{"ticker": leg.ticker, "side": leg.side, "price": leg.price} for leg in cc.legs],
             **base,
         )
+        if live is not None:
+            assert broker is not None
+            got = live_exec.execute(broker, api, run, list(cc.legs), quantity, cc.outlay(quantity),
+                {"basket":c.basket,"position_id":pid,"model":model.name,"expected_edge":str(cc.edge(quantity)),
+                 "model_probabilities":dict(model.combo),"model_uncertainty":dict(model.uncertainty),
+                 "intended_quantity":quantity,"intended_markets":[item.ticker for item in cc.legs],
+                 "payout_by_state":dict(cc.payout_by_state)}, live)
+            for key, n in got.items():
+                depth[key] -= float(n)
+            cash = broker.available
+            continue
         for leg in cc.legs:
             if broker:
                 result = broker.submit({"ticker":leg.ticker, "side":"bid" if leg.side=="yes" else "ask",
