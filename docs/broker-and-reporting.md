@@ -206,6 +206,15 @@ orders and records its opening cash. Transfers require a supplied UUID and
 an amount in cents; venue history provides accounting evidence. No daemon
 chooses allocations. Never map the same subaccount to two portfolios.
 
+An account without subaccount access (Kalshi's basic API tier) can map its
+primary account instead: `czquant map-live <id> --subaccount 0 --primary-account`.
+The same flatness check applies, and requests for that portfolio name no
+subaccount at all. The flag is a promise that nothing else trades there while
+the portfolio is live: the account monitor reconciles the whole account against
+the portfolio, so manual trades show up as inventory mismatches, and deposits
+made after mapping (which are not subaccount transfers) show up as cash
+mismatches. Deposit first, then map.
+
 The live adapter follows the current V2 API and has fixture validation, not
 real-money execution validation in this rollout. Standard fills, transfers,
 and settlements are normalized; settlement amounts and observed cash must

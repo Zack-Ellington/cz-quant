@@ -62,7 +62,7 @@ from typing import Callable
 LEDGER_TYPES = ("fill", "settlement", "mark")
 LEDGER_COLUMNS = ("ts", "run_id", "strategy", "type", "position_id", "basket", "ticker", "side",
                   "quantity", "price", "fee", "cash_delta", "simulated")
-EVENT_TYPES = ("scan", "signal", "note")
+EVENT_TYPES = ("scan", "signal", "note", "live_order", "live_unwind")
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -291,8 +291,13 @@ def _read_lines(runs_dir: Path, strategy: str, name: str) -> list[dict]:
 
 
 def read_ledger(runs_dir: Path, strategy: str) -> list[dict]:
-    """Every ledger row of every run of ``strategy``, in time order."""
-    return _read_lines(runs_dir, strategy, "ledger.jsonl")
+    """Every ledger row of every run of ``strategy``, in time order.
+
+    Rows in an older layout (early runs wrote scans and fills without a basket)
+    are skipped: they aren't this schema's accounting records.
+    """
+    return [r for r in _read_lines(runs_dir, strategy, "ledger.jsonl")
+            if r.get("type") in LEDGER_TYPES and set(LEDGER_COLUMNS) <= set(r)]
 
 
 def read_events(runs_dir: Path, strategy: str) -> list[dict]:

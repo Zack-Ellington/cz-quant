@@ -128,3 +128,13 @@ def test_a_quiet_tee_writes_the_log_only(tmp_path):
 
 def test_repo_root_is_found():
     assert (repo_root() / ".git").exists()
+
+
+def test_rows_in_an_older_layout_are_skipped(tmp_path):
+    import json
+    old = tmp_path / "s" / "20260930T001553Z"
+    old.mkdir(parents=True)
+    (old / "ledger.jsonl").write_text(json.dumps({"ts": "2026-09-30T00:15:53Z", "run_id": "old", "strategy": "s",
+        "type": "fill", "position_id": "p", "ticker": "T"}) + "\n" + json.dumps({"ts": "2026-09-30T00:15:53Z",
+        "run_id": "old", "strategy": "s", "type": "scan"}) + "\n")
+    assert read_ledger(tmp_path, "s") == []
