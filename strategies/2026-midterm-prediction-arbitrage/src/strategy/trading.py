@@ -332,6 +332,8 @@ def trade(
         raise ValueError("live mode needs CZQUANT_PORTFOLIO set to a portfolio mapped with czquant map-live")
     if os.environ.get("CZQUANT_PORTFOLIO") and live is not None:
         api = Kalshi()
+        if live.send_orders and not api.key_id:
+            raise ValueError("--send-orders needs KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH exported in this shell")
         broker = Broker(Store(), os.environ["CZQUANT_PORTFOLIO"], api, run.run_id)
         if broker.mode != "live":
             raise ValueError("live mode needs a portfolio mapped with czquant map-live, not a paper portfolio")

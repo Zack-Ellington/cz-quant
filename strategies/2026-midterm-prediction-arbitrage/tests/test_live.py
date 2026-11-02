@@ -153,3 +153,42 @@ def test_paper_and_live_portfolios_cannot_be_swapped(tmp_path, monkeypatch, acco
     monkeypatch.setenv("CZQUANT_PORTFOLIO", "election-paper")
     with pytest.raises(ValueError, match="map-live"):
         run_live(tmp_path, monkeypatch, Venue(), live.LiveLimits(D("50")))
+
+
+class Refused(Venue):
+    """Kalshi refusing the request outright, as with an unsigned or badly signed order."""
+
+    def create_order(self, order):
+        import httpx
+        request = httpx.Request("POST", "https://kalshi.test/portfolio/events/orders")
+        raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=httpx.Response(401, request=request))
+
+
+def test_a_rejected_order_stops_the_run_without_a_standing_halt(tmp_path, monkeypatch, account):
+    limits = live.LiveLimits(D("50"), send_orders=True)
+    run_live(tmp_path, monkeypatch, Refused(), limits)
+    assert limits.halted is None and "rejected" in str(limits.stopped_run)
+    assert live.standing_halt(Broker(account, "election-live")) is None
+    assert [tuple(r) for r in account.db.execute("SELECT status FROM orders")] == [("rejected",)]
+
+
+def test_a_rejected_later_leg_unwinds_the_earlier_ones(account):
+    class SecondRefused(Venue):
+        def create_order(self, order):
+            if order["ticker"] == "B":
+                return Refused().create_order(order)
+            return super().create_order(order)
+    venue = SecondRefused()
+    limits = live.LiveLimits(D("100"), send_orders=True)
+    got = live.execute(Broker(account, "election-live", venue), venue, Recorder(), [leg("A"), leg("B")], 10, D("8"),
+                       {"basket": "b", "position_id": "p"}, limits)
+    assert [(o["ticker"], o.get("reduce_only", False)) for o in venue.orders] == [("A", False), ("A", True)]
+    assert got[("A", "yes")] == 0 and limits.stopped_run and limits.halted is None
+
+
+def test_sending_orders_needs_a_key(tmp_path, monkeypatch, account):
+    venue = Venue()
+    venue.key_id = None
+    with pytest.raises(ValueError, match="KALSHI_API_KEY_ID"):
+        run_live(tmp_path, monkeypatch, venue, live.LiveLimits(D("50"), send_orders=True))
+    run_live(tmp_path, monkeypatch, venue, live.LiveLimits(D("50")))  # a dry run needs no key

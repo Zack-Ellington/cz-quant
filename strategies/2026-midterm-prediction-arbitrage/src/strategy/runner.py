@@ -198,7 +198,8 @@ def run(
             print(f"{sum(e['type'] == 'live_order' for e in mine)} order(s), "
                   f"{sum(e['type'] == 'live_unwind' for e in mine)} unwind(s); "
                   f"committed ${limits.spent:.2f} of the ${max_spend} cap"
-                  + (f"; HALTED: {limits.halted}" if limits.halted else ""))
+                  + (f"; HALTED: {limits.halted}" if limits.halted else "")
+                  + (f"; STOPPED: {limits.stopped_run}" if limits.stopped_run else ""))
         else:
             print("\n".join(paper_section(run_.label, run_.run_id, rows, events, policy.bankroll)))
         if recorder is not None:
