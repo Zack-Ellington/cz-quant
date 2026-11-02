@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -48,7 +49,8 @@ class LiveLimits:
     fill_wait: float = 5.0  # seconds to wait for an order to reach a final status
     stop_file: Path | None = None
     spent: Decimal = field(default=Decimal(0))
-    halted: str | None = None
+    halted: str | None = None  # persistent: written as a halt record, cleared by an operator
+    stopped_run: str | None = None  # this run only, e.g. Kalshi rejected an order outright
 
 
 def open_baskets(broker: Broker) -> dict[str, str]:
@@ -109,8 +111,8 @@ def standing_halt(broker: Broker) -> str | None:
 
 
 def stopped(limits: LiveLimits) -> str | None:
-    if limits.halted:
-        return limits.halted
+    if limits.halted or limits.stopped_run:
+        return limits.halted or limits.stopped_run
     if limits.stop_file is not None and limits.stop_file.exists():
         return f"stop file present: {limits.stop_file}"
     return None
@@ -132,12 +134,19 @@ def execute(broker: Broker, api: Any, run: Any, legs: list, quantity: int, outla
         if target < 1:
             break
         order = buy_order(leg.ticker, leg.side, leg.price, int(target))
+        order["client_order_id"] = str(uuid.uuid4())
         try:
             response = broker.submit(order, context)
             got = order_fill(api, broker, response, limits.fill_wait)
         except Exception as exc:
             run.event("live_order", context["position_id"], order=order, basket=context["basket"],
                       error=f"{type(exc).__name__}: {exc}"[:300])
+            if order_status(broker, order["client_order_id"]) == "rejected":
+                # Kalshi refused the order outright: nothing filled. Stop this run, unwind
+                # what earlier legs bought, and leave no standing halt.
+                limits.stopped_run = f"Kalshi rejected the order on {leg.ticker}: {exc}"[:300]
+                run.event("note", message=f"live run stopped: {limits.stopped_run}")
+                break
             got = None
         if got is None:
             halt(broker, run, limits, f"order on {leg.ticker} has an unknown outcome; "
@@ -155,6 +164,12 @@ def execute(broker: Broker, api: Any, run: Any, legs: list, quantity: int, outla
             unwind(broker, api, run, leg, int(extra), context, limits)
             filled[(leg.ticker, leg.side)] = keep
     return filled
+
+
+def order_status(broker: Broker, client_order_id: str) -> str | None:
+    row = broker.store.db.execute("SELECT status FROM orders WHERE id=? AND portfolio_id=?",
+                                  (client_order_id, broker.portfolio)).fetchone()
+    return row[0] if row else None
 
 
 def unwind(broker: Broker, api: Any, run: Any, leg: Any, count: int, context: dict[str, Any],
