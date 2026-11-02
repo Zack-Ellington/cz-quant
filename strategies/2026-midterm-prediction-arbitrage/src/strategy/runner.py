@@ -180,8 +180,8 @@ def run(
         record_scan(run_, acquired.markets, view, source)
         print(format_report(report))
         print()
+        limits = None
         if trading:
-            limits = None
             if mode == "live":
                 assert max_spend is not None
                 limits = LiveLimits(Decimal(max_spend), send_orders, Decimal(unwind_slippage),
@@ -191,7 +191,16 @@ def run(
             trade(run_, client, acquired.markets, report.checks, view, acquired.fees, policy,
                   contracts, confirm_delay, limits)
         rows, events = read_ledger(runs_dir, STRATEGY_ID), read_events(runs_dir, STRATEGY_ID)
-        print("\n".join(paper_section(run_.label, run_.run_id, rows, events, policy.bankroll)))
+        if limits is not None:
+            # Live positions and cash are in the shared store: see `czquant report` or the dashboard.
+            mine = [e for e in events if e["run_id"] == run_.run_id and e["type"] in ("live_order", "live_unwind")]
+            print(f"Live trading - {run_.label} ({'orders sent' if send_orders else 'dry run: nothing sent'})")
+            print(f"{sum(e['type'] == 'live_order' for e in mine)} order(s), "
+                  f"{sum(e['type'] == 'live_unwind' for e in mine)} unwind(s); "
+                  f"committed ${limits.spent:.2f} of the ${max_spend} cap"
+                  + (f"; HALTED: {limits.halted}" if limits.halted else ""))
+        else:
+            print("\n".join(paper_section(run_.label, run_.run_id, rows, events, policy.bankroll)))
         if recorder is not None:
             path = recorder.save(snapshot_out)  # adds the confirmation scan
             print(f"Saved {len(recorder.records)} quotes to {path}", file=sys.stderr)
