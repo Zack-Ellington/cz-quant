@@ -77,8 +77,8 @@ at the repository root (gitignored) with `ledger.jsonl` (the accounting record:
 one flat row per fill, settlement, or mark, the same thirteen columns in every
 row), `events.jsonl` (scans and signals, diagnostics), `run.json`, and
 `run.log`. The schema is in `src/strategy/ledger.py` and the root README.
-**Paper mode is the default and the only mode: nothing is ever sent.** Live
-orders are issue #5.
+**Paper mode is the default: nothing is sent.** Live trading is opt-in; see
+[Live trading](#live-trading).
 
 - **Signals**: guaranteed arbitrage baskets, and combo legs where the model's
   edge after fees beats `--min-edge` plus three Monte Carlo standard errors.
@@ -124,7 +124,10 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 | `--estimator` | `midpoint` | `midpoint`, `width`, `last`, `shrunk` |
 | `--snapshot-in FILE` | live API | replay a saved snapshot |
 | `--snapshot-out FILE` | none | save every quote read (before the model, and again at the end) |
-| `--mode` | `paper` | `live` is refused (issue #5) |
+| `--mode` | `paper` | `live` trades a mapped Kalshi subaccount (below) |
+| `--max-spend` | none | live: entry capital one run may commit, fees included (required) |
+| `--send-orders` | off | live: send orders; without it a live run only logs them |
+| `--unwind-slippage` | 0.05 | live: worst price per contract below cost when selling back extras |
 | `--no-trade` | off | scan and report only |
 | `--bankroll` | 1000 | paper bankroll, dollars |
 | `--max-position` | 100 | entry capital cap per position, dollars |
@@ -134,8 +137,51 @@ uv run strategy --snapshot-in snapshots/2026-09-23.json --seed 12345   # replay
 | `--confirm-delay` | 5 live, 0 replay | seconds before the confirmation scan |
 | `--simulations`, `--seed` | 100000, none | Monte Carlo runs and seed |
 
-`--model` accepts only `independent`. The paper limits are placeholders until
-the capital and position limits in issue #5 are decided.
+`--model` accepts only `independent`.
+
+## Live trading
+
+Live mode sends real orders to Kalshi through the shared broker. The paper
+portfolio, its ledger and the monitors are unchanged; a live run uses its own
+portfolio, mapped to a dedicated Kalshi subaccount.
+
+1. **Key.** Export your production `KALSHI_API_KEY_ID` and
+   `KALSHI_PRIVATE_KEY_PATH` (a path to the `.pem` file).
+2. **Subaccount.** `uv run czquant create-subaccount`, fund it with
+   `uv run czquant transfer --client-id <uuid> --from-subaccount 0 --to-subaccount N --amount-cents ...`,
+   then `uv run czquant map-live election-live --subaccount N`. The subaccount
+   must be flat. Its balance is the most a live run can ever use.
+3. **Account monitor.** Keep `uv run czquant monitor account` running. It
+   records fills, settlements and cash from Kalshi; without it the portfolio
+   never sees its live positions.
+4. **Dry run first.** With `CZQUANT_PORTFOLIO=election-live`:
+
+   ```bash
+   uv run strategy --mode live --max-spend 25             # logs the orders it would send
+   uv run strategy --mode live --max-spend 25 --send-orders
+   ```
+
+What a live run does differently (`src/strategy/live.py`):
+
+- **Legs follow the fills.** Legs go out one at a time as IOC orders; each later
+  leg asks for no more than the smallest fill so far. Contracts beyond the
+  complete sets are sold back with reduce-only IOC orders within
+  `--unwind-slippage` of cost.
+- **No double entry.** A basket with an order the account monitor hasn't
+  reconciled yet counts as open.
+- **Halts.** An order whose outcome can't be read, or an extra that can't be
+  sold back, writes a `halt` to the portfolio. Every later live run refuses to
+  trade until you check the account and clear it:
+  `uv run czquant halts election-live`, then
+  `uv run czquant clear-halt election-live --halt-id <id> --reason "..."`.
+- **Limits.** `--max-spend` caps one run; `--max-position` caps each basket; a
+  file named `STOP` in `runs/2026-midterm-prediction-arbitrage/` stops new
+  baskets.
+- **Model trades are directional.** Combo legs the model prices away from the
+  market are single bets, not hedged baskets. Raise `--min-edge` to trade only
+  the strongest signals.
+
+Live orders and unwinds are logged as `live_order` and `live_unwind` events.
 
 ## Sample output
 

@@ -62,7 +62,7 @@ from typing import Callable
 LEDGER_TYPES = ("fill", "settlement", "mark")
 LEDGER_COLUMNS = ("ts", "run_id", "strategy", "type", "position_id", "basket", "ticker", "side",
                   "quantity", "price", "fee", "cash_delta", "simulated")
-EVENT_TYPES = ("scan", "signal", "note")
+EVENT_TYPES = ("scan", "signal", "note", "live_order", "live_unwind")
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 
