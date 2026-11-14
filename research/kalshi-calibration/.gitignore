@@ -1,0 +1,8 @@
+data/
+.venv/
+pull.log
+pull-*.log
+.pytest_cache/
+analyze.log
+reports-interim/
+reports/observations.csv
