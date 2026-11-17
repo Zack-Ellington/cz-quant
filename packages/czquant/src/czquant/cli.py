@@ -15,7 +15,7 @@ def main() -> None:
     create.add_argument('--cash', default='1000')
     create.add_argument('--label', default='')
     monitor = commands.add_parser('monitor')
-    monitor.add_argument('component', choices=['market','account','draftkings'])
+    monitor.add_argument('component', choices=['market','account','draftkings','polymarket'])
     monitor.add_argument('--once', action='store_true')
     monitor.add_argument('--interval', type=float, default=60)
     settle = commands.add_parser('settle-sportsbook')

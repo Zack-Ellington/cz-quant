@@ -25,6 +25,8 @@ or retired without an effect on the others.
 
 - [cross-market-sportbook](strategies/cross-market-sportbook/): the sum check across venues. Kalshi NBA, NHL and MLB game markets are priced against DraftKings moneylines, and baskets with legs on both venues are paper-traded through the shared broker. A new `czquant.draftkings` data flow, paper adapter and monitor support it.
 
+- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue are paper-traded through the shared broker. A new `czquant.polymarket` data flow, paper adapter and monitor support it.
+
 - [kalshi-sum-check-unwind](strategies/kalshi-sum-check-unwind/): the Kalshi sum check, but when a basket fills only some legs it keeps the complete sets and sells the extra contracts back within a slippage limit.
 
 - [kalshi-sum-check-retry](strategies/kalshi-sum-check-retry/): the Kalshi sum check, but when a basket fills only some legs it buys the missing legs again, as long as the completed basket still breaks even (or loses no more than a set amount).

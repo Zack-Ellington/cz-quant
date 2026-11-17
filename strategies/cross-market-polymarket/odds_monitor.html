@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalshi Polymarket Odds</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #15181d; --muted: #6b7280;
+  --a: #2563eb; --b: #ea580c; --arb: #16a34a; --arb-fill: rgba(22,163,74,.13); --est-fill: rgba(22,163,74,.05); --neg: #dc2626; --warn: #b45309;
+  --chip: #eef1f5; --focus: #93c5fd;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116; --panel: #161a21; --line: #262c36; --text: #e6e9ee; --muted: #8b93a1;
+    --a: #60a5fa; --b: #fb923c; --arb: #4ade80; --arb-fill: rgba(74,222,128,.14); --est-fill: rgba(74,222,128,.05); --neg: #f87171; --warn: #fbbf24;
+    --chip: #1f2530; --focus: #1d4ed8;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116; --panel: #161a21; --line: #262c36; --text: #e6e9ee; --muted: #8b93a1;
+  --a: #60a5fa; --b: #fb923c; --arb: #4ade80; --arb-fill: rgba(74,222,128,.14); --est-fill: rgba(74,222,128,.05); --neg: #f87171; --warn: #fbbf24;
+  --chip: #1f2530; --focus: #1d4ed8;
+}
+* { box-sizing: border-box }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif }
+main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px }
+h1 { font-size: 20px; margin: 0 }
+h2 { font-size: 15px; margin: 24px 0 8px }
+.muted { color: var(--muted) }
+.top { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap }
+.pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--chip); color: var(--muted) }
+.pill.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--arb); margin-right: 6px; vertical-align: 1px }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px }
+.search { position: relative; margin: 16px 0 10px }
+.search input { width: 100%; padding: 11px 14px; font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; outline: none }
+.search input:focus { border-color: var(--focus) }
+.menu { position: absolute; z-index: 10; left: 0; right: 0; top: calc(100% + 4px); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; max-height: 360px; overflow: auto; box-shadow: 0 8px 24px rgba(0,0,0,.12) }
+.menu[hidden] { display: none }
+.opt { display: flex; justify-content: space-between; gap: 10px; padding: 9px 14px; cursor: pointer }
+.opt.on, .opt:hover { background: var(--chip) }
+.chips { display: flex; gap: 6px; flex-wrap: wrap }
+.chip { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--chip); border: 1px solid transparent; cursor: pointer; color: var(--text) }
+.chip.on { border-color: var(--focus) }
+.tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--chip); color: var(--muted); white-space: nowrap }
+.tag.ok { color: var(--arb) } .tag.bad { color: var(--warn) }
+.head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin: 18px 0 10px }
+.head h2 { margin: 0; font-size: 18px }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px }
+.card .label { font-size: 12px; color: var(--muted) }
+.card .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums }
+.card .row { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: 0 }
+.pos { color: var(--arb) } .neg { color: var(--neg) }
+.toolbar { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 6px }
+.seg { display: inline-flex; background: var(--chip); border-radius: 8px; padding: 2px }
+.seg button { font: inherit; font-size: 12px; border: 0; background: transparent; color: var(--muted); padding: 4px 10px; border-radius: 6px; cursor: pointer }
+.seg button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.1) }
+label.ctl { font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center }
+label.ctl input, label.ctl select { font: inherit; font-size: 12px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; width: 70px }
+label.ctl select { width: auto }
+#chart { height: 520px }
+.banner { border: 1px solid var(--warn); color: var(--warn); border-radius: 10px; padding: 9px 12px; margin: 10px 0 }
+.banner[hidden] { display: none }
+.tablewrap { overflow-x: auto }
+table { width: 100%; border-collapse: collapse; font-size: 13px }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap }
+th { color: var(--muted); font-weight: 500; font-size: 12px }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums }
+tbody tr.click { cursor: pointer } tbody tr.click:hover { background: var(--chip) }
+tr.mine td { font-weight: 600 }
+.empty { padding: 18px; text-align: center; color: var(--muted) }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted) }
+.legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid; margin-right: 5px; vertical-align: 3px }
+.legend i.dash { border-top-style: dashed }
+.legend i.box { height: 10px; border: 0; background: var(--arb-fill); vertical-align: -1px }
+.legend i.box.est { background: var(--est-fill); outline: 1px dashed var(--arb) }
+@media (max-width: 640px) { #chart { height: 420px } .card .big { font-size: 19px } }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div><h1 id="h1">NFL Odds Monitor</h1><div class="muted" id="sub">Kalshi against Polymarket</div></div>
+    <span class="pill" id="status">connecting…</span>
+  </div>
+
+  <div class="search">
+    <input id="q" type="search" placeholder="Search a game: team, city or ticker (e.g. Bills, BUF, KXNFLGAME-26NOV22MIABUF)" autocomplete="off" aria-label="Search NFL games">
+    <div class="menu" id="menu" hidden role="listbox"></div>
+  </div>
+  <div class="chips" id="watched"></div>
+
+  <section id="game" hidden>
+    <div class="head">
+      <div><h2 id="gtitle"></h2><div class="muted" id="gsub"></div></div>
+      <div class="chips" id="gtags"></div>
+    </div>
+    <div class="banner" id="warn" hidden></div>
+    <div class="cards" id="cards"></div>
+
+    <div class="panel" style="margin-top:12px">
+      <div class="toolbar">
+        <div class="seg" id="ranges">
+          <button data-r="3600">1H</button><button data-r="21600">6H</button><button data-r="86400" class="on">1D</button><button data-r="604800">1W</button><button data-r="0">All</button>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <label class="ctl">Price line <select id="kline"><option value="mid">mid</option><option value="ask">ask</option><option value="last">last trade</option></select></label>
+          <label class="ctl">Min edge (¢) <input id="minedge" type="number" step="0.1" value="1"></label>
+        </div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div id="chart"></div>
+    </div>
+
+    <h2>Trades and trader opportunities in this game</h2>
+    <div class="panel tablewrap"><table>
+      <thead><tr><th>Time</th><th>Type</th><th class="num">Sets</th><th class="num">Edge</th><th class="num">Expected net</th><th>Legs</th></tr></thead>
+      <tbody id="trades"></tbody></table></div>
+  </section>
+
+  <h2>Recent arbitrage opportunities</h2>
+  <div class="toolbar"><p class="muted" style="margin:-4px 0 8px">Every paired game in the league, watched live since the monitor started, plus every opportunity the trader logged. Click a row to open it on the chart.</p>
+  <label class="ctl"><input id="showest" type="checkbox" style="width:auto"> Show estimates from history</label></div>
+  <div class="panel tablewrap"><table>
+    <thead><tr><th>Started</th><th>Game</th><th class="num">Lasted</th><th class="num">Best edge</th><th>Kalshi leg</th><th>Polymarket leg</th><th>Source</th></tr></thead>
+    <tbody id="arbs"></tbody></table></div>
+</main>
+
+<script src="/plotly.min.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const S = { games: [], current: null, view: null, range: 86400, timer: null, arbTimer: null, sel: -1, zoomTo: null };
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = p => p == null ? "—" : (p * 100).toFixed(1) + "%";
+const cents = p => p == null ? "—" : (p * 100).toFixed(1) + "¢";
+const american = d => d == null ? "—" : d >= 2 ? "+" + Math.round((d - 1) * 100) : String(Math.round(-100 / (d - 1)));
+const when = t => t == null ? "—" : new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const ago = t => { if (t == null) return "never"; const s = Date.now() / 1000 - t;
+  return s < 90 ? Math.round(s) + " s ago" : s < 5400 ? Math.round(s / 60) + " min ago" : s < 172800 ? (s / 3600).toFixed(1) + " h ago" : Math.round(s / 86400) + " days ago"; };
+const span = s => s == null ? "open" : s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h";
+const minEdge = () => (parseFloat($("minedge").value) || 0) / 100;
+
+async function get(url) {
+  const r = await fetch(url);
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+
+// ---- search -------------------------------------------------------------------------
+async function loadGames() {
+  try {
+    const d = await get("/api/games");
+    S.games = d.games;
+    $("sub").textContent = "Kalshi against Polymarket · portfolio " + d.portfolio;
+    $("h1").textContent = d.league.toUpperCase() + " Odds Monitor";
+    renderWatched();
+  } catch (e) { setStatus("games failed: " + e.message, false); }
+}
+function matches(q) {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return S.games.filter(g => {
+    const hay = [g.event, g.title, g.sub_title, ...g.teams, ...g.abbrs, g.day].join(" ").toLowerCase();
+    return words.every(w => hay.includes(w));
+  });
+}
+function renderMenu() {
+  const list = matches($("q").value).slice(0, 40);
+  const menu = $("menu");
+  if (!list.length) { menu.innerHTML = '<div class="empty">No open Kalshi game matches.</div>'; menu.hidden = false; return; }
+  S.sel = Math.min(Math.max(S.sel, 0), list.length - 1);
+  menu.innerHTML = list.map((g, i) => `<div class="opt${i === S.sel ? " on" : ""}" data-e="${esc(g.event)}" role="option">
+    <span><b>${esc(g.title)}</b> <span class="muted">${esc(g.day)} · ${esc(g.event)}</span></span>
+    <span>${g.paired ? '<span class="tag ok">Polymarket paired</span>' : '<span class="tag bad">not on Polymarket</span>'}
+    ${g.trades ? `<span class="tag ok">${g.trades} trade${g.trades > 1 ? "s" : ""}</span>` : ""}</span></div>`).join("");
+  menu.hidden = false;
+}
+$("q").addEventListener("input", () => { S.sel = 0; renderMenu(); });
+$("q").addEventListener("focus", renderMenu);
+$("q").addEventListener("keydown", e => {
+  const opts = [...$("menu").querySelectorAll(".opt")];
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); S.sel = (S.sel + (e.key === "ArrowDown" ? 1 : -1) + opts.length) % Math.max(opts.length, 1); renderMenu();
+  } else if (e.key === "Enter" && opts[S.sel]) { open(opts[S.sel].dataset.e); }
+  else if (e.key === "Escape") { $("menu").hidden = true; }
+});
+$("menu").addEventListener("mousedown", e => { const o = e.target.closest(".opt"); if (o) { e.preventDefault(); open(o.dataset.e); } });
+document.addEventListener("click", e => { if (!e.target.closest(".search")) $("menu").hidden = true; });
+
+function renderWatched() {
+  const seen = S.games.filter(g => g.watched || g.event === S.current);
+  $("watched").innerHTML = seen.map(g => `<button class="chip${g.event === S.current ? " on" : ""}" data-e="${esc(g.event)}">${esc(g.abbrs.join(" vs "))}</button>`).join("");
+}
+$("watched").addEventListener("click", e => { const c = e.target.closest(".chip"); if (c) open(c.dataset.e); });
+
+async function open(event, zoom) {
+  $("menu").hidden = true; $("q").value = ""; $("q").blur();
+  S.current = event; S.zoomTo = zoom || null; S.view = null;
+  try { history.replaceState(null, "", "#" + event); } catch (e) {}
+  $("game").hidden = false;
+  $("gtitle").textContent = "Loading " + event + "…";
+  await refresh();
+  loadGames();
+  loadArbs();
+}
+
+// ---- one game -------------------------------------------------------------------------
+async function refresh() {
+  if (!S.current) return;
+  const event = S.current;
+  try {
+    const v = await get("/api/game?event=" + encodeURIComponent(event));
+    if (event !== S.current) return;
+    const first = !S.view;
+    S.view = v;
+    render(first);
+    setStatus("live · updated " + new Date().toLocaleTimeString(), true);
+  } catch (e) { setStatus(e.message, false); if (!S.view) $("gtitle").textContent = e.message; }
+}
+function setStatus(text, ok) { $("status").textContent = text; $("status").className = "pill" + (ok ? " live" : ""); }
+
+function klineValue(q) {
+  const [bid, ask, last] = q;
+  const mode = $("kline").value;
+  if (mode === "ask") return ask;
+  if (mode === "last") return last;
+  return bid != null && ask != null ? (bid + ask) / 2 : last;
+}
+function arbWindows(points) {
+  const gap = Math.max(3 * S.view.interval, 180), me = minEdge(), out = [];
+  let cur = null, lastT = null;
+  for (const p of points) {
+    const e = p.arb && p.arb.edge, hit = e != null && e >= me;
+    if (cur && (!hit || (lastT != null && p.t - lastT > gap))) { cur.end = hit ? lastT : p.t; out.push(cur); cur = null; }
+    if (hit) {
+      if (!cur) cur = { start: p.t, end: null, best: e, at: p.t, k: p.arb.kalshi, est: false };
+      cur.est = cur.est || !p.live;
+      if (e > cur.best) Object.assign(cur, { best: e, at: p.t, k: p.arb.kalshi });
+    }
+    lastT = p.t;
+  }
+  if (cur) { cur.end = null; out.push(cur); }
+  return out;
+}
+
+function render(first) {
+  const v = S.view, pts = v.points, teams = v.teams, colors = [css("--a"), css("--b")];
+  $("gtitle").textContent = v.title;
+  const kick = v.poly && v.poly.start ? "Kickoff " + when(Date.parse(v.poly.start) / 1000) : "";
+  $("gsub").textContent = [v.event, kick, `Kalshi fee multiplier ${v.fee_multiplier}`,
+    v.poly_fee && v.poly_fee.rate != null ? `Polymarket fee rate ${v.poly_fee.rate}` : ""].filter(Boolean).join(" · ");
+  const tags = [];
+  tags.push(v.poly ? `<span class="tag ok">Polymarket: ${esc(v.poly.slug)}</span>` : `<span class="tag bad">${esc(v.pair_status)}</span>`);
+  tags.push(`<span class="tag">${v.live_since ? "live since " + when(v.live_since) : "history only"}</span>`);
+  $("gtags").innerHTML = tags.join("");
+  const warn = [];
+  if (!v.poly) warn.push(`This game isn't paired with a Polymarket game (${v.pair_status}), so the chart shows Kalshi only and no arbitrage can be found.`);
+  $("warn").hidden = !warn.length; $("warn").innerHTML = warn.map(esc).join("<br>");
+
+  // current quote cards
+  const last = pts[pts.length - 1];
+  const cards = teams.map((t, i) => {
+    const q = last ? last.k[i] : [null, null, null], pq = last ? last.p[i] : [null, null, null];
+    return `<div class="panel card"><div class="label"><span class="swatch" style="background:${colors[i]}"></span>${esc(t.name)} (${esc(t.abbr)})</div>
+      <div class="big">${pct(klineValue(q))}</div>
+      <div class="row"><span class="muted">Kalshi bid / ask</span><span>${cents(q[0])} / ${cents(q[1])}</span></div>
+      <div class="row"><span class="muted">Polymarket bid / ask</span><span>${cents(pq[0])} / ${cents(pq[1])}</span></div></div>`;
+  });
+  const a = last && last.arb;
+  const edgeCls = a && a.edge != null ? (a.edge >= minEdge() && a.edge > 0 ? "pos" : "neg") : "";
+  const combo = a && a.kalshi != null ? `${esc(teams[a.kalshi].abbr)} on Kalshi + ${esc(teams[1 - a.kalshi].abbr)} on Polymarket` : "needs both venues";
+  const c = x => x == null ? "—" : (x * 100).toFixed(2) + "¢";
+  cards.push(`<div class="panel card"><div class="label">Best cross-venue edge now (per $1 set, after fees)</div>
+    <div class="big ${edgeCls}">${a ? c(a.edge) : "—"}</div>
+    <div class="row"><span class="muted">${combo}</span></div>
+    <div class="row"><span class="muted">Kalshi-only / Polymarket-only</span><span>${a ? c(a.kalshi_only) : "—"} / ${a ? c(a.poly_only) : "—"}</span></div>
+    ${last && !last.live ? '<div class="row"><span class="muted">From history: Polymarket price, not its ask</span></div>' : ""}</div>`);
+  $("cards").innerHTML = cards.join("");
+
+  drawChart(first);
+  renderTrades();
+}
+
+function drawChart(first) {
+  const v = S.view, pts = v.points, colors = [css("--a"), css("--b")], text = css("--text"), muted = css("--muted"), grid = css("--line");
+  const x = pts.map(p => new Date(p.t * 1000));
+  const traces = [];
+  v.teams.forEach((t, i) => {
+    traces.push({ x, y: pts.map(p => { const y = klineValue(p.k[i]); return y == null ? null : y * 100; }), name: `${t.abbr} Kalshi`,
+      // a minute with no quote carries the last one forward, as Kalshi's own chart does
+      type: "scatter", mode: "lines", line: { color: colors[i], width: 2, shape: "hv" }, connectgaps: true,
+      customdata: pts.map(p => [cents(p.k[i][0]), cents(p.k[i][1])]),
+      hovertemplate: `${t.abbr} Kalshi %{y:.1f}%<br>bid %{customdata[0]} · ask %{customdata[1]}<extra></extra>` });
+  });
+  v.teams.forEach((t, i) => {
+    traces.push({ x, y: pts.map(p => { const y = klineValue(p.p[i]); return y == null ? null : y * 100; }), name: `${t.abbr} Polymarket`,
+      type: "scatter", mode: "lines", line: { color: colors[i], width: 1.6, dash: "dash", shape: "hv" }, connectgaps: true,
+      customdata: pts.map(p => [cents(p.p[i][0]), cents(p.p[i][1])]),
+      hovertemplate: `${t.abbr} Polymarket %{y:.1f}%<br>bid %{customdata[0]} · ask %{customdata[1]}<extra></extra>` });
+  });
+  // the margin panel: cross-venue edge in cents per $1 set
+  traces.push({ x, y: pts.map(p => p.arb.edge == null ? null : p.arb.edge * 100), name: "Cross-venue edge", yaxis: "y2",
+    type: "scattergl", mode: "lines", line: { color: muted, width: 1.4 }, hovertemplate: "edge %{y:.2f}¢<extra></extra>" });
+  traces.push({ x, y: pts.map(p => p.arb.kalshi_only == null ? null : p.arb.kalshi_only * 100), name: "Kalshi-only edge", yaxis: "y2",
+    type: "scattergl", mode: "lines", line: { color: muted, width: 1, dash: "dot" }, hovertemplate: "Kalshi-only %{y:.2f}¢<extra></extra>", visible: "legendonly" });
+
+  const wins = arbWindows(pts), now = pts.length ? pts[pts.length - 1].t : Date.now() / 1000;
+  const shapes = wins.map(w => ({ type: "rect", xref: "x", yref: "paper", x0: new Date(w.start * 1000), x1: new Date((w.end ?? now) * 1000 + 5000),
+    y0: 0, y1: 1, fillcolor: css(w.est ? "--est-fill" : "--arb-fill"), line: { width: 0 }, layer: "below" }));
+  shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y2", y0: minEdge() * 100, y1: minEdge() * 100, line: { color: css("--arb"), width: 1, dash: "dot" } });
+  if (wins.length) traces.push({ x: wins.map(w => new Date(w.at * 1000)), y: wins.map(w => w.best * 100), yaxis: "y2", name: "Arbitrage",
+    type: "scatter", mode: "markers", marker: { color: css("--arb"), size: 8, symbol: "circle" },
+    customdata: wins.map(w => [v.teams[w.k].abbr, v.teams[1 - w.k].abbr, span(w.end == null ? null : w.end - w.start), w.est ? " (estimate: Polymarket price, not ask)" : ""]),
+    hovertemplate: "Arbitrage %{y:.2f}¢%{customdata[3]}<br>%{customdata[0]} Kalshi + %{customdata[1]} Polymarket<br>lasted %{customdata[2]}<extra></extra>" });
+  // where the portfolio traded and where the trader saw an opportunity
+  const tradeY = (t) => { const p = nearest(t); return p ? Math.max(...[0, 1].map(i => (klineValue(p.k[i]) ?? 0) * 100)) + 4 : 50; };
+  if (v.trades.length) traces.push({ x: v.trades.map(t => new Date(t.t * 1000)), y: v.trades.map(t => tradeY(t.t)), name: "Trade",
+    type: "scatter", mode: "markers", marker: { symbol: "triangle-down", size: 13, color: text },
+    customdata: v.trades.map(t => [t.sets, t.edge == null ? "—" : (t.edge * 100).toFixed(2) + "¢", t.outcomes.map(o => `${o.venue} ${o.status}`).join(", ")]),
+    hovertemplate: "Trade: %{customdata[0]} sets, edge %{customdata[1]}<br>%{customdata[2]}<extra></extra>" });
+  if (v.opportunities.length) traces.push({ x: v.opportunities.map(o => new Date(o.t * 1000)), y: v.opportunities.map(o => o.edge * 100), yaxis: "y2",
+    name: "Trader opportunity", type: "scatter", mode: "markers", marker: { symbol: "diamond", size: 9, color: css("--arb"), line: { color: text, width: 1 } },
+    hovertemplate: "Trader saw %{y:.2f}¢<extra></extra>" });
+
+  let range;
+  if (S.zoomTo) { const pad = Math.max(1800, (S.zoomTo[1] - S.zoomTo[0]) * 0.5); range = [new Date((S.zoomTo[0] - pad) * 1000), new Date((S.zoomTo[1] + pad) * 1000)]; }
+  else if (S.range && pts.length) range = [new Date((now - S.range) * 1000), new Date(now * 1000 + 60000)];
+  const layout = {
+    uirevision: S.current + ":" + S.range + ":" + (S.zoomTo ? S.zoomTo[0] : ""),
+    margin: { l: 48, r: 12, t: 8, b: 30 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: { color: muted, size: 12 }, showlegend: false, hovermode: "x unified",
+    hoverlabel: { bgcolor: css("--panel"), bordercolor: grid, font: { color: text } },
+    xaxis: { type: "date", range, gridcolor: grid, showspikes: true, spikemode: "across", spikethickness: 1, spikecolor: muted, spikedash: "solid" },
+    yaxis: { domain: [0.34, 1], range: [0, 100], ticksuffix: "%", gridcolor: grid, zeroline: false, title: { text: "Chance", font: { size: 11 } } },
+    yaxis2: { domain: [0, 0.26], ticksuffix: "¢", gridcolor: grid, zeroline: true, zerolinecolor: muted, title: { text: "Edge", font: { size: 11 } } },
+    shapes,
+  };
+  Plotly.react("chart", traces, layout, { displayModeBar: false, responsive: true });
+  $("legend").innerHTML = v.teams.map((t, i) => `<span><i style="border-color:${colors[i]}"></i>${esc(t.abbr)} Kalshi</span><span><i class="dash" style="border-color:${colors[i]}"></i>${esc(t.abbr)} Polymarket</span>`).join("")
+    + `<span><i class="box"></i>Arbitrage on live asks (edge ≥ ${(minEdge() * 100).toFixed(1)}¢)</span><span><i class="box est"></i>Estimate from history</span><span>▼ trade</span><span>◆ trader opportunity</span>`;
+}
+function nearest(t) {
+  const pts = S.view.points; let lo = 0, hi = pts.length - 1;
+  if (hi < 0) return null;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (pts[mid].t < t) lo = mid + 1; else hi = mid; }
+  return pts[lo];
+}
+
+function legText(legs) {
+  return (legs || []).map(l => `${l.label ?? l.ticker} on ${l.venue === "polymarket" ? "Polymarket" : "Kalshi"} @ ${l.limit == null ? "—" : cents(+l.limit)}`).join(" + ");
+}
+function renderTrades() {
+  const v = S.view;
+  const rows = [...v.trades.map(t => ({ ...t, type: "trade" })), ...v.opportunities.map(o => ({ ...o, type: "opportunity", expected_net: o.net }))]
+    .sort((a, b) => b.t - a.t);
+  $("trades").innerHTML = rows.length ? rows.map(r => `<tr class="click${r.type === "trade" ? " mine" : ""}" data-t="${r.t}">
+    <td>${when(r.t)}</td><td>${r.type === "trade" ? "Trade" : "Opportunity"}</td><td class="num">${esc(r.sets ?? "—")}</td>
+    <td class="num">${r.edge == null ? "—" : (r.edge * 100).toFixed(2) + "¢"}</td>
+    <td class="num">${r.expected_net == null ? "—" : "$" + Number(r.expected_net).toFixed(2)}</td>
+    <td>${esc(legText(r.legs))}${r.outcomes ? '<span class="muted"> · ' + esc(r.outcomes.map(o => `${o.venue} ${o.status} ${o.filled}`).join(", ")) + "</span>" : ""}</td></tr>`).join("")
+    : '<tr><td colspan="6" class="empty">No trades or trader opportunities in this game yet.</td></tr>';
+}
+$("trades").addEventListener("click", e => { const r = e.target.closest("tr[data-t]"); if (r) { S.zoomTo = [+r.dataset.t, +r.dataset.t]; drawChart(); } });
+
+// ---- recent arbitrage, every game ---------------------------------------------------------
+async function loadArbs() {
+  try {
+    const d = await get("/api/arbs?min_edge=" + minEdge() + "&limit=200");
+    // History compares Kalshi's ask with Polymarket's traded price, not its ask: hidden unless asked for.
+    const rows = d.arbs.filter(a => $("showest").checked || a.source !== "estimate").slice(0, 50);
+    $("arbs").innerHTML = rows.length ? rows.map(a => {
+      const mon = a.source !== "trader";
+      const kLeg = mon ? `${esc(a.kalshi_team)} ask ${cents(a.kalshi_ask)}` : esc(legText((a.legs || []).filter(l => l.venue === "kalshi")));
+      const pLeg = mon ? `${esc(a.poly_team)} ${a.source === "live" ? "ask" : "price"} ${cents(a.poly_ask)}` : esc(legText((a.legs || []).filter(l => l.venue === "polymarket")));
+      const label = { live: "monitor, live asks", estimate: "estimate from history", trader: "trader, sized" }[a.source];
+      return `<tr class="click" data-e="${esc(a.event)}" data-s="${a.start}" data-x="${a.end ?? ""}">
+        <td>${when(a.start)}</td><td>${esc(a.game)} <span class="muted">${esc(a.event)}</span></td>
+        <td class="num">${mon ? span(a.end == null ? null : a.end - a.start) : "—"}</td>
+        <td class="num pos">${a.best == null ? "—" : (a.best * 100).toFixed(2) + "¢"}</td><td>${kLeg}</td><td>${pLeg}</td>
+        <td><span class="tag${a.source === "live" ? " ok" : ""}">${label}</span></td></tr>`;
+    }).join("") : `<tr><td colspan="7" class="empty">No arbitrage with an edge of at least ${(minEdge() * 100).toFixed(1)}¢ on live asks yet.${
+      d.arbs.length ? ` ${d.arbs.length} estimate${d.arbs.length > 1 ? "s" : ""} from history hidden.` : ""}</td></tr>`;
+  } catch (e) { $("arbs").innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`; }
+}
+$("arbs").addEventListener("click", e => {
+  const r = e.target.closest("tr[data-e]");
+  if (r) { const s = +r.dataset.s, x = r.dataset.x ? +r.dataset.x : s; open(r.dataset.e, [s, x]); window.scrollTo({ top: 0, behavior: "smooth" }); }
+});
+
+// ---- controls -----------------------------------------------------------------------------
+$("ranges").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  S.range = +b.dataset.r; S.zoomTo = null;
+  [...$("ranges").children].forEach(x => x.classList.toggle("on", x === b));
+  if (S.view) drawChart();
+});
+$("kline").addEventListener("change", () => S.view && render());
+$("minedge").addEventListener("change", () => { if (S.view) render(); loadArbs(); });
+$("showest").addEventListener("change", loadArbs);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => S.view && render());
+
+loadGames().then(() => { const h = decodeURIComponent(location.hash.slice(1)); if (h) open(h); });
+loadArbs();
+setInterval(refresh, 10000);
+setInterval(loadArbs, 30000);
+setInterval(loadGames, 300000);
+</script>
+</body>
+</html>

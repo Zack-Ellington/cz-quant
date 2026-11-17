@@ -177,6 +177,29 @@ selection with no result after it is withdrawn keeps the monitor degraded
 (awaiting_result) until a result arrives or an operator settles it. Live
 sportsbook execution does not exist and the broker cannot route to it.
 
+## Polymarket legs
+
+The cross-market-polymarket strategy holds Kalshi contracts and Polymarket outcome
+tokens in one portfolio. Each token pays $1 if its outcome wins, so it is a YES
+contract with ticker `PM:<token id>`, and the broker, accounting and report need no
+new record types. `czquant.polymarket` reads Polymarket's public APIs only: Gamma for
+events, markets, fee schedules and results, and the CLOB for each token's book. A
+token's book is stored in Kalshi's layout (its bids as YES bids, an ask at p as a NO
+bid at 1 - p), so marks, valuation and the dashboard read it unchanged.
+
+`Route(kalshi, polymarket=...)` sends `PM:` tickers to `PolymarketPaper`. The adapter
+follows the shared IOC depth policy (policy polymarket-ioc-depth-v1) and charges
+Polymarket's taker fee: shares x rate x p x (1 - p), rounded to 5 decimals, at the
+market's own rate. The Kalshi market monitor skips `PM:` tickers, and a separate
+component marks them and settles them once Polymarket's result is final (1, 0, or
+0.5 for a 50-50 resolution):
+
+```bash
+uv run czquant monitor polymarket
+```
+
+Live Polymarket execution does not exist and the broker cannot route to it.
+
 ## Live dashboard
 
 ```bash

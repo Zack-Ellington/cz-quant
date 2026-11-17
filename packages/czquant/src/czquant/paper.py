@@ -20,6 +20,22 @@ class Paper:
         self.client, self.latency = client, latency
         self.series: dict[str, Any] = {}
 
+    def fee_schedule(self, market: dict[str, Any]) -> dict[str, Any]:
+        """The market's taker fee schedule: its Kalshi series, read once per series."""
+        series_id = market.get("series_ticker") or market.get("event_ticker", "").split("-")[0]
+        if series_id not in self.series:
+            self.series[series_id] = self.client.get(f"/series/{series_id}").get("series", {})
+        return self.series[series_id]
+
+    def fee(self, fills: list[tuple[Decimal, Decimal]], schedule: dict[str, Any]) -> Decimal:
+        """Kalshi's taker fee for one order's fills (YES price, quantity), rounded up to the cent."""
+        fee_type = schedule.get("fee_type", "quadratic")
+        if fee_type not in ("quadratic", "quadratic_with_maker_fees", "quadratic_with_combo_maker_fees"):
+            raise ValueError(f"unsupported paper fee type: {fee_type}")
+        multiplier = decimal(schedule.get("fee_multiplier", "1"))
+        base = sum((q * p * (1 - p) for p, q in fills), Decimal(0))
+        return (Decimal("0.07") * multiplier * base).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+
     def create_order(self, order: dict[str, Any], broker: Broker) -> dict[str, Any]:
         tif = order.get("time_in_force", "immediate_or_cancel")
         if tif not in ("immediate_or_cancel", "fill_or_kill") or order.get("post_only"):
@@ -32,10 +48,7 @@ class Paper:
         if market.get("status") not in ("active", "open"):
             broker.finish(identifier, "canceled")
             return {"client_order_id": identifier, "status": "canceled", "filled": "0"}
-        series_id = market.get("series_ticker") or market.get("event_ticker", "").split("-")[0]
-        if series_id not in self.series:
-            self.series[series_id] = self.client.get(f"/series/{series_id}").get("series", {})
-        schedule = self.series[series_id]
+        schedule = self.fee_schedule(market)
         book = levels(raw)
         source_side = "no" if order["side"] == "bid" else "yes"
         limit, requested = decimal(order["price"]), decimal(order["count"])
@@ -70,12 +83,7 @@ class Paper:
                 if quantity > held:
                     broker.finish(identifier, "rejected")
                     return {"client_order_id": identifier, "status": "rejected", "filled": "0"}
-            fee_type = schedule.get("fee_type", "quadratic")
-            if fee_type not in ("quadratic", "quadratic_with_maker_fees", "quadratic_with_combo_maker_fees"):
-                raise ValueError(f"unsupported paper fee type: {fee_type}")
-            multiplier = decimal(schedule.get("fee_multiplier", "1"))
-            base = sum((q * p * (1 - p) for _, p, q in fills), Decimal(0))
-            fee = (Decimal("0.07") * multiplier * base).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+            fee = self.fee([(p, q) for _, p, q in fills], schedule)
             evidence = {"policy": self.policy, "observed_at": observed, "book": raw,
                         "fee_schedule": schedule, "levels": [[str(p), str(q)] for _, p, q in fills],
                         "latency_seconds": self.latency}
