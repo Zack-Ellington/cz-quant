@@ -19,6 +19,8 @@ def main() -> None:
     pull.add_argument("--months", type=int, default=6)
     pull.add_argument("--rate", type=float, default=3.0, help="max requests per second (slows itself on 429s)")
     pull.add_argument("--workers", type=int, default=4)
+    pull.add_argument("--series", nargs="*", default=None,
+                      help="only these series tickers; a trailing * matches a prefix (e.g. KXNCAAWB*)")
 
     an = sub.add_parser("analyze", help="calibration tables and t-tests")
     an.add_argument("--data", type=Path, default=DEFAULT_DATA)
@@ -40,6 +42,10 @@ def main() -> None:
             meta.write_text(json.dumps({"since": since, "since_iso": since_dt.isoformat()}))
         puller = Puller(args.data, since, rate=args.rate, workers=args.workers)
         series = puller.series()
+        if args.series:
+            series = [s for s in series if any(
+                s["ticker"].startswith(pat[:-1]) if pat.endswith("*") else s["ticker"] == pat
+                for pat in args.series)]
         print(f"window since {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d}; {len(series)} series")
         puller.events(series)
         puller.archive()

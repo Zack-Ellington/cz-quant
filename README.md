@@ -23,6 +23,8 @@ or retired without an effect on the others.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
+- [wcbb-favorites](strategies/wcbb-favorites/): paper-buys the favored team in Kalshi women's college basketball games priced 80–90% with a tight spread, on the shared ledger. Range chosen from [research/kalshi-calibration](research/kalshi-calibration/); the backtest does not beat spread plus fees.
+
 ## Quickstart
 
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct

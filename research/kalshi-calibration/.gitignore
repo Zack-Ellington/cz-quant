@@ -6,3 +6,6 @@ pull-*.log
 analyze.log
 reports-interim/
 reports/observations.csv
+data-*/
+reports-*/observations.csv
+reports-*.log

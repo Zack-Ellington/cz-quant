@@ -16,7 +16,7 @@ sys.path.insert(0, "src")
 from calibration.analysis import THRESHOLDS, HOUR, holm, ttest  # noqa
 
 ALPHA = 0.02
-data = Path("data")
+data = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("data")
 out_csv = Path(sys.argv[1])
 markets = json.loads((data / "qualifying.json").read_text(encoding="utf-8"))
 
