@@ -1,0 +1,33 @@
+[project]
+name = "kalshi-sum-check-retry"
+version = "0.1.0"
+description = "Kalshi sum check paper trader that retrys the unhedged legs of a partially filled basket."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "czquant",
+    "websockets>=13",
+    "cryptography>=42",
+]
+
+[tool.uv]
+# Plain scripts on top of ../kalshi_sum_check, not an installable package.
+package = false
+# OneDrive rejects the hardlinks uv uses by default, which leaves a half-built .venv.
+link-mode = "copy"
+
+[tool.uv.sources]
+czquant = { path = "../../packages/czquant", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "basedpyright>=1.30"]
+
+[tool.basedpyright]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+extraPaths = ["../kalshi_sum_check"]
+exclude = ["tests", ".venv"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "../kalshi_sum_check"]

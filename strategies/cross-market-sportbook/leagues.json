@@ -1,0 +1,34 @@
+{
+  "nba": {
+    "enabled": true,
+    "kalshi_series": "KXNBAGAME",
+    "oddsapi": "basketball_nba",
+    "nash": "42648",
+    "draw": false,
+    "rules": "Kalshi resolves on the game's winner; the DraftKings moneyline includes overtime. No ties."
+  },
+  "nhl": {
+    "enabled": true,
+    "kalshi_series": "KXNHLGAME",
+    "oddsapi": "icehockey_nhl",
+    "nash": "42133",
+    "draw": false,
+    "rules": "Kalshi resolves on the game's winner; the DraftKings moneyline includes overtime and the shootout. No ties."
+  },
+  "mlb": {
+    "enabled": true,
+    "kalshi_series": "KXMLBGAME",
+    "oddsapi": "baseball_mlb",
+    "nash": "84240",
+    "draw": false,
+    "rules": "Kalshi resolves on the game's winner; the DraftKings moneyline is action (no listed-pitcher condition) and includes extra innings. Suspended or postponed games can resolve differently on each venue."
+  },
+  "nfl": {
+    "enabled": false,
+    "kalshi_series": "KXNFLGAME",
+    "oddsapi": "americanfootball_nfl",
+    "nash": "88808",
+    "draw": false,
+    "rules": "Disabled: a tie pushes the DraftKings two-way moneyline (stake returned) while each Kalshi team market resolves No, so the basket can lose. Enable only after reading both venues' current tie rules."
+  }
+}
