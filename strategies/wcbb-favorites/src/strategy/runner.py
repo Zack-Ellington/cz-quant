@@ -15,6 +15,7 @@ Configuration is read from the environment (see Config.from_env). Paper only.
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import subprocess
@@ -180,7 +181,7 @@ def run(once: bool = False, broker: Any = None, client: Any = None,
     if broker.mode != "paper":
         raise ValueError(f"{STRATEGY} is paper only")
     broker.start(STRATEGY, _revision(), {k: str(v) for k, v in asdict(cfg).items()} | {"series": SERIES})
-    for i in scans if scans is not None else (range(1) if once else iter(int, 1)):
+    for i in scans if scans is not None else (range(1) if once else itertools.count()):
         decisions = scan(broker, client, cfg)
         n = sum(d.accepted for d in decisions)
         print(f"scan {i}: {len(decisions)} open events, {n} entries, "
