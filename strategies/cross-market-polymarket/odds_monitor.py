@@ -345,7 +345,8 @@ class Monitor:
         with self.lock:
             for w in watches:
                 k = [quote(kbooks.get(t)) for t in w.tickers]
-                p = [quote(pbooks.get(t)) for t in w.tokens] if w.tokens else [list(EMPTY), list(EMPTY)]
+                p: list[list[float | None]] = ([quote(pbooks.get(t)) for t in w.tokens] if w.tokens
+                                               else [list(EMPTY), list(EMPTY)])
                 w.add_live(now, k, p)
 
     # -- the store --------------------------------------------------------------------
@@ -381,7 +382,7 @@ class Monitor:
                 t = _ts(effective_at)
                 if d.get("kind") == "basket_execution":
                     c = d.get("context") or {}
-                    self._ledger.setdefault(c.get("kalshi_event"), {"trades": [], "opportunities": []})["trades"].append({
+                    self._ledger.setdefault(str(c.get("kalshi_event")), {"trades": [], "opportunities": []})["trades"].append({
                         "t": t, "trade_id": c.get("trade_id"), "sets": c.get("sets"), "edge": _f(c.get("edge")),
                         "expected_net": _f(c.get("expected_net")),
                         "legs": [self.leg(l) for l in c.get("intended_legs") or []],
@@ -595,7 +596,7 @@ def handler(monitor: Monitor) -> type[BaseHTTPRequestHandler]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--league", default="nfl", help="a leagues.json key")
     p.add_argument("--interval", type=float, default=10.0, help="seconds between live book reads")
