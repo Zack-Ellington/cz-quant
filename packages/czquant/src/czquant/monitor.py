@@ -17,6 +17,7 @@ from .kalshi import Kalshi
 from .book import levels
 from .draftkings import DraftKings, is_sportsbook, parse_ticker
 from .paper import update_consumed
+from .polymarket import Polymarket, is_polymarket
 from .sportsbook import settle_lots
 from .store import Store, decimal, utc
 
@@ -31,8 +32,8 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
         tickers.add(json.loads(row[0])["ticker"])
     for p in portfolios:
         tickers.update(p["metadata"].get("watch", []))
-    # Sportsbook selections have their own reader and monitor (sportsbook_pass).
-    tickers = {t for t in tickers if not is_sportsbook(t)}
+    # Sportsbook selections and Polymarket tokens have their own readers and monitors.
+    tickers = {t for t in tickers if not is_sportsbook(t) and not is_polymarket(t)}
     if not tickers:
         # A real public-data probe, even for no-trade portfolios.
         probe = api.get("/markets", {"limit": 1, "status": "open"}).get("markets", [])
@@ -290,10 +291,44 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
     return status
 
 
+def polymarket_pass(store: Store, client: Polymarket) -> dict[str, Any]:
+    """Mark every Polymarket token a paper portfolio holds or watches, and settle the
+    lots of any whose result is final. Public reads only: no credentials."""
+    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
+    tickers = {lot["market"] for p in portfolios
+               for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
+    for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
+        tickers.add(json.loads(row[0])["ticker"])
+    for p in portfolios:
+        tickers.update(p["metadata"].get("watch", []))
+    tickers = {t for t in tickers if is_polymarket(t)}
+    errors, settled = [], 0
+    for ticker in sorted(tickers):
+        try:
+            market = client.market(ticker, fresh=True)
+            raw = client.book(ticker) if market["status"] == "active" else {}
+            observed = utc()
+            store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=observed)
+            with store.transaction():
+                update_consumed(store, ticker, levels(raw), time.time())
+            if market["status"] == "finalized":
+                settled += settle_lots(store, ticker, market, {"market": market, "observed_at": observed},
+                                       "paper-polymarket-monitor")
+        except Exception as exc:
+            errors.append({"market": ticker, "reason": type(exc).__name__})
+            log.exception("polymarket observation failed for %s", ticker)
+    status = {"component": "polymarket", "status": "healthy" if not errors else "degraded",
+              "markets": len(tickers), "settled_lots": settled, "errors": errors}
+    store.append("health", status)
+    return status
+
+
 def run_monitor(root: str, component: str, interval: float = 60, once: bool = False) -> None:
     store = Store(root)
-    api: Any = DraftKings.from_env() if component == "draftkings" else Kalshi(authenticated=component == "account")
-    passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass}
+    api: Any = (DraftKings.from_env() if component == "draftkings" else Polymarket.from_env()
+                if component == "polymarket" else Kalshi(authenticated=component == "account"))
+    passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass,
+              "polymarket": polymarket_pass}
     while True:
         start = time.monotonic()
         try:

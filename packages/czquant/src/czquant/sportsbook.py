@@ -86,14 +86,19 @@ class SportsbookPaper:
 
 class Route:
     """Paper adapters by venue, so one broker and one portfolio's cash serve a basket
-    whose legs are on Kalshi and on a sportsbook."""
+    whose legs are on Kalshi and on a sportsbook or Polymarket."""
 
-    def __init__(self, kalshi: Any, sportsbook: SportsbookPaper):
-        self.kalshi, self.sportsbook = kalshi, sportsbook
-        self.policy = f"{kalshi.policy}+{sportsbook.policy}"
+    def __init__(self, kalshi: Any, sportsbook: SportsbookPaper | None = None, polymarket: Any = None):
+        self.kalshi, self.sportsbook, self.polymarket = kalshi, sportsbook, polymarket
+        self.policy = "+".join(a.policy for a in (kalshi, sportsbook, polymarket) if a is not None)
 
     def create_order(self, order: dict[str, Any], broker: Broker) -> dict[str, Any]:
-        adapter = self.sportsbook if is_sportsbook(order["ticker"]) else self.kalshi
+        from .polymarket import is_polymarket
+        ticker = order["ticker"]
+        adapter = (self.sportsbook if is_sportsbook(ticker) else
+                   self.polymarket if is_polymarket(ticker) else self.kalshi)
+        if adapter is None:
+            raise ValueError(f"no paper adapter for {ticker}")
         return adapter.create_order(order, broker)
 
 
@@ -122,7 +127,7 @@ def settle_lots(store: Store, ticker: str, market: dict[str, Any], evidence: dic
             if lot["market"] != ticker:
                 continue
             if lot["side"] != "yes":
-                raise ValueError(f"sportsbook lot {lot_id} is not a YES (back) position")
+                raise ValueError(f"lot {lot_id} on {ticker} is not a YES position")
             value = lot["price"] if market["void"] else market["settlement_value_dollars"]
             broker.settle(lot_id, str(value), evidence)
             settled += 1

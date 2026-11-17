@@ -1,0 +1,159 @@
+"""One scan end to end against fake venues: discover, pair, price, execute, unwind."""
+import json
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal as D
+
+import pytest
+from czquant import Broker, Store
+from czquant.polymarket import Polymarket
+
+from trader import Config, Engine
+
+DAY = (datetime.now(timezone.utc) + timedelta(days=3)).date()
+START = datetime(DAY.year, DAY.month, DAY.day, 23, 0, tzinfo=timezone.utc)  # 7 pm Eastern, same date
+EVENT = f"KXNBAGAME-{DAY:%y}{DAY:%b}{DAY:%d}BOSSAC".upper()
+LEAGUES = {"nba": {"enabled": True, "kalshi_series": "KXNBAGAME", "polymarket_tag": "nba", "abbr_aliases": {}}}
+
+
+class FakeKalshi:
+    """Boston's YES ask is 0.55 and Sacramento's 0.70 on Kalshi."""
+
+    def __init__(self, asks=None, depth="100"):
+        self.asks = asks or {"BOS": "0.55", "SAC": "0.70"}
+        self.depth = depth
+        self.fill_depth: str | None = None  # what the paper fill sees, if the book thins after pricing
+
+    def raw(self, ticker, depth=None):
+        ask = D(self.asks[ticker.rsplit("-", 1)[-1]])
+        return {"orderbook_fp": {"yes_dollars": [], "no_dollars": [[str(1 - ask), depth or self.depth]]}}
+
+    def get(self, path, params=None):
+        if path.startswith("/series/"):
+            return {"series": {"fee_type": "quadratic", "fee_multiplier": 1}}
+        if path == "/markets/orderbooks":
+            return {"orderbooks": [{"ticker": t, **self.raw(t)} for _, t in params]}
+        raise AssertionError(path)
+
+    def pages(self, path, key, **params):
+        end = (START + timedelta(hours=3)).isoformat()
+        yield {"event_ticker": EVENT, "series_ticker": "KXNBAGAME", "markets": [
+            {"ticker": f"{EVENT}-{a}", "yes_sub_title": n, "status": "active", "expected_expiration_time": end}
+            for n, a in (("Boston", "BOS"), ("Sacramento", "SAC"))]}
+
+    def market(self, ticker):
+        return {"ticker": ticker, "status": "active", "series_ticker": "KXNBAGAME"}
+
+    def book(self, ticker):
+        return self.raw(ticker, self.fill_depth)
+
+
+class FakePoly(Polymarket):
+    """Polymarket has Sacramento at 0.38 and Boston at 0.66; `depth` contracts at each ask."""
+
+    def __init__(self, depth="100"):
+        super().__init__(min_interval=0)
+        self.depth = depth
+        self.asks = {"tok-bos": "0.66", "tok-sac": "0.38"}
+
+    def market_json(self):
+        return {"id": "m1", "question": "Celtics vs. Kings", "sportsMarketType": "moneyline",
+                "outcomes": json.dumps(["Celtics", "Kings"]), "clobTokenIds": json.dumps(["tok-bos", "tok-sac"]),
+                "outcomePrices": json.dumps(["0.6", "0.4"]), "closed": False, "acceptingOrders": True,
+                "feesEnabled": True, "feeSchedule": {"rate": 0.05, "exponent": 1, "takerOnly": True}}
+
+    def canned_book(self, token):
+        bid = str(D(self.asks[token]) - D("0.02"))  # a bid two cents under the ask, for sell-backs
+        return {"asset_id": token, "bids": [{"price": bid, "size": self.depth}],
+                "asks": [{"price": self.asks[token], "size": self.depth}]}
+
+    def _request(self, method, url, **kwargs):
+        if url.endswith("/events/keyset"):
+            return {"events": [{"slug": "nba-bos-sac", "eventDate": str(DAY), "startTime": START.isoformat(),
+                     "teams": [{"name": "Celtics", "abbreviation": "bos"}, {"name": "Kings", "abbreviation": "sac"}],
+                     "markets": [self.market_json()]}], "next_cursor": None}
+        if url.endswith("/markets"):
+            return [self.market_json()]
+        if url.endswith("/books"):
+            return [self.canned_book(row["token_id"]) for row in kwargs["json"]]
+        if url.endswith("/book"):
+            return self.canned_book(kwargs["params"]["token_id"])
+        raise AssertionError(url)
+
+
+@pytest.fixture
+def engine_for(tmp_path, monkeypatch):
+    monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
+    monkeypatch.setenv("CZQUANT_PORTFOLIO", "pm")
+    Store(tmp_path).create("pm", "1000")
+
+    def build(kalshi=None, poly=None):
+        return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0),
+                      kalshi or FakeKalshi(), poly or FakePoly(), LEAGUES, {"pairs": {}, "blocked": set()}, "test")
+    return build
+
+
+def test_a_scan_pairs_prices_and_fills_a_cross_venue_basket(engine_for):
+    engine = engine_for()
+    engine.step()
+    state = Broker(engine.store, "pm").state()
+    held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
+    assert held == {f"{EVENT}-BOS": 100, "PM:tok-sac": 100}  # Boston on Kalshi, Sacramento on Polymarket
+    record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
+    assert record["context"]["polymarket_event"] == "nba-bos-sac" and record["context"]["match"]["method"] == "abbreviations"
+    assert all(o["filled"] == "100" for o in record["outcomes"])
+
+
+def test_a_short_first_leg_sizes_the_next(engine_for):
+    poly = FakePoly(depth="40")  # Polymarket shows only 40, the thinner book: it goes first
+    engine = engine_for(poly=poly)
+    engine.discover()
+    candidates = engine.scan()
+    assert candidates and candidates[0][0].sets == 40
+    basket, pair, league = candidates[0]
+    poly.depth = "25"  # by the time the order lands, only 25 are left
+    engine.execute(basket, pair, league)
+    state = Broker(engine.store, "pm").state()
+    held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
+    assert held == {f"{EVENT}-BOS": 25, "PM:tok-sac": 25}  # Kalshi was asked for 25, not 40
+
+
+def test_no_basket_without_an_edge(engine_for):
+    engine = engine_for(kalshi=FakeKalshi({"BOS": "0.66", "SAC": "0.42"}))
+    engine.step()
+    assert not Broker(engine.store, "pm").state().lots
+    scan = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "scan_complete"][-1]
+    assert scan["counts"]["ok"] == 1 and scan["candidates"] == 0
+
+
+def test_games_about_to_start_are_skipped(engine_for, monkeypatch):
+    import trader
+    engine = engine_for()
+    engine.discover()
+    later = START.timestamp() - 60  # a minute before the start
+    monkeypatch.setattr(trader.time, "time", lambda: later)
+    assert engine.scan() == []
+    scan = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "scan_complete"][-1]
+    assert scan["counts"]["priced_too_close_to_start"] == 1
+
+
+def test_a_short_later_leg_has_the_extras_sold_back(engine_for):
+    kalshi, poly = FakeKalshi(), FakePoly(depth="40")
+    engine = engine_for(kalshi=kalshi, poly=poly)
+    engine.discover()
+    basket, pair, league = engine.scan()[0]
+    kalshi.fill_depth = "10"  # priced at 100, but when the Kalshi leg lands only 10 are left
+    engine.execute(basket, pair, league)
+    state = Broker(engine.store, "pm").state()
+    held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
+    assert held == {f"{EVENT}-BOS": 10, "PM:tok-sac": 10}  # 30 Sacramento tokens sold back at 0.36
+    record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
+    unwind = [o for o in record["outcomes"] if "unwind" in o][0]
+    assert (unwind["ticker"], unwind["unwind"], unwind["sold"], unwind["floor"]) == ("PM:tok-sac", "30", "30", "0.33")
+
+
+def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):
+    import trader
+    monkeypatch.delenv("STRATEGY_RUNS_DIR", raising=False)
+    with pytest.raises(SystemExit):
+        trader.main(["--once"])
+    assert "STRATEGY_RUNS_DIR" in capsys.readouterr().err
