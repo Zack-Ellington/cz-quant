@@ -16,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from czquant import ratelimit
+
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 ORDERBOOK_BATCH = 100  # max tickers per GET /markets/orderbooks call
 
@@ -150,11 +152,14 @@ class KalshiClient:
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
+            ratelimit.acquire()  # the machine-wide budget, shared with other strategies and monitors
             headers = {"Accept": "application/json", **self._auth_headers("GET", path)}
             try:
                 with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as r:
                     return json.loads(r.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    ratelimit.acquire(penalty=1.0)  # every process backs off, not just this one
                 if e.code in (429, 500, 502, 503, 504) and attempt < self.retries:
                     time.sleep(min(2**attempt * 0.5, 10))
                     continue

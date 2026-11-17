@@ -9,11 +9,15 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+import httpx
+
 from .accounting import portfolio_state, replay
-from .broker import Broker
+from .broker import PRIMARY, Broker, scope
 from .kalshi import Kalshi
 from .book import levels
+from .draftkings import DraftKings, is_sportsbook, parse_ticker
 from .paper import update_consumed
+from .sportsbook import settle_lots
 from .store import Store, decimal, utc
 
 log = logging.getLogger(__name__)
@@ -27,6 +31,8 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
         tickers.add(json.loads(row[0])["ticker"])
     for p in portfolios:
         tickers.update(p["metadata"].get("watch", []))
+    # Sportsbook selections have their own reader and monitor (sportsbook_pass).
+    tickers = {t for t in tickers if not is_sportsbook(t)}
     if not tickers:
         # A real public-data probe, even for no-trade portfolios.
         probe = api.get("/markets", {"limit": 1, "status": "open"}).get("markets", [])
@@ -66,6 +72,83 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
     return status
 
 
+def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
+    """Reference odds and paper settlement for held or pending sportsbook selections.
+
+    Odds cost credits, so this pass never buys them: it marks held selections from
+    the newest read any process cached (the trader's), dated when that read was
+    made, so a mark is as stale as it really is. It records a mark only when a newer
+    read or a status change arrives. Results are the one paid read: once per league
+    every `results_minutes`, only for games that started at least `settle_after_hours`
+    ago, all of a league's events in one call. Finalized selections settle every
+    paper lot: 1 or 0, or the lot's own price on a void, which returns the stake.
+    """
+    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
+    tickers = {lot["market"] for p in portfolios
+               for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
+    for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
+        tickers.add(json.loads(row[0])["ticker"])
+    for p in portfolios:
+        tickers.update(p["metadata"].get("watch", []))
+    tickers = {t for t in tickers if is_sportsbook(t)}
+    errors: list[dict[str, Any]] = []
+    now = time.time()
+    due: set[str] = set()
+    for ticker in tickers:
+        parts = parse_ticker(ticker)
+        if now - book.results_checked.get(parts["league"], -1e18) < book.results_minutes * 60:
+            continue
+        start = _start(store, book, ticker)
+        if start is not None and now - start >= book.settle_after_hours * 3600:
+            due.add(parts["event"])
+    try:
+        markets = book.markets(sorted(tickers), results_for=due, fetch=False) if tickers else {}
+        for ticker in tickers:
+            if parse_ticker(ticker)["event"] in due:
+                book.results_checked[parse_ticker(ticker)["league"]] = now
+    except Exception as exc:
+        log.exception("sportsbook read failed")
+        markets = {}
+        errors.append({"reason": type(exc).__name__, "detail": str(exc)[:300]})
+    settled = 0
+    for ticker in sorted(tickers):
+        if ticker not in markets:
+            if not errors:
+                errors.append({"market": ticker, "reason": "missing"})
+            continue
+        market, raw = markets[ticker]
+        key = (market.get("fetched_at"), market["status"])
+        if market["status"] == "finalized" or book.last_marked.get(ticker) != key:
+            observed = utc()
+            # Date the mark by its read, not by this pass, so report staleness rules apply honestly.
+            at = market.get("fetched_at") if market["status"] != "finalized" and market.get("fetched_at") else observed
+            store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=at)
+            book.last_marked[ticker] = key
+        if market["status"] == "finalized":
+            settled += settle_lots(store, ticker, market, {"market": market, "observed_at": utc()},
+                                   "sportsbook-monitor")
+        elif market["status"] == "closed":
+            errors.append({"market": ticker, "reason": "awaiting_result"})
+    status = {"component": "draftkings", "source": book.source.name,
+              "status": "healthy" if not errors else "degraded", "markets": len(tickers),
+              "settled_lots": settled, "results_checked": sorted(due), "credits_remaining": book.credits(),
+              "errors": errors}
+    store.append("health", status)
+    return status
+
+
+def _start(store: Store, book: DraftKings, ticker: str) -> float | None:
+    """A selection's start time: from the newest cached read, else its last recorded mark."""
+    parts = parse_ticker(ticker)
+    selection = next((s for s in book.selections(parts["league"], fetch=False) if s.ticker == ticker), None)
+    if selection is not None:
+        return datetime.fromisoformat(selection.start).timestamp()
+    row = store.db.execute("SELECT json_extract(data,'$.market.start') FROM events WHERE type='market' AND "
+                           "json_extract(data,'$.ticker')=? AND json_extract(data,'$.market.start') IS NOT NULL "
+                           "ORDER BY sequence DESC LIMIT 1", (ticker,)).fetchone()
+    return datetime.fromisoformat(row[0]).timestamp() if row else None
+
+
 def fill_time(fill: dict[str, Any]) -> str:
     raw = fill.get("created_time")
     if raw:
@@ -90,12 +173,11 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
     live = [p for p in store.portfolios() if p["mode"] == "live"]
     # Recover venue IDs after lost acknowledgements before joining fills.
     for p in live:
-        sub = p["metadata"]["subaccount"]
-        for order in api.pages("/portfolio/orders", "orders", subaccount=sub, limit=1000):
+        for order in api.pages("/portfolio/orders", "orders", **scope(p["metadata"]), limit=1000):
             client_id = order.get("client_order_id")
             store.db.execute("UPDATE orders SET venue_id=? WHERE id=? AND portfolio_id=?",
                              (order["order_id"], client_id, p["id"]))
-        fills += list(api.pages("/portfolio/fills", "fills", subaccount=sub, min_ts=since, limit=1000))
+        fills += list(api.pages("/portfolio/fills", "fills", **scope(p["metadata"]), min_ts=since, limit=1000))
     fills = sorted({(f.get("exchange_index",0),f["fill_id"]):f for f in fills}.values(), key=fill_time)
     mapped, unattributed, quarantined = 0, 0, 0
     discrepancies: list[dict[str, Any]] = []
@@ -133,8 +215,16 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
     orders = list(api.pages("/portfolio/orders", "orders", limit=1000))
     store.append("account_snapshot", {"balance": balance, "positions": positions, "orders": orders,
                                      "settlements": settlements, "history_from": since})
+    transfers: list[dict[str, Any]] = []
     if live:
-        for transfer in api.pages("/portfolio/subaccounts/transfers", "transfers", limit=1000):
+        try:
+            transfers = list(api.pages("/portfolio/subaccounts/transfers", "transfers", limit=1000))
+        except httpx.HTTPStatusError:
+            # An account without subaccount access can't list transfers. That only
+            # matters when a numbered subaccount is mapped; the primary has none.
+            if any(p["metadata"]["subaccount"] != PRIMARY for p in live):
+                raise
+        for transfer in transfers:
             at = datetime.fromtimestamp(transfer["created_ts"],timezone.utc).isoformat()
             for p in live:
                 if fill_time({"created_time":at}) < p["created_at"]:
@@ -152,7 +242,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         if p["mode"] != "live":
             continue
         sub = p["metadata"]["subaccount"]
-        for settlement in api.pages("/portfolio/settlements","settlements",subaccount=sub,min_ts=since,limit=1000):
+        for settlement in api.pages("/portfolio/settlements","settlements",**scope(p["metadata"]),min_ts=since,limit=1000):
             source = f"settlement:{settlement.get('exchange_index',0)}:{sub}:{settlement['ticker']}:{settlement['settled_time']}"
             if store.db.execute("SELECT 1 FROM events WHERE source_key=?",(source,)).fetchone():
                 continue
@@ -174,10 +264,10 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                                  'price':str(payout),'lot_id':lot['record_id']}]},p['id'],
                         source=source+':'+lot['record_id'],at=settlement['settled_time'])
                 store.append('account_evidence',{'kind':'settlement','raw':settlement},p['id'],source=source)
-        actual = api.get("/portfolio/balance", {"subaccount": sub})
+        actual = api.get("/portfolio/balance", scope(p["metadata"]))
         state = portfolio_state(store, p["id"])
         cash = decimal(actual["balance_dollars"]) if "balance_dollars" in actual else decimal(actual["balance"]) / 100
-        observed_positions = list(api.pages("/portfolio/positions", "market_positions", subaccount=sub, limit=1000))
+        observed_positions = list(api.pages("/portfolio/positions", "market_positions", **scope(p["metadata"]), limit=1000))
         expected_positions = {}
         for lot in state.lots.values():
             expected_positions[lot["market"]] = expected_positions.get(lot["market"],Decimal(0)) + lot["quantity"]*(1 if lot["side"]=="yes" else -1)
@@ -187,7 +277,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         # Unknown collateral/transfer effects are never converted to invented profit.
         if cash != state.cash:
             discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "recorded": str(state.cash), "observed": str(cash)})
-        for order in api.pages("/portfolio/orders", "orders", subaccount=sub, limit=1000):
+        for order in api.pages("/portfolio/orders", "orders", **scope(p["metadata"]), limit=1000):
             row = store.db.execute("SELECT id,filled FROM orders WHERE venue_id=?", (order["order_id"],)).fetchone()
             if row and order.get("status") in ("canceled", "executed"):
                 if decimal(order.get("fill_count_fp", "0")) == decimal(row["filled"]):
@@ -202,11 +292,12 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
 
 def run_monitor(root: str, component: str, interval: float = 60, once: bool = False) -> None:
     store = Store(root)
-    api = Kalshi(authenticated=component == "account")
+    api: Any = DraftKings.from_env() if component == "draftkings" else Kalshi(authenticated=component == "account")
+    passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass}
     while True:
         start = time.monotonic()
         try:
-            status = market_pass(store, api) if component == "market" else account_pass(store, api)
+            status = passes[component](store, api)
             log.info("%s", json.dumps(status))
         except Exception as exc:
             store.append("health", {"component": component, "status": "failed", "error": type(exc).__name__})

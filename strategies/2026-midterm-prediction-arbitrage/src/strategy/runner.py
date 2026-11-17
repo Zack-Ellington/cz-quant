@@ -16,7 +16,8 @@ paper trade -> paper section.
    fill. The paper section is read back from the ledger.
 
 Every run writes ``runs/<strategy-id>/<UTC timestamp>/`` (see ``ledger.py``).
-Paper mode is the only mode; nothing can send an order (issue #5).
+Paper mode is the default. ``mode='live'`` trades a portfolio mapped to a Kalshi
+subaccount through ``strategy.live``, and sends orders only with ``send_orders``.
 
 Everything but the model -- quotes, snapshots, checks, fees, trading, ledger --
 is shared with ``2026-midterm-dependence-arbitrage`` and kept identical.
@@ -43,6 +44,7 @@ from strategy.races import discover_races
 from strategy.report import Report, format_report
 from strategy.simulation import OUTCOMES, simulate
 from strategy.snapshot import RecordingClient, SnapshotClient
+from strategy.live import LiveLimits
 from strategy.trading import ModelView, Policy, record_scan, trade
 
 STRATEGY_ID = "2026-midterm-prediction-arbitrage"
@@ -116,12 +118,19 @@ def run(
     runs_dir: str | Path | None = None,
     confirm_delay: float | None = None,
     clock=utc_now,
+    max_spend: Decimal | None = None,
+    send_orders: bool = False,
+    unwind_slippage: Decimal = Decimal("0.05"),
 ) -> Path:
     """Run the pipeline, print the report and paper section; return the run dir."""
     if model not in MODELS:
         raise ValueError(f"model must be one of {MODELS}, got {model!r}")
-    if mode != "paper":
-        raise SystemExit("Only paper mode exists; live orders are issue #5. Nothing was sent.")
+    if mode not in ("paper", "live"):
+        raise ValueError(f"mode must be paper or live, got {mode!r}")
+    if mode == "live" and (snapshot_in is not None or not trading or max_spend is None or max_spend <= 0):
+        raise SystemExit("Live mode reads the live API, trades, and needs a positive --max-spend. Nothing was sent.")
+    if mode == "paper" and send_orders:
+        raise SystemExit("--send-orders only applies to --mode live. Nothing was sent.")
     policy = Policy(Decimal(bankroll), Decimal(max_position), Decimal(min_edge))
 
     live: KalshiClient | None = None
@@ -171,11 +180,28 @@ def run(
         record_scan(run_, acquired.markets, view, source)
         print(format_report(report))
         print()
+        limits = None
         if trading:
+            if mode == "live":
+                assert max_spend is not None
+                limits = LiveLimits(Decimal(max_spend), send_orders, Decimal(unwind_slippage),
+                                    stop_file=run_.directory.parent / "STOP")
+                print(f"LIVE {'ORDERS' if send_orders else 'DRY RUN'}: spend cap {max_spend}, "
+                      f"stop file {limits.stop_file}")
             trade(run_, client, acquired.markets, report.checks, view, acquired.fees, policy,
-                  contracts, confirm_delay)
+                  contracts, confirm_delay, limits)
         rows, events = read_ledger(runs_dir, STRATEGY_ID), read_events(runs_dir, STRATEGY_ID)
-        print("\n".join(paper_section(run_.label, run_.run_id, rows, events, policy.bankroll)))
+        if limits is not None:
+            # Live positions and cash are in the shared store: see `czquant report` or the dashboard.
+            mine = [e for e in events if e["run_id"] == run_.run_id and e["type"] in ("live_order", "live_unwind")]
+            print(f"Live trading - {run_.label} ({'orders sent' if send_orders else 'dry run: nothing sent'})")
+            print(f"{sum(e['type'] == 'live_order' for e in mine)} order(s), "
+                  f"{sum(e['type'] == 'live_unwind' for e in mine)} unwind(s); "
+                  f"committed ${limits.spent:.2f} of the ${max_spend} cap"
+                  + (f"; HALTED: {limits.halted}" if limits.halted else "")
+                  + (f"; STOPPED: {limits.stopped_run}" if limits.stopped_run else ""))
+        else:
+            print("\n".join(paper_section(run_.label, run_.run_id, rows, events, policy.bankroll)))
         if recorder is not None:
             path = recorder.save(snapshot_out)  # adds the confirmation scan
             print(f"Saved {len(recorder.records)} quotes to {path}", file=sys.stderr)

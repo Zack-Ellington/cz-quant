@@ -148,6 +148,56 @@ Their candidate logic is unchanged; shared execution uses the same policy
 as the sum strategies. The old strategy-local P&L display is not the shared
 portfolio report. Each invocation records a run and scan-complete observation.
 
+## Sportsbook legs (DraftKings)
+
+The cross-market-sportbook strategy holds Kalshi contracts and DraftKings bets in
+one portfolio. A bet at decimal odds d is a YES contract bought at 1/d, so the
+broker, accounting and report need no new record types. Tickers starting `DK:`
+belong to the sportsbook. `czquant.sportsbook.Route` sends them to
+`SportsbookPaper` (policy sportsbook-fixed-odds-v1: fill-or-kill backs at the
+current odds, declined whole when the odds shortened, the game started, or the
+quote is stale; a per-selection stake limit; no fee) and sends every other ticker
+to the Kalshi paper adapter.
+
+The Kalshi market monitor skips `DK:` tickers. A separate component reads them.
+It never pays for odds: marks come from the newest read cached in
+`$STRATEGY_RUNS_DIR/odds_cache/` (dated by that read), and it pays only for results,
+per league, at most every 30 minutes, for games that started 2.5 hours earlier:
+
+```bash
+export DRAFTKINGS_SOURCE=oddsapi ODDS_API_KEY=...
+uv run czquant monitor draftkings
+uv run czquant settle-sportsbook DK:... --result yes|no|void --note "evidence"
+```
+
+It records odds as a back-only book (an ask at 1/d, no bid). The report therefore
+gives open bets the range [0, 1/d] and no midpoint. It settles from source results:
+1, 0, or each lot's own price on a push or void, which returns the stake. A
+selection with no result after it is withdrawn keeps the monitor degraded
+(awaiting_result) until a result arrives or an operator settles it. Live
+sportsbook execution does not exist and the broker cannot route to it.
+
+## Live dashboard
+
+```bash
+uv run czquant dashboard            # http://127.0.0.1:8790/
+```
+
+A read-only websocket view of every portfolio in the store, for watching a trial
+while it runs. It applies the report's valuation: the same FIFO state, 120-second
+marks, midpoints from two-sided books (and from one-sided books with a range of at
+most 2 cents), and quote ranges otherwise. For each
+portfolio it shows realized P&L and unrealized P&L. Unrealized is given in full only
+when every open lot has a midpoint; otherwise it covers the marked lots, with the
+remaining cost basis listed separately. It also shows net P&L as a point and a
+range, fees, fills, settlements, midpoint coverage, the last heartbeat, and halts.
+Above the table are each monitor's health and the odds credits left. History is
+replayed once on a grid of `--step` seconds (300); after that it reads only new
+events. Portfolios appear without configuration and are named after their latest
+run record. It needs no credentials, sends no requests to venues, and spends no
+odds credits. It is not a substitute for `czquant report`, which freezes a snapshot
+and computes the ranked metrics.
+
 ## Independent comparison
 
 From packages/czquant:
@@ -165,13 +215,17 @@ history to establish opening holdings. Every portfolio is evaluated on the
 same one-minute grid plus funding boundaries. YES midpoint is the average of
 the best YES bid and implied YES ask; NO is its complement. Crossed books,
 missing two-sided quotes, or books older than 120 seconds are missing marks.
+The one exception is a fresh one-sided book whose quote range (below) is at most
+$0.02 wide, such as a $0.99 YES bid with no seller once an outcome is all but
+decided: it is marked at the middle of that range. The range is unchanged.
 Final confirmed payout values remain valid without a live quote.
 
 The report also shows a quote-based valuation range. For YES, the lower value
 uses the best YES bid, or zero when that side is empty; the upper value uses
 one minus the best NO bid, or one when that side is empty. NO uses the
 complementary range. Both sides missing yields [0, 1] per contract. A fresh
-one-sided book therefore retains a range without inventing a midpoint.
+one-sided book therefore retains a range; it gets a midpoint only when that range
+is at most $0.02 wide.
 Absent, stale, invalid, or crossed books invalidate the range as well.
 
 Portfolio ranges sum actual quantities and cash, including entry fees. P&L
@@ -205,6 +259,15 @@ operations. Mapping requires a flat numbered subaccount without resting
 orders and records its opening cash. Transfers require a supplied UUID and
 an amount in cents; venue history provides accounting evidence. No daemon
 chooses allocations. Never map the same subaccount to two portfolios.
+
+An account without subaccount access (Kalshi's basic API tier) can map its
+primary account instead: `czquant map-live <id> --subaccount 0 --primary-account`.
+The same flatness check applies, and requests for that portfolio name no
+subaccount at all. The flag is a promise that nothing else trades there while
+the portfolio is live: the account monitor reconciles the whole account against
+the portfolio, so manual trades show up as inventory mismatches, and deposits
+made after mapping (which are not subaccount transfers) show up as cash
+mismatches. Deposit first, then map.
 
 The live adapter follows the current V2 API and has fixture validation, not
 real-money execution validation in this rollout. Standard fills, transfers,

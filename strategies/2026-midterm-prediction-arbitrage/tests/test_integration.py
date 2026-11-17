@@ -63,9 +63,13 @@ def test_a_run_writes_its_directory_and_sends_nothing(tmp_path, capsys, monkeypa
     assert {r["type"] for r in rows} == {"fill", "mark"}
 
 
-def test_live_mode_is_refused(tmp_path):
-    with pytest.raises(SystemExit, match="paper"):
-        run(snapshot_in=str(SNAPSHOT), mode="live", runs_dir=tmp_path / "runs")
+def test_live_mode_is_refused_on_a_snapshot_or_without_a_spend_cap(tmp_path):
+    with pytest.raises(SystemExit, match="Nothing was sent"):
+        run(snapshot_in=str(SNAPSHOT), mode="live", max_spend=D("10"), runs_dir=tmp_path / "runs")
+    with pytest.raises(SystemExit, match="max-spend"):
+        run(mode="live", runs_dir=tmp_path / "runs")
+    with pytest.raises(SystemExit, match="send-orders"):
+        run(snapshot_in=str(SNAPSHOT), send_orders=True, runs_dir=tmp_path / "runs")
 
 
 def test_only_the_independent_model_exists(tmp_path):

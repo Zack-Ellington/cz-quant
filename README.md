@@ -23,7 +23,11 @@ or retired without an effect on the others.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
-- [wcbb-favorites](strategies/wcbb-favorites/): paper-buys the favored team in Kalshi women's college basketball games priced 80–90% with a tight spread, on the shared ledger. Range chosen from [research/kalshi-calibration](research/kalshi-calibration/); the backtest does not beat spread plus fees.
+- [cross-market-sportbook](strategies/cross-market-sportbook/): the sum check across venues. Kalshi NBA, NHL and MLB game markets are priced against DraftKings moneylines, and baskets with legs on both venues are paper-traded through the shared broker. A new `czquant.draftkings` data flow, paper adapter and monitor support it.
+
+- [kalshi-sum-check-unwind](strategies/kalshi-sum-check-unwind/): the Kalshi sum check, but when a basket fills only some legs it keeps the complete sets and sells the extra contracts back within a slippage limit.
+
+- [kalshi-sum-check-retry](strategies/kalshi-sum-check-retry/): the Kalshi sum check, but when a basket fills only some legs it buys the missing legs again, as long as the completed basket still breaks even (or loses no more than a set amount).
 
 ## Quickstart
 
