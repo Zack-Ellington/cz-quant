@@ -14,9 +14,10 @@ def install(repo: Path, environment: Path, units: Path) -> None:
         'account':f'{shared} monitor account',
         'sum-low':f'{repo}/strategies/kalshi_sum_check/.venv/bin/python {repo}/strategies/kalshi_sum_check/paper_ws.py --feed rest --preset low',
         'sum-high':f'{repo}/strategies/kalshi_sum_check/.venv/bin/python {repo}/strategies/kalshi_sum_check/paper_ws.py --feed rest --preset high',
+        'wcbb-favorites':f'{repo}/strategies/wcbb-favorites/.venv/bin/strategy',
     }
     for name,command in services.items():
-        extra=f'Environment=CZQUANT_PORTFOLIO={name}\n' if name.startswith('sum-') else ''
+        extra=f'Environment=CZQUANT_PORTFOLIO={name}\n' if name.startswith(('sum-','wcbb-')) else ''
         (units/f'czq-{name}.service').write_text(f'[Unit]\nDescription=cz-quant {name}\n[Service]\n{common}{extra}ExecStart={command}\nRestart=on-failure\nRestartSec=15\n[Install]\nWantedBy=default.target\n')
     for name,strategy in [('election-independent','2026-midterm-prediction-arbitrage'),('election-dependence','2026-midterm-dependence-arbitrage')]:
         directory=repo/'strategies'/strategy
