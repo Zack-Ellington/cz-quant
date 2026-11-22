@@ -1,5 +1,12 @@
-"""Paper trader for the cross-market sum check: Kalshi game markets against Polymarket
-moneylines. Paper only: nothing here can place a real order on either venue.
+"""Trader for the cross-market sum check: Kalshi game markets against Polymarket
+moneylines, on Polymarket US (default) or the international exchange (paper only).
+
+Paper by default. With --live it sends real IOC orders to Kalshi and Polymarket US for
+a live portfolio mapped to both accounts (`czquant map-live-cross`), within dollar caps
+(--max-basket-dollars, --max-total-dollars). --live --dry-run builds and signs every
+order and sends none. A live run trades only while `czquant monitor account` and
+`czquant monitor polymarket-us` report recently and agree with the ledger; it halts on
+any discrepancy or on an order whose outcome is unknown.
 
 Each tick
   discover  every --discover minutes, the open Kalshi game events and the open
@@ -14,7 +21,8 @@ Each tick
             asks for no more than the smallest fill so far, and contracts beyond the
             complete sets are sold back (reduce-only IOC) within --unwind-slippage.
 Settlement belongs to the monitors: `czquant monitor market` settles Kalshi legs and
-`czquant monitor polymarket` settles Polymarket tokens. A fully filled basket that
+`czquant monitor polymarket` settles international Polymarket tokens (paper) and
+`czquant monitor polymarket-us` reconciles and settles the live Polymarket US account. A fully filled basket that
 settles at a loss halts new trades, also after a restart; partial baskets are
 recorded only.
 
@@ -33,26 +41,32 @@ import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from czquant import Broker, Store
-from czquant.accounting import active_events
+from czquant.accounting import active_events, venue_of
 from czquant.kalshi import Kalshi
+from czquant.live import KalshiLive, LiveRoute
 from czquant.paper import Paper
 from czquant.polymarket import Polymarket, PolymarketPaper, kalshi_layout, normalize_market, ticker
+from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive, PolymarketUSPaper
+from czquant.polymarket_us import ticker as us_ticker
 from czquant.sportsbook import Route
 from czquant.store import decimal
 
 from markets import Listing, MarketPair, load_markets, resolve
-from matching import KalshiGame, Pair, PolyGame, kalshi_game, load_pairs, match, poly_game
-from sum_check import Basket, best, kalshi_offer, polymarket_offer
+from matching import KalshiGame, Pair, PolyGame, kalshi_game, load_pairs, match, poly_game, us_game
+from sum_check import Basket, best, kalshi_offer, polymarket_offer, polymarket_us_offer
 
 STRATEGY = "cross-market-polymarket"
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 LEAGUES = os.path.join(HERE, "leagues.json")
+PAIRS = os.path.join(HERE, "pairs.json")
+PAIRS_US = os.path.join(HERE, "pairs.us.json")  # pins and blocks for Polymarket US, whose slugs differ
+US_LOOKAHEAD_DAYS = 8  # Polymarket US game events read at each discovery: starting within this many days
 FEE_TYPES = ("quadratic", "quadratic_with_maker_fees", "quadratic_with_combo_maker_fees")
 TICK = Decimal("0.01")
 log = logging.getLogger("cross_market_polymarket")
@@ -80,6 +94,13 @@ class Config:
     cooldown: float = 300.0
     duration_minutes: float | None = None
     markets: bool = True  # also scan the reviewed non-sports pairs in markets.json
+    venue: str = "polymarket"  # polymarket (international, paper) or polymarket_us
+    live: bool = False  # real orders: needs a live portfolio mapped with map-live-cross
+    dry_run: bool = False  # live, but build and sign orders without sending them
+    pmus_theta: float | None = None  # Polymarket US taker coefficient; None: each market's own
+    max_basket_dollars: float | None = None  # hard cap on one basket's capital
+    max_total_dollars: float | None = None  # hard cap on capital at risk across open trades
+    monitor_max_age: float = 300.0  # live: seconds a monitor's last health check stays valid
 
 
 def load_leagues(names: tuple[str, ...] = (), path: str = LEAGUES) -> dict[str, dict[str, Any]]:
@@ -94,8 +115,10 @@ def load_leagues(names: tuple[str, ...] = (), path: str = LEAGUES) -> dict[str, 
 class Engine:
     def __init__(self, cfg: Config, kalshi: Any = None, poly: Polymarket | None = None,
                  leagues: dict[str, dict[str, Any]] | None = None, pairs: dict[str, Any] | None = None,
-                 revision: str | None = None, listings: list[Listing] | None = None):
+                 revision: str | None = None, listings: list[Listing] | None = None,
+                 us: PolymarketUS | None = None, kalshi_live: Any = None):
         self.cfg = cfg
+        self.theta_override = None if cfg.pmus_theta is None else Decimal(str(cfg.pmus_theta))
         portfolio = os.environ.get("CZQUANT_PORTFOLIO")
         if not portfolio:
             raise ValueError("Set CZQUANT_PORTFOLIO to an explicitly created paper portfolio")
@@ -103,16 +126,37 @@ class Engine:
         self.store = Store()
         self.diagnostics = os.path.join(str(self.store.root), "diagnostics", portfolio)
         self.kalshi = kalshi or Kalshi(authenticated=False)
-        self.poly = poly or Polymarket.from_env()
-        adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
-                        polymarket=PolymarketPaper(self.poly, latency=cfg.polymarket_latency))
+        self.us = cfg.venue == "polymarket_us"
+        if cfg.live and not self.us:
+            raise ValueError("live trading is on Polymarket US only (--venue polymarket-us)")
+        if self.us:
+            self.poly: Any = us or PolymarketUS.from_env(authenticated=cfg.live, dry_run=cfg.dry_run)
+            if cfg.live:
+                adapter: Any = LiveRoute(KalshiLive(kalshi_live or Kalshi(authenticated=True), dry_run=cfg.dry_run),
+                                         PolymarketUSLive(self.poly))
+            else:
+                adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
+                                polymarket_us=PolymarketUSPaper(self.poly, latency=cfg.polymarket_latency,
+                                                                theta=self.theta_override))
+        else:
+            self.poly = poly or Polymarket.from_env()
+            adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
+                            polymarket=PolymarketPaper(self.poly, latency=cfg.polymarket_latency))
         self.broker = Broker(self.store, portfolio, adapter, self.run_id)
-        if self.broker.mode != "paper":
-            raise ValueError("This strategy entry point is paper only")
+        if cfg.live:
+            if self.broker.mode != "live" or "polymarket_us" not in self.broker.venues:
+                raise ValueError(f"{portfolio} is not a live portfolio mapped to Kalshi and Polymarket US "
+                                 "(uv run czquant map-live-cross)")
+            if not self.poly.authenticated:
+                raise ValueError("live trading needs POLYMARKET_US_KEY_ID and POLYMARKET_US_SECRET_KEY_PATH")
+        elif self.broker.mode != "paper":
+            raise ValueError(f"{portfolio} is a live portfolio: pass --live (and --dry-run first)")
         self.leagues = leagues if leagues is not None else load_leagues(cfg.leagues)
-        self.pairs = pairs if pairs is not None else load_pairs()
-        self.reload_markets = listings is None and cfg.markets  # re-read markets.json at each discovery
-        self.listings = listings if listings is not None else (load_markets() if cfg.markets else [])
+        self.pairs = pairs if pairs is not None else load_pairs(PAIRS_US if self.us else PAIRS)
+        # Non-sports pairs name international Polymarket markets: scanned on that venue only.
+        markets_on = cfg.markets and not self.us
+        self.reload_markets = listings is None and markets_on  # re-read markets.json at each discovery
+        self.listings = listings if listings is not None else (load_markets() if markets_on else [])
         revision = revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
         self.broker.start(STRATEGY, revision, {**asdict(self.cfg), "leagues": self.leagues,
                                                "pairs": {"pinned": sorted(self.pairs["pairs"]),
@@ -192,8 +236,53 @@ class Engine:
 
     def limits(self, event: str) -> Decimal:
         bankroll = self.bankroll
-        return min(self.cash, bankroll * Decimal(str(self.cfg.max_total_frac)) - self.exposure(),
-                   bankroll * Decimal(str(self.cfg.max_event_frac)) - self.exposure(event))
+        cap = min(self.cash, bankroll * Decimal(str(self.cfg.max_total_frac)) - self.exposure(),
+                  bankroll * Decimal(str(self.cfg.max_event_frac)) - self.exposure(event))
+        if self.cfg.max_total_dollars is not None:
+            # Open reservations count too: live Kalshi fills reach the ledger only with the monitor.
+            cap = min(cap, Decimal(str(self.cfg.max_total_dollars)) - self.exposure()
+                      - self.store.reserved(self.broker.portfolio))
+        if self.cfg.max_basket_dollars is not None:
+            cap = min(cap, Decimal(str(self.cfg.max_basket_dollars)))
+        return cap
+
+    def venue_shortfall(self, basket: Basket) -> str | None:
+        """Live: the first venue whose free cash can't pay its legs (cost plus fee)."""
+        if not self.cfg.live:
+            return None
+        need: dict[str, Decimal] = {}
+        for leg in basket.legs:
+            venue = venue_of(leg["ticker"])
+            need[venue] = need.get(venue, Decimal(0)) + decimal(leg["vwap"]) * leg["qty"] + decimal(leg["fee"])
+        return next((v for v, amount in need.items() if self.broker.available_at(v) < amount), None)
+
+    def live_block(self) -> str | None:
+        """Live: a reason not to trade now. Unresolved orders and monitor discrepancies
+        halt; a missing or stale monitor check only pauses."""
+        if not self.cfg.live:
+            return None
+        unresolved = self.store.db.execute(
+            "SELECT COUNT(*) FROM orders WHERE portfolio_id=? AND status IN ('unknown','pending')",
+            (self.broker.portfolio,)).fetchone()[0]
+        if unresolved:
+            self.halt(f"{unresolved} order(s) with unknown outcome; check both venues, then clear the halt")
+            return "halted"
+        if self.cfg.dry_run:
+            return None
+        now = datetime.now(timezone.utc)
+        for component in ("account", "polymarket_us"):
+            rows = [e for e in self.store.events(kinds=("health",)) if e["data"].get("component") == component]
+            if not rows:
+                return f"no_{component}_monitor"
+            last = rows[-1]
+            age = (now - datetime.fromisoformat(last["effective_at"])).total_seconds()
+            if age > self.cfg.monitor_max_age or last["data"].get("status") == "failed":
+                return f"stale_{component}_monitor"
+            mine = [d for d in last["data"].get("discrepancies") or [] if d.get("portfolio") == self.broker.portfolio]
+            if mine:
+                self.halt(f"{component} monitor reports {mine[0].get('kind')}: reconcile before trading")
+                return "halted"
+        return None
 
     def _throttled(self, key: tuple, every: float = 300.0) -> bool:
         now = time.monotonic()
@@ -209,7 +298,37 @@ class Engine:
 
     # -- data ----------------------------------------------------------------
 
+    def discover_us(self) -> dict[str, list[PolyGame]]:
+        """Polymarket US game events starting within US_LOOKAHEAD_DAYS, by league, each
+        with its moneyline. A game event lists its moneyline as the market group
+        PRIMARY's market; the markets are read in batches by ID."""
+        now = datetime.now(timezone.utc)
+        prefixes = {spec.get("polymarket_us_prefix", name) + "-": name for name, spec in self.leagues.items()}
+        events: dict[str, tuple[str, dict[str, Any], str]] = {}  # market id -> (league, event, ...)
+        for event in self.poly.events(active="true", closed="false",
+                                      startTimeMin=(now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                      startTimeMax=(now + timedelta(days=US_LOOKAHEAD_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")):
+            league = next((v for k, v in prefixes.items() if str(event.get("slug", "")).startswith(k)), None)
+            primary = [g for g in event.get("marketGroups") or [] if g.get("id") == "PRIMARY"]
+            if league is None or len(primary) != 1 or len(primary[0].get("marketIds") or []) != 1:
+                continue
+            events[str(primary[0]["marketIds"][0])] = (league, event, "")
+        out: dict[str, list[PolyGame]] = {name: [] for name in self.leagues}
+        for market in self.poly.markets_by_id(sorted(events)):
+            league, event, _ = events[str(market.get("id"))]
+            game = us_game(event, market)
+            if game is not None:
+                out[league].append(game)
+        return out
+
     def discover(self) -> None:
+        us_games: dict[str, list[PolyGame]] = {}
+        if self.us:
+            try:
+                us_games = self.discover_us()
+            except Exception as exc:
+                log.exception("Polymarket US discovery failed")
+                self.broker.observe("error", {"where": "discover", "venue": "polymarket_us", "error": str(exc)[:300]})
         for name, spec in self.leagues.items():
             try:
                 series = spec["kalshi_series"]
@@ -219,6 +338,9 @@ class Engine:
                 events = list(self.kalshi.pages("/events", "events", series_ticker=series, status="open",
                                                 with_nested_markets="true", limit=200))
                 self.games[name] = [g for g in (kalshi_game(e) for e in events) if g is not None]
+                if self.us:
+                    self.polys[name] = us_games.get(name, [])
+                    continue
                 polys = []
                 for event in self.poly.events(tag_slug=spec["polymarket_tag"], closed="false"):
                     game = poly_game(event)
@@ -298,7 +420,19 @@ class Engine:
         return out
 
     def poly_books(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
+        """Polymarket books in the Kalshi layout: by token, or on Polymarket US by market slug."""
+        if self.us:
+            return self.poly.books(sorted(set(tokens)))
         return {token: kalshi_layout(raw) for token, raw in self.poly.books(tokens).items()}
+
+    def book_keys(self, pair: Pair) -> list[str]:
+        return [pair.poly.market["slug"]] if self.us else list(pair.legs.values())
+
+    def theta(self, market: dict[str, Any]) -> Decimal:
+        if self.theta_override is not None:
+            return self.theta_override
+        coefficient = market.get("feeCoefficient")
+        return Decimal(str(coefficient)) if coefficient is not None else DEFAULT_THETA
 
     # -- evaluation ------------------------------------------------------------
 
@@ -314,7 +448,16 @@ class Engine:
         if multiplier is None:
             return None, "unsupported_kalshi_fees"
         offers: dict[str, list] = {}
-        for kticker, token in pair.legs.items():
+        if self.us:
+            market, slug = pair.poly.market, pair.poly.market["slug"]
+            if market.get("status") != "MARKET_STATUS_OPEN" or slug not in pbooks:
+                return None, "polymarket_not_trading" if slug in pbooks else "no_book"
+            for kticker, contract in pair.legs.items():
+                if kticker not in kbooks:
+                    return None, "no_book"
+                offers[kticker] = [kalshi_offer(kticker, kticker, kbooks[kticker], multiplier),
+                                   polymarket_us_offer(kticker, us_ticker(slug), pbooks[slug], self.theta(market), contract)]
+        for kticker, token in ([] if self.us else pair.legs.items()):
             market = normalize_market(pair.poly.market, token)
             if market["status"] != "active":
                 return None, "polymarket_not_trading"
@@ -377,7 +520,9 @@ class Engine:
 
     def pair_league(self, league: str, counts: dict[str, int]) -> list[Pair]:
         paired = []
-        aliases = self.leagues[league].get("abbr_aliases") or {}
+        spec = self.leagues[league]
+        aliases = ((spec.get("polymarket_us_abbr_aliases") if self.us else None)
+                   or spec.get("abbr_aliases") or {})
         for game in self.games.get(league, []):
             if game.event in self.pairs["blocked"]:
                 counts["blocked"] = counts.get("blocked", 0) + 1
@@ -398,7 +543,7 @@ class Engine:
                 continue
             try:
                 kbooks = self.kalshi_books([t for p in paired for t in p.legs])
-                pbooks = self.poly_books([t for p in paired for t in p.legs.values()])
+                pbooks = self.poly_books([t for p in paired for t in self.book_keys(p)])
             except Exception as exc:
                 log.exception("book read failed for %s", league)
                 self.broker.observe("error", {"where": "books", "league": league, "error": str(exc)[:300]})
@@ -436,7 +581,7 @@ class Engine:
             return self.evaluate_market(pair, self.kalshi_books([pair.listing.kalshi]),
                                         self.poly_books(list(pair.tokens.values())))
         return self.evaluate(league, pair, self.kalshi_books(list(pair.legs)),
-                             self.poly_books(list(pair.legs.values())))
+                             self.poly_books(self.book_keys(pair)))
 
     def execute(self, basket: Basket, pair: Pair | MarketPair, league: str) -> None:
         event = event_of(pair)
@@ -473,10 +618,15 @@ class Engine:
                 got = decimal(result.get("filled") or "0")
                 outcomes.append({"ticker": leg["ticker"], "venue": leg["venue"], "asked": str(int(target)),
                                  "status": result["status"], "filled": str(got)})
+                if result["status"] == "unknown":
+                    # Never send the next leg (or an unwind) on a guess about this one.
+                    self.halt(f"order on {leg['ticker']} has an unknown outcome")
+                    sent.append((leg, got))
+                    break
                 sent.append((leg, got))
                 target = min(target, got)
             keep = target if len(sent) == len(legs) else Decimal(0)
-            for leg, got in sent:
+            for leg, got in ([] if self.halted else sent):
                 if got > keep:
                     outcomes.append(self.unwind(leg, got - keep, context))
         except Exception as exc:
@@ -515,8 +665,17 @@ class Engine:
         candidates = self.scan()
         if self.halted:
             return
+        pause = self.live_block()
+        if pause:
+            if not self._throttled(("live_block", pause), 60):
+                self.broker.observe("live_paused", {"reason": pause})
+                log.warning("not trading: %s", pause)
+            return
         for basket, pair, league in sorted(candidates, key=lambda c: c[0].apr, reverse=True):
-            block = self.risk_block(event_of(pair))
+            if self.halted:
+                return
+            block = self.risk_block(event_of(pair)) or (
+                f"venue_cash_{self.venue_shortfall(basket)}" if self.venue_shortfall(basket) else None)
             if block:
                 self.reject(event_of(pair), block, apr=basket.apr)
                 continue
@@ -581,8 +740,25 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--cooldown", type=float, default=d.cooldown, help="seconds before trading a game again (300)")
     p.add_argument("--duration", type=_duration, default=None, help="run for H:MM, then stop")
     p.add_argument("--no-markets", action="store_true", help="skip the reviewed non-sports pairs in markets.json")
+    p.add_argument("--venue", choices=["polymarket-us", "polymarket"], default="polymarket-us",
+                   help="Polymarket US (default) or the international exchange (paper only)")
+    p.add_argument("--pmus-theta", type=float, default=None,
+                   help="Polymarket US taker coefficient for pricing and paper fees (default: each market's feeCoefficient, 0.095 at tier 1)")
+    p.add_argument("--live", action="store_true",
+                   help="send real orders to Kalshi and Polymarket US (a live portfolio from map-live-cross)")
+    p.add_argument("--dry-run", action="store_true", help="with --live: build and sign every order, send none")
+    p.add_argument("--max-basket-dollars", type=float, default=None, help="cap on one basket's capital, $ (live default 25)")
+    p.add_argument("--max-total-dollars", type=float, default=None, help="cap on capital at risk, $ (live default 100)")
     p.add_argument("--once", action="store_true", help="one scan, then stop")
     a = p.parse_args(argv)
+    if a.dry_run and not a.live:
+        p.error("--dry-run goes with --live (paper runs never send orders anyway)")
+    if a.live:
+        # Small by default: the first live runs measure fills and fees, not profit.
+        a.max_basket_dollars = 25.0 if a.max_basket_dollars is None else a.max_basket_dollars
+        a.max_total_dollars = 100.0 if a.max_total_dollars is None else a.max_total_dollars
+        if "--max-sets" not in (argv if argv is not None else __import__("sys").argv):
+            a.max_sets = 20
     if not os.environ.get("STRATEGY_RUNS_DIR"):
         # Without it the store falls back to ./runs, which the monitors and dashboard never read.
         p.error("STRATEGY_RUNS_DIR is not set; load .env first (set -a; source .env; set +a)")
@@ -592,12 +768,19 @@ def main(argv: list[str] | None = None) -> None:
                  min_edge=a.min_edge, max_apr=a.max_apr, require_cross=not a.any_venue, min_lead_minutes=a.min_lead,
                  resolution_hours=a.resolution_hours, unwind_slippage=a.unwind_slippage,
                  kalshi_latency=a.kalshi_latency, polymarket_latency=a.polymarket_latency, cooldown=a.cooldown,
-                 duration_minutes=a.duration, markets=not a.no_markets)
+                 duration_minutes=a.duration, markets=not a.no_markets,
+                 venue=a.venue.replace("-", "_"), live=a.live, dry_run=a.dry_run, pmus_theta=a.pmus_theta,
+                 max_basket_dollars=a.max_basket_dollars, max_total_dollars=a.max_total_dollars)
     engine = Engine(cfg)
     run_dir = os.path.join(engine.diagnostics, engine.run_id)
     os.makedirs(run_dir, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(run_dir, "run.log"))])
+    if cfg.live:
+        log.warning("LIVE%s: portfolio %s, caps $%s per basket, $%s total, %d sets; Kalshi $%s and Polymarket US $%s free",
+                    " DRY RUN (nothing sent)" if cfg.dry_run else "", engine.broker.portfolio, cfg.max_basket_dollars,
+                    cfg.max_total_dollars, cfg.max_sets, engine.broker.available_at("kalshi"),
+                    engine.broker.available_at("polymarket_us"))
     try:
         engine.run(once=a.once)
     except KeyboardInterrupt:

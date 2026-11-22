@@ -88,14 +88,18 @@ class Route:
     """Paper adapters by venue, so one broker and one portfolio's cash serve a basket
     whose legs are on Kalshi and on a sportsbook or Polymarket."""
 
-    def __init__(self, kalshi: Any, sportsbook: SportsbookPaper | None = None, polymarket: Any = None):
+    def __init__(self, kalshi: Any, sportsbook: SportsbookPaper | None = None, polymarket: Any = None,
+                 polymarket_us: Any = None):
         self.kalshi, self.sportsbook, self.polymarket = kalshi, sportsbook, polymarket
-        self.policy = "+".join(a.policy for a in (kalshi, sportsbook, polymarket) if a is not None)
+        self.polymarket_us = polymarket_us
+        self.policy = "+".join(a.policy for a in (kalshi, sportsbook, polymarket, polymarket_us) if a is not None)
 
     def create_order(self, order: dict[str, Any], broker: Broker) -> dict[str, Any]:
         from .polymarket import is_polymarket
+        from .polymarket_us import is_polymarket_us
         ticker = order["ticker"]
         adapter = (self.sportsbook if is_sportsbook(ticker) else
+                   self.polymarket_us if is_polymarket_us(ticker) else
                    self.polymarket if is_polymarket(ticker) else self.kalshi)
         if adapter is None:
             raise ValueError(f"no paper adapter for {ticker}")

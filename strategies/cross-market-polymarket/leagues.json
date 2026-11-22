@@ -4,7 +4,14 @@
     "kalshi_series": "KXNBAGAME",
     "polymarket_tag": "nba",
     "abbr_aliases": {},
-    "rules": "Both venues resolve on the game's winner, overtime included. No ties. A game not played as scheduled can resolve differently: Polymarket resolves 50-50 if it isn't played by its resolution date; check Kalshi's rule for postponements."
+    "rules": "Both venues resolve on the game's winner, overtime included. No ties. A game not played as scheduled can resolve differently: Polymarket resolves 50-50 if it isn't played by its resolution date; check Kalshi's rule for postponements.",
+    "polymarket_us_abbr_aliases": {
+      "NYK": "ny",
+      "NOP": "no",
+      "SAS": "sa",
+      "GSW": "gs",
+      "PHX": "pho"
+    }
   },
   "nhl": {
     "enabled": true,
@@ -16,7 +23,13 @@
       "VGK": "las",
       "CGY": "cal"
     },
-    "rules": "Both venues resolve on the game's winner, overtime and shootout included. No ties. Postponements can resolve differently on each venue."
+    "rules": "Both venues resolve on the game's winner, overtime and shootout included. No ties. Postponements can resolve differently on each venue.",
+    "polymarket_us_abbr_aliases": {
+      "MTL": "mon",
+      "NSH": "nas",
+      "WSH": "was",
+      "VGK": "veg"
+    }
   },
   "mlb": {
     "enabled": true,
@@ -29,7 +42,12 @@
     "enabled": true,
     "kalshi_series": "KXNFLGAME",
     "polymarket_tag": "nfl",
-    "abbr_aliases": {"JAC": "jax"},
-    "rules": "Enabled for paper benchmarking: on a tie each Kalshi team market resolves No while Polymarket's two-way moneyline may resolve 50-50, so a basket can lose. Trades record evidence.kalshi_tie_market."
+    "abbr_aliases": {
+      "JAC": "jax"
+    },
+    "rules": "Enabled for paper benchmarking: on a tie each Kalshi team market resolves No while Polymarket's two-way moneyline may resolve 50-50, so a basket can lose. Trades record evidence.kalshi_tie_market.",
+    "polymarket_us_abbr_aliases": {
+      "JAC": "jax"
+    }
   }
 }

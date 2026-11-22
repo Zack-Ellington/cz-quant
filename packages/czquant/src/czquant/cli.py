@@ -15,7 +15,7 @@ def main() -> None:
     create.add_argument('--cash', default='1000')
     create.add_argument('--label', default='')
     monitor = commands.add_parser('monitor')
-    monitor.add_argument('component', choices=['market','account','draftkings','polymarket'])
+    monitor.add_argument('component', choices=['market','account','draftkings','polymarket','polymarket-us'])
     monitor.add_argument('--once', action='store_true')
     monitor.add_argument('--interval', type=float, default=60)
     settle = commands.add_parser('settle-sportsbook')
@@ -49,6 +49,13 @@ def main() -> None:
     mapping.add_argument('--exchange-index',type=int,default=0)
     mapping.add_argument('--primary-account', action='store_true',
                          help='with --subaccount 0: dedicate the primary account to this portfolio')
+    cross = commands.add_parser('map-live-cross', help='map a Kalshi subaccount and the Polymarket US account to one live portfolio')
+    cross.add_argument('id')
+    cross.add_argument('--subaccount', type=int, required=True)
+    cross.add_argument('--exchange-index', type=int, default=0)
+    cross.add_argument('--primary-account', action='store_true',
+                       help='with --subaccount 0: dedicate the primary account to this portfolio')
+    commands.add_parser('check-polymarket-us', help='authenticated read of the Polymarket US balance (no orders)')
     commands.add_parser('create-subaccount')
     transfer = commands.add_parser('transfer')
     transfer.add_argument('--client-id',required=True)
@@ -84,6 +91,22 @@ def main() -> None:
                 f.write(encode(event)+'\n')
     elif args.command == 'backup':
         store.backup(Path(args.output))
+    elif args.command == 'map-live-cross':
+        from .kalshi import Kalshi
+        from .operator import map_live_cross
+        from .polymarket_us import PolymarketUS
+        map_live_cross(store, Kalshi(), PolymarketUS.from_env(), args.id, args.subaccount,
+                       args.exchange_index, args.primary_account)
+        print(f'Mapped {args.id} to Kalshi subaccount {args.subaccount} and the Polymarket US account.')
+    elif args.command == 'check-polymarket-us':
+        from .polymarket_us import PolymarketUS
+        client = PolymarketUS.from_env()
+        balance = client.balance()
+        print(encode({'currentBalance': balance.get('currentBalance'), 'buyingPower': balance.get('buyingPower'),
+                      'open_positions': len(client.positions())}))
+        print('Authenticated Polymarket US read succeeded.')
+        if balance.get('unfunded'):
+            print('The account lists no balance: it has not been funded yet. Deposit in the Polymarket US app before mapping it.')
     elif args.command in ('map-live','create-subaccount','transfer'):
         from .kalshi import Kalshi
         from .operator import map_live, transfer

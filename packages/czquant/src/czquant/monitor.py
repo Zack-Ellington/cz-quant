@@ -11,13 +11,14 @@ from typing import Any
 
 import httpx
 
-from .accounting import portfolio_state, replay
+from .accounting import portfolio_state, replay, venue_of
 from .broker import PRIMARY, Broker, scope
 from .kalshi import Kalshi
 from .book import levels
 from .draftkings import DraftKings, is_sportsbook, parse_ticker
 from .paper import update_consumed
 from .polymarket import Polymarket, is_polymarket
+from .polymarket_us import PolymarketUS, amount, is_polymarket_us, position_quantity, slug_of
 from .sportsbook import settle_lots
 from .store import Store, decimal, utc
 
@@ -271,13 +272,17 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         observed_positions = list(api.pages("/portfolio/positions", "market_positions", **scope(p["metadata"]), limit=1000))
         expected_positions = {}
         for lot in state.lots.values():
+            if venue_of(lot["market"]) != "kalshi":
+                continue  # another venue's lots are reconciled by that venue's monitor
             expected_positions[lot["market"]] = expected_positions.get(lot["market"],Decimal(0)) + lot["quantity"]*(1 if lot["side"]=="yes" else -1)
         actual_positions = {row["ticker"]:decimal(row["position_fp"]) for row in observed_positions if decimal(row["position_fp"])}
         if actual_positions != {k:v for k,v in expected_positions.items() if v}:
             discrepancies.append({"portfolio":p["id"],"kind":"inventory_mismatch"})
         # Unknown collateral/transfer effects are never converted to invented profit.
-        if cash != state.cash:
-            discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "recorded": str(state.cash), "observed": str(cash)})
+        recorded = state.venue_cash.get("kalshi", Decimal(0)) if p["metadata"].get("venues") else state.cash
+        if cash != recorded:
+            discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "venue": "kalshi",
+                                  "recorded": str(recorded), "observed": str(cash)})
         for order in api.pages("/portfolio/orders", "orders", **scope(p["metadata"]), limit=1000):
             row = store.db.execute("SELECT id,filled FROM orders WHERE venue_id=?", (order["order_id"],)).fetchone()
             if row and order.get("status") in ("canceled", "executed"):
@@ -323,12 +328,177 @@ def polymarket_pass(store: Store, client: Polymarket) -> dict[str, Any]:
     return status
 
 
+FUNDING_ACTIVITIES = {"ACTIVITY_TYPE_ACCOUNT_DEPOSIT": 1, "ACTIVITY_TYPE_ACCOUNT_ADVANCED_DEPOSIT": 1,
+                      "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL": -1}
+ORDER_TERMINAL = {"ORDER_STATE_FILLED": "filled", "ORDER_STATE_CANCELED": "canceled",
+                  "ORDER_STATE_REJECTED": "rejected", "ORDER_STATE_EXPIRED": "canceled"}
+
+
+def _recover_orders(store: Store, client: PolymarketUS, p: dict[str, Any], broker: Broker,
+                    discrepancies: list[dict[str, Any]]) -> int:
+    recovered = 0
+    rows = store.db.execute("SELECT * FROM orders WHERE portfolio_id=? AND status IN ('pending','acknowledged','unknown')",
+                            (p["id"],)).fetchall()
+    for row in rows:
+        if not is_polymarket_us(json.loads(row["request"])["ticker"]):
+            continue
+        if not row["venue_id"]:
+            discrepancies.append({"portfolio": p["id"], "kind": "order_without_venue_id", "order": row["id"]})
+            continue
+        order = client.order(row["venue_id"])
+        cumulative = decimal(order.get("cumQuantity") or "0")
+        missing = cumulative - decimal(row["filled"])
+        if missing > 0:
+            average = amount(order.get("avgPx"))
+            if average is None:
+                discrepancies.append({"portfolio": p["id"], "kind": "fill_without_price", "order": row["id"]})
+                continue
+            booked = [e["data"] for e in store.events(p["id"], kinds=("execution",)) if e["data"].get("order_id") == row["id"]]
+            notional = sum((decimal(b["quantity"]) * decimal(b["yes_price"]) for b in booked), Decimal(0))
+            fees = sum((decimal(b["fee"]) for b in booked), Decimal(0))
+            total_fee = amount(order.get("commissionNotionalTotalCollected")) or Decimal(0)
+            # The unbooked part's price: the order's notional less what's booked, per missing contract.
+            price = (average * cumulative - notional) / missing
+            broker.fill(row["id"], str(missing), str(price), str(max(Decimal(0), total_fee - fees)),
+                        f"pmus-order:{row['venue_id']}:{cumulative}", {"venue": "polymarket_us", "order": order})
+            recovered += 1
+        status = ORDER_TERMINAL.get(order.get("state", ""))
+        if status:
+            broker.finish(row["id"], status)
+    return recovered
+
+
+def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any], discrepancies: list[dict[str, Any]]) -> None:
+    for activity in client.activities():
+        kind = activity.get("type", "")
+        if kind not in FUNDING_ACTIVITIES and kind != "ACTIVITY_TYPE_TAKER_FEE_REBATE":
+            continue
+        body = activity.get("accountBalanceChange") or {}
+        at = body.get("updateTime") or body.get("createTime")
+        value = amount(body.get("amount"))
+        if at and at < p["created_at"]:
+            continue
+        if not at or value is None or body.get("status") != "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED":
+            if kind == "ACTIVITY_TYPE_TAKER_FEE_REBATE" or (body.get("status") or "").endswith("COMPLETED"):
+                discrepancies.append({"portfolio": p["id"], "kind": "unbooked_activity", "raw": activity})
+            continue
+        source = f"pmus-activity:{kind}:{body.get('transactionId')}"
+        if kind == "ACTIVITY_TYPE_TAKER_FEE_REBATE":
+            store.append("transaction", {"reason": "rebate", "venue": "polymarket_us", "cash_delta": str(abs(value)),
+                         "fee": "0", "legs": [], "evidence": activity}, p["id"], source=source, at=at)
+        else:
+            cash = abs(value) * FUNDING_ACTIVITIES[kind]
+            store.append("transaction", {"reason": "funding", "venue": "polymarket_us", "cash_delta": str(cash),
+                         "external_delta": str(cash), "fee": "0", "legs": [], "evidence": activity},
+                         p["id"], source=source, at=at)
+
+
+def _settle(store: Store, client: PolymarketUS, p: dict[str, Any]) -> int:
+    settled = 0
+    state = portfolio_state(store, p["id"])
+    for market in sorted({lot["market"] for lot in state.lots.values() if is_polymarket_us(lot["market"])}):
+        normalized = client.market(market)
+        observed = utc()
+        store.append("market", {"ticker": market, "market": normalized, "book": {}}, at=observed)
+        if normalized["status"] != "finalized":
+            continue
+        yes = decimal(normalized["settlement_value_dollars"])
+        with store.transaction():
+            for lot in [lot for lot in portfolio_state(store, p["id"]).lots.values() if lot["market"] == market]:
+                payout = yes if lot["side"] == "yes" else 1 - yes
+                store.append("transaction", {"reason": "settlement", "venue": "polymarket_us",
+                    "cash_delta": str(lot["quantity"] * payout), "fee": "0", "context": lot["context"],
+                    "evidence": {"market": normalized, "observed_at": observed},
+                    "legs": [{"market": market, "side": lot["side"], "quantity_delta": str(-lot["quantity"]),
+                              "price": str(payout), "lot_id": lot["record_id"]}]},
+                    p["id"], source=f"pmus-settlement:{p['id']}:{lot['record_id']}", at=observed)
+                settled += 1
+    return settled
+
+
+def _settle_paper(store: Store, client: PolymarketUS) -> int:
+    """Mark the Polymarket US markets paper portfolios hold, and settle their lots once
+    a market's settlement is final. Public reads only."""
+    settled = 0
+    for p in store.portfolios():
+        if p["mode"] != "paper":
+            continue
+        broker = Broker(store, p["id"], run_id="polymarket-us-monitor")
+        markets = {lot["market"] for lot in broker.state().lots.values() if is_polymarket_us(lot["market"])}
+        for market in sorted(markets):
+            normalized = client.market(market)
+            observed = utc()
+            store.append("market", {"ticker": market, "market": normalized, "book": client.book(market)
+                                    if normalized["status"] == "active" else {}}, at=observed)
+            if normalized["status"] != "finalized":
+                continue
+            for lot_id, lot in list(broker.state().lots.items()):
+                if lot["market"] == market:
+                    broker.settle(lot_id, normalized["settlement_value_dollars"],
+                                  {"market": normalized, "observed_at": observed})
+                    settled += 1
+    return settled
+
+
+def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
+    """Settle paper portfolios' Polymarket US lots, and reconcile the live portfolio
+    mapped to the Polymarket US account (which needs its credentials).
+
+    1. Orders left pending/acknowledged/unknown with a venue ID are read back; fills the
+       ledger lacks are booked (source `pmus-order:<id>:<cumulative>`) and terminal
+       orders finished. An order with no venue ID (a lost acknowledgement) can't be
+       looked up, since the venue has no client order ID: it's reported.
+    2. Completed deposits and withdrawals after the mapping become funding, and taker
+       fee rebates with an amount become rebates. One the monitor can't read is reported.
+    3. Lots in markets whose settlement is final are settled at the settlement price.
+       The venue pays resolutions into the balance automatically.
+    4. The account's cash and positions are compared with the ledger. Any difference is
+       a discrepancy (never booked as profit), and the trader halts on one.
+    """
+    discrepancies: list[dict[str, Any]] = []
+    mapped = [p for p in store.portfolios()
+              if p["mode"] == "live" and "polymarket_us" in (p["metadata"].get("venues") or [])]
+    if mapped and not client.authenticated:
+        raise ValueError("a live portfolio is mapped to Polymarket US: the monitor needs its credentials")
+    settled, recovered = _settle_paper(store, client), 0
+    for p in mapped:
+        broker = Broker(store, p["id"], run_id="polymarket-us-monitor")
+        recovered += _recover_orders(store, client, p, broker, discrepancies)
+        _book_activities(store, client, p, discrepancies)
+        settled += _settle(store, client, p)
+        state = portfolio_state(store, p["id"])
+        balance = client.balance()
+        observed_cash = decimal(balance["currentBalance"])
+        recorded = state.venue_cash.get("polymarket_us", Decimal(0))
+        if observed_cash != recorded:
+            discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "venue": "polymarket_us",
+                                  "recorded": str(recorded), "observed": str(observed_cash)})
+        expected: dict[str, Decimal] = {}
+        for lot in state.lots.values():
+            if is_polymarket_us(lot["market"]):
+                slug = slug_of(lot["market"])
+                expected[slug] = expected.get(slug, Decimal(0)) + lot["quantity"] * (1 if lot["side"] == "yes" else -1)
+        observed = {slug: position_quantity(row) for slug, row in client.positions().items() if position_quantity(row)}
+        expected = {k: v for k, v in expected.items() if v}
+        if observed != expected:
+            discrepancies.append({"portfolio": p["id"], "kind": "inventory_mismatch", "venue": "polymarket_us",
+                                  "recorded": {k: str(v) for k, v in expected.items()},
+                                  "observed": {k: str(v) for k, v in observed.items()}})
+        store.append("account_evidence", {"kind": "polymarket_us_snapshot", "balance": balance}, p["id"])
+    status = {"component": "polymarket_us", "status": "healthy" if not discrepancies else "degraded",
+              "portfolios": [p["id"] for p in mapped], "recovered_orders": recovered, "settled_lots": settled,
+              "discrepancies": discrepancies}
+    store.append("health", status)
+    return status
+
+
 def run_monitor(root: str, component: str, interval: float = 60, once: bool = False) -> None:
     store = Store(root)
     api: Any = (DraftKings.from_env() if component == "draftkings" else Polymarket.from_env()
-                if component == "polymarket" else Kalshi(authenticated=component == "account"))
+                if component == "polymarket" else PolymarketUS.from_env() if component == "polymarket-us"
+                else Kalshi(authenticated=component == "account"))
     passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass,
-              "polymarket": polymarket_pass}
+              "polymarket": polymarket_pass, "polymarket-us": polymarket_us_pass}
     while True:
         start = time.monotonic()
         try:

@@ -11,7 +11,9 @@ costs less than $1 in total after both venues' fees, the difference is locked in
 [cross-market-sportbook](../cross-market-sportbook/) runs it against DraftKings.
 This strategy prices each team on Kalshi and on Polymarket and, by default, trades
 only baskets with a leg on each venue (`--any-venue` also allows one-venue baskets).
-**Paper only:** nothing here can place a real order on either venue.
+It trades against **Polymarket US** (polymarket.us, the CFTC-regulated exchange) by
+default, on paper or live; `--venue polymarket` paper trades the international
+exchange instead. See [Live trading](#live-trading).
 
 ## How it works
 
@@ -122,11 +124,13 @@ uv run python trader.py --once --leagues nba        # one scan
 uv run python trader.py --duration 4:00
 ```
 
-Run the monitors in their own shells, with the same `STRATEGY_RUNS_DIR`:
+Run the monitors in their own shells, with the same `STRATEGY_RUNS_DIR`. On Polymarket
+US (the default venue), `czquant monitor polymarket-us` settles the Polymarket legs: it
+needs no key for paper portfolios. On the international venue it's `monitor polymarket`:
 
 ```bash
 uv run czquant monitor market
-uv run czquant monitor polymarket
+uv run czquant monitor polymarket-us     # or: monitor polymarket, for --venue polymarket
 ```
 
 The portfolio shows up on `uv run czquant dashboard` with no setup. Polymarket tokens
@@ -241,21 +245,104 @@ others.
 
 `.env.example` lists every key, grouped by venue. Paper trading needs only
 `STRATEGY_RUNS_DIR` and `CZQUANT_PORTFOLIO`, because both venues' market data is
-public. The Kalshi key is for the account monitor and live trading. The Polymarket
-trading credentials are listed but unused:
+public. Live trading needs both venues' keys:
 
 | Variable | What it is |
 |---|---|
-| `POLYMARKET_PRIVATE_KEY_PATH` | file holding the Polygon wallet key that signs orders |
-| `POLYMARKET_FUNDER_ADDRESS` | the address holding your funds (your profile's proxy wallet, or the signer) |
-| `POLYMARKET_SIGNATURE_TYPE` | 0 for the key's own wallet, 1 for an email/Magic proxy, 2 for a browser-wallet proxy |
-| `POLYMARKET_API_KEY`, `_SECRET`, `_PASSPHRASE` | CLOB API credentials, created or derived once from the wallet |
-| `POLYMARKET_CHAIN_ID` | 137 (Polygon) |
+| `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH` | Kalshi production key and its `.pem` file |
+| `POLYMARKET_US_KEY_ID` | Polymarket US Key ID (a UUID), from polymarket.us/developer |
+| `POLYMARKET_US_SECRET_KEY_PATH` | file holding the base64 Secret Key, outside the repo |
 | `ODDPOOL_API_KEY` | Oddpool search key, for `find_pairs.py` only; the trader never needs it |
 
-Live Polymarket trading would need an order-signing adapter, which this repo doesn't
-have yet. Check that Polymarket permits trading from your jurisdiction before adding
-one.
+Polymarket US signs each request with Ed25519 (`X-PM-Access-Key`, `X-PM-Timestamp`,
+`X-PM-Signature` over timestamp + method + path). It has no passphrase, API secret,
+wallet or signature type: those belong to the international exchange, which blocks
+US users.
+
+## Polymarket US
+
+A US game moneyline is **one** market (`aec-nba-bos-sac-2026-11-21`): its long side
+(YES) is one team and its short side (NO) the other. Every price on the venue is the
+YES price, as on Kalshi, so a team on the short side is bought with an ask at 1 − its
+price (`ORDER_INTENT_BUY_SHORT`). Markets are tickers `PMUS:<slug>`. The trader reads
+game events starting within eight days and takes each event's PRIMARY market group as
+its moneyline. Team abbreviations that differ from Kalshi's go in `leagues.json` under
+`polymarket_us_abbr_aliases` (they differ from the international ones: `NYK→ny`,
+`GSW→gs`, `VGK→veg`, …), and pins and blocks in `pairs.us.json`. On 2026-11-21, 71 of 86
+open NBA and NHL Kalshi games paired; the rest weren't listed yet.
+
+**Fees.** Takers pay θ × C × p × (1 − p) per fill, rounded to the cent half-to-even.
+θ is each market's `feeCoefficient` (0.095, the lowest volume tier), nearly twice the
+international 0.05. `--pmus-theta` overrides it for pricing and paper fills, for
+example `--pmus-theta 0.0695` at the top tier. The API promotion (θ 0.0695 and a 70%
+rebate through 2026-12-31) charges the full fee on the fill and pays the rebate later.
+Price with the rate actually charged on the fill, not the rebated one.
+
+## Live trading
+
+Live trading uses one **live portfolio mapped to two accounts**: a Kalshi subaccount
+and the whole Polymarket US account (it has no subaccounts). The ledger keeps each
+venue's cash apart (`State.venue_cash`), and a basket trades only if each venue's own
+free cash pays its legs.
+
+1. Put both venues' keys in `.env` and check them (both are reads only):
+
+   ```bash
+   uv run czquant setup                  # Kalshi
+   uv run czquant check-polymarket-us    # Polymarket US
+   ```
+
+2. With both accounts flat (no positions, no open orders), map them:
+
+   ```bash
+   uv run czquant map-live-cross cross-market-polymarket-live --subaccount 1
+   ```
+
+   It opens the portfolio at each account's current cash. From then on, nothing else
+   should trade either account: the monitors flag anything they can't attribute.
+
+3. Run both account monitors in their own shells:
+
+   ```bash
+   uv run czquant monitor account          # Kalshi fills, settlements, cash
+   uv run czquant monitor polymarket-us    # Polymarket US orders, deposits, settlements, cash
+   ```
+
+4. Dry run first: every order is built and signed, and none is sent:
+
+   ```bash
+   export CZQUANT_PORTFOLIO=cross-market-polymarket-live
+   uv run python trader.py --live --dry-run --leagues nba --duration 1:00
+   ```
+
+5. Then live, with small caps:
+
+   ```bash
+   uv run python trader.py --live --leagues nba --max-basket-dollars 25 --max-total-dollars 100
+   ```
+
+Live defaults are $25 per basket, $100 at risk and 20 sets per basket, unless set.
+Orders are taker IOC. Kalshi fills reach the ledger through the account monitor, so
+open orders' reservations count against the total cap until then. Polymarket US fills
+are booked from the order's synchronous execution reports.
+
+**It halts** (and stays halted across restarts until `czquant clear-halt`) when:
+- an order's outcome is unknown: the venue didn't confirm a final state. Polymarket US
+  has no client order ID, so a lost reply can't be looked up by ID: check the account
+  before clearing;
+- either monitor reports a discrepancy for the portfolio: cash, inventory, an
+  unbooked rebate or an order it can't find;
+- a fully filled basket settles at a loss, or the `KILL` file exists.
+
+**It pauses** (no new trades, no halt) while a monitor hasn't reported in
+`monitor_max_age` (5 minutes). Dry runs skip that check.
+
+**Not yet verified against the live venue:** the docs don't show a short-side order
+or its execution report, so the first live trades should be watched. Neither do they
+show the promotion rebate's activity record (the monitor reports a rebate it can't read
+as a discrepancy, which halts the trader), nor whether a fee shows in the execution
+report as `commissionNotionalCollected`. Non-sports pairs (`markets.json`) name
+international markets and are skipped on Polymarket US.
 
 ## Tests
 

@@ -9,11 +9,14 @@ from typing import Any
 
 import httpx
 
-from .accounting import State, portfolio_state
+from .accounting import State, portfolio_state, venue_of
 from .store import Store, decimal, encode
 
 
 PRIMARY = 0  # the account itself; Kalshi's default when no subaccount is named
+# Fee allowance reserved per contract until the exact fee is known: Kalshi's taker fee
+# peaks at 1.75 cents (0.07 x 0.25); Polymarket US's at 2.375 cents (0.095 x 0.25).
+FEE_ALLOWANCE = {"kalshi": Decimal("0.0175"), "polymarket_us": Decimal("0.025")}
 
 
 def scope(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -46,11 +49,25 @@ class Broker:
         opening = max(Decimal(0), quantity - held)
         cost = opening * (price if order["side"] == "bid" else 1 - price)
         # Paper's exact fee is checked before execution. Reserve a conservative default fee.
-        return cost + (quantity * Decimal("0.0175")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+        allowance = FEE_ALLOWANCE.get(venue_of(order["ticker"]), FEE_ALLOWANCE["kalshi"])
+        return cost + (quantity * allowance).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
 
     @property
     def available(self) -> Decimal:
         return self.state().cash - self.store.reserved(self.portfolio)
+
+    @property
+    def venues(self) -> list[str]:
+        """The accounts a live portfolio trades: Kalshi alone unless mapped with more."""
+        return list(self.metadata.get("venues") or ["kalshi"])
+
+    def available_at(self, venue: str) -> Decimal:
+        """Cash free at one venue: its own cash in the ledger less its open reservations.
+        Cash at one venue can't pay for a leg at the other."""
+        reserved = sum((decimal(r["reserved"]) for r in self.store.db.execute(
+            "SELECT request,reserved FROM orders WHERE portfolio_id=?", (self.portfolio,))
+            if venue_of(json.loads(r["request"])["ticker"]) == venue), Decimal(0))
+        return self.state().venue_cash.get(venue, Decimal(0)) - reserved
 
     def observe(self, kind: str, data: dict[str, Any]) -> str:
         return self.store.append("observation", {"kind": kind, **data}, self.portfolio, self.run_id)
@@ -69,7 +86,9 @@ class Broker:
         if quantity <= 0 or not 0 <= price <= 1:
             raise ValueError("invalid quantity or price")
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
-        if self.mode == "live":
+        if self.mode == "live" and venue_of(order["ticker"]) not in self.venues:
+            raise ValueError(f"portfolio {self.portfolio} has no {venue_of(order['ticker'])} account")
+        if self.mode == "live" and venue_of(order["ticker"]) == "kalshi":
             subaccount = self.metadata.get("subaccount")
             if subaccount is None or order.get("subaccount", subaccount) != subaccount:
                 raise ValueError("live order must use the mapped subaccount")
@@ -94,6 +113,9 @@ class Broker:
             self.store.append("order", {"status": "intent", "order": order, "context": context}, self.portfolio, self.run_id)
         try:
             if self.mode == "paper":
+                return self.adapter.create_order(order, self)
+            if getattr(self.adapter, "takes_broker", False):
+                # The adapter records the venue ID, fills and status itself.
                 return self.adapter.create_order(order, self)
             response = self.adapter.create_order(order)
         except httpx.HTTPStatusError as exc:
@@ -208,7 +230,8 @@ class Broker:
                 contract_price = price if side == "yes" else 1 - price
                 allocated_fee = charge * abs(delta) / qty
                 cash = -delta * contract_price - allocated_fee
-                self.store.append("transaction", {"reason": "fill", "cash_delta": str(cash), "fee": str(allocated_fee),
+                self.store.append("transaction", {"reason": "fill", "venue": venue_of(order["ticker"]),
+                    "cash_delta": str(cash), "fee": str(allocated_fee),
                     "order_id": identifier, "context": context, "evidence": evidence,
                     "legs": [{"market": order["ticker"], "side": side, "quantity_delta": str(delta), "price": str(contract_price)}]},
                     self.portfolio, self.run_id, source + ":" + side, at)
