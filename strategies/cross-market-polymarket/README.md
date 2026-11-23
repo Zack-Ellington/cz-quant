@@ -148,7 +148,6 @@ valuation rules apply unchanged.
 | `--min-net` | 0.25 | minimum profit per basket, dollars |
 | `--any-venue` | off | also trade one-venue baskets |
 | `--no-markets` | off | skip the reviewed non-sports pairs in `markets.json` |
-| `--min-lead` | 10 | skip games starting within this many minutes |
 | `--resolution-hours` | 6 | hours from the start to payout, for the hurdle |
 | `--unwind-slippage` | 0.05 | worst price per contract below cost when selling back |
 | `--cooldown` | 300 | seconds before trading a game again |

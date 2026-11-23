@@ -152,6 +152,67 @@ def test_mapping_opens_each_venue_at_its_own_cash(live):
     assert Broker(store, "x").venues == ["kalshi", "polymarket_us"]
 
 
+def test_a_deposit_still_clearing_is_not_a_cash_mismatch(live):
+    store, us, _ = live
+
+    class Clearing(type(us)):
+        def private(self, method, path, params=None, body=None):
+            if path == "/v1/account/balances":  # $51 deposited, still pending
+                return {"balances": [{"currency": "USD", "currentBalance": "551", "depositReservation": "51"}]}
+            return super().private(method, path, params, body)
+
+    clearing = Clearing()
+    clearing.__dict__.update(us.__dict__)
+    status = polymarket_us_pass(store, clearing)
+    assert status["status"] == "healthy", status["discrepancies"]
+    assert status["balances"] == [{"portfolio": "x", "cash": "500", "recorded": "500",
+                                   "clearing_deposits": "51", "advanced": "0", "buying_power": "0"}]
+
+
+def deposit(status, advanced="51"):
+    change = {"transactionId": "DW1", "status": f"ACCOUNT_BALANCE_CHANGE_STATUS_{status}",
+              "amount": {"value": "51", "currency": "USD"},
+              "createTime": "2099-01-01T00:00:00Z", "updateTime": "2099-01-02T00:00:00Z",
+              "transactions": [{"advancedAmount": {"value": advanced, "currency": "USD"}}]}
+    return {"type": "ACTIVITY_TYPE_ACCOUNT_DEPOSIT", "accountBalanceChange": change}
+
+
+def advancing(us, activity, balance):
+    class Advancing(type(us)):
+        def private(self, method, path, params=None, body=None):
+            if path == "/v1/account/balances":
+                return {"balances": [{"currency": "USD", **balance}]}
+            if path == "/v1/portfolio/activities":
+                return {"activities": [activity], "eof": True}
+            return super().private(method, path, params, body)
+
+    venue = Advancing()
+    venue.__dict__.update(us.__dict__)
+    return venue
+
+
+def test_an_advanced_deposit_is_cash_at_once_and_counted_once(live):
+    store, us, _ = live
+    pending = advancing(us, deposit("PENDING"), {"currentBalance": "551", "depositReservation": "51"})
+    for _ in range(2):
+        status = polymarket_us_pass(store, pending)
+        assert status["status"] == "healthy", status["discrepancies"]
+    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("551")
+    assert status["balances"][0]["advanced"] == "51"
+    done = advancing(us, deposit("COMPLETED"), {"currentBalance": "551"})
+    for _ in range(2):
+        assert polymarket_us_pass(store, done)["status"] == "healthy"
+    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("551")
+
+
+def test_a_failed_advanced_deposit_is_taken_back_and_reported(live):
+    store, us, _ = live
+    polymarket_us_pass(store, advancing(us, deposit("PENDING"), {"currentBalance": "551", "depositReservation": "51"}))
+    status = polymarket_us_pass(store, advancing(us, deposit("FAILED"), {"currentBalance": "500"}))
+    assert [d["kind"] for d in status["discrepancies"]] == ["deposit_failed"]
+    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("500")
+
+
 def test_mapping_refuses_a_polymarket_us_account_with_positions(tmp_path):
     us = FakeUS()
     us.held = {SLUG: D(3)}

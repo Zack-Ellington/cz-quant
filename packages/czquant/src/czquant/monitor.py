@@ -249,7 +249,8 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                     store.append("transaction", {"reason":"funding","cash_delta":str(cash),
                         "external_delta":str(cash),"fee":"0","legs":[],"evidence":transfer},p["id"],
                         source=f"transfer:{transfer['exchange_index']}:{transfer['transfer_id']}:{sub}",at=at)
-    for (sub, _), group in groups.items():
+    balances: list[dict[str, Any]] = []
+    for (sub, exchange), group in groups.items():
         lead = group[0]["metadata"]
         ids = [p["id"] for p in group]
         for settlement in api.pages("/portfolio/settlements","settlements",**scope(lead),min_ts=since,limit=1000):
@@ -291,6 +292,9 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         # Unknown collateral/transfer effects are never converted to invented profit.
         # On a shared account a cash difference can't be attributed: every sharer sees it.
         recorded = sum((kalshi_cash(store, p) for p in group), Decimal(0))
+        balances.append({"subaccount": sub, "exchange_index": exchange, "cash": str(cash),
+                         "recorded": {p["id"]: str(kalshi_cash(store, p)) for p in group},
+                         "positions": len(actual_positions)})
         if cash != recorded:
             discrepancies.extend({"portfolio": pid, "kind": "cash_mismatch", "venue": "kalshi",
                                   "recorded": str(recorded), "observed": str(cash),
@@ -303,7 +307,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
     store.db.execute("INSERT OR REPLACE INTO checkpoints VALUES('account',?)", (str(watermark),))
     status = {"component": "account", "status": "healthy" if not discrepancies else "degraded",
               "mapped_fills": mapped, "unattributed_fills": unattributed, "quarantined_fills": quarantined,
-              "discrepancies": discrepancies}
+              "balances": balances, "discrepancies": discrepancies}
     store.append("health", status)
     return status
 
@@ -380,7 +384,52 @@ def _recover_orders(store: Store, client: PolymarketUS, p: dict[str, Any], broke
     return recovered
 
 
-def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any], discrepancies: list[dict[str, Any]]) -> None:
+DEPOSIT_FAILED = ("FAILED", "CANCELED", "CANCELLED", "REJECTED", "RETURNED", "REVERSED")
+
+
+def _booked(store: Store, source: str) -> Decimal | None:
+    row = store.db.execute("SELECT data FROM events WHERE source_key=?", (source,)).fetchone()
+    return decimal(json.loads(row["data"])["cash_delta"]) if row else None
+
+
+def _advance(store: Store, p: dict[str, Any], activity: dict[str, Any], body: dict[str, Any],
+             discrepancies: list[dict[str, Any]]) -> tuple[bool, Decimal]:
+    """A deposit Polymarket US advanced as buying power before the bank transfer settled.
+
+    The advance is booked as cash while the deposit is pending, so the trader can spend it;
+    on completion only the remainder is booked, and a failed transfer books the advance
+    back out and is reported (Polymarket takes it back). Returns whether the activity was
+    handled here, and the advance still pending (cash the balance holds in reserve)."""
+    status = body.get("status") or ""
+    txid = body.get("transactionId")
+    source = f"pmus-advance:{txid}"
+    booked = _booked(store, source)
+    advanced = sum((amount(t.get("advancedAmount")) or Decimal(0) for t in body.get("transactions") or []), Decimal(0))
+    at = body.get("createTime") or body.get("updateTime")
+    if status.endswith("PENDING"):
+        if booked is None and advanced > 0 and at:
+            store.append("transaction", {"reason": "funding", "purpose": "advanced_deposit", "venue": "polymarket_us",
+                         "cash_delta": str(advanced), "external_delta": str(advanced), "fee": "0", "legs": [],
+                         "evidence": activity}, p["id"], source=source, at=at)
+            booked = advanced
+        return True, booked or Decimal(0)
+    if booked is None:
+        return False, Decimal(0)
+    if status.endswith(DEPOSIT_FAILED):
+        store.append("transaction", {"reason": "funding", "purpose": "advanced_deposit_reversed",
+                     "venue": "polymarket_us", "cash_delta": str(-booked), "external_delta": str(-booked), "fee": "0",
+                     "legs": [], "evidence": activity}, p["id"], source=source + ":reversed",
+                     at=body.get("updateTime") or at)
+        discrepancies.append({"portfolio": p["id"], "kind": "deposit_failed", "transaction": txid,
+                              "advanced": str(booked), "status": status})
+        return True, Decimal(0)
+    return False, Decimal(0)
+
+
+def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any],
+                     discrepancies: list[dict[str, Any]]) -> Decimal:
+    """Book funding and rebates; returns advanced deposits still pending."""
+    pending_advances = Decimal(0)
     for activity in client.activities():
         kind = activity.get("type", "")
         if kind not in FUNDING_ACTIVITIES and kind != "ACTIVITY_TYPE_TAKER_FEE_REBATE":
@@ -390,6 +439,11 @@ def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any], disc
         value = amount(body.get("amount"))
         if at and at < p["created_at"]:
             continue
+        if FUNDING_ACTIVITIES.get(kind) == 1:
+            handled, pending = _advance(store, p, activity, body, discrepancies)
+            pending_advances += pending
+            if handled:
+                continue
         if not at or value is None or body.get("status") != "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED":
             if kind == "ACTIVITY_TYPE_TAKER_FEE_REBATE" or (body.get("status") or "").endswith("COMPLETED"):
                 discrepancies.append({"portfolio": p["id"], "kind": "unbooked_activity", "raw": activity})
@@ -400,9 +454,12 @@ def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any], disc
                          "fee": "0", "legs": [], "evidence": activity}, p["id"], source=source, at=at)
         else:
             cash = abs(value) * FUNDING_ACTIVITIES[kind]
+            if cash > 0:  # a deposit whose advance was booked while pending: only the rest is new
+                cash -= _booked(store, f"pmus-advance:{body.get('transactionId')}") or Decimal(0)
             store.append("transaction", {"reason": "funding", "venue": "polymarket_us", "cash_delta": str(cash),
                          "external_delta": str(cash), "fee": "0", "legs": [], "evidence": activity},
                          p["id"], source=source, at=at)
+    return pending_advances
 
 
 def _settle(store: Store, client: PolymarketUS, p: dict[str, Any]) -> int:
@@ -472,15 +529,24 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
     if mapped and not client.authenticated:
         raise ValueError("a live portfolio is mapped to Polymarket US: the monitor needs its credentials")
     settled, recovered = _settle_paper(store, client), 0
+    balances: list[dict[str, Any]] = []
     for p in mapped:
         broker = Broker(store, p["id"], run_id="polymarket-us-monitor")
         recovered += _recover_orders(store, client, p, broker, discrepancies)
-        _book_activities(store, client, p, discrepancies)
+        advanced = _book_activities(store, client, p, discrepancies)
         settled += _settle(store, client, p)
         state = portfolio_state(store, p["id"])
         balance = client.balance()
-        observed_cash = decimal(balance["currentBalance"])
+        # A deposit still clearing is in currentBalance (and its buying power) but held as
+        # depositReservation. The part Polymarket advanced is booked as cash already; any
+        # rest is booked once the deposit completes, so until then it's left out.
+        observed_cash = (decimal(balance["currentBalance"]) - decimal(balance.get("depositReservation") or 0)
+                         + advanced)
         recorded = state.venue_cash.get("polymarket_us", Decimal(0))
+        balances.append({"portfolio": p["id"], "cash": str(observed_cash), "recorded": str(recorded),
+                         "clearing_deposits": str(decimal(balance.get("depositReservation") or 0)),
+                         "advanced": str(advanced),
+                         "buying_power": str(balance.get("buyingPower", "0"))})
         if observed_cash != recorded:
             discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "venue": "polymarket_us",
                                   "recorded": str(recorded), "observed": str(observed_cash)})
@@ -498,7 +564,7 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
         store.append("account_evidence", {"kind": "polymarket_us_snapshot", "balance": balance}, p["id"])
     status = {"component": "polymarket_us", "status": "healthy" if not discrepancies else "degraded",
               "portfolios": [p["id"] for p in mapped], "recovered_orders": recovered, "settled_lots": settled,
-              "discrepancies": discrepancies}
+              "balances": balances, "discrepancies": discrepancies}
     store.append("health", status)
     return status
 

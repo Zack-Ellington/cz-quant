@@ -86,7 +86,6 @@ class Config:
     min_edge: float = 0.01  # per $1 set: margin for rule and settlement risk between venues
     max_apr: float | None = None
     require_cross: bool = True  # baskets need a leg on each venue
-    min_lead_minutes: float = 10.0  # pre-game only: skip games starting sooner
     resolution_hours: float = 6.0  # game length plus Polymarket's resolution delay, for the hurdle
     unwind_slippage: float = 0.05
     kalshi_latency: float = 0.30
@@ -442,8 +441,6 @@ class Engine:
         start = pair.poly.start.timestamp() if pair.poly.start else None
         if start is None:
             return None, "no_start_time"
-        if start - now < self.cfg.min_lead_minutes * 60:
-            return None, "too_close_to_start"
         multiplier = self.fees.get(league)
         if multiplier is None:
             return None, "unsupported_kalshi_fees"
@@ -465,7 +462,8 @@ class Engine:
                 return None, "no_book"
             offers[kticker] = [kalshi_offer(kticker, kticker, kbooks[kticker], multiplier),
                                polymarket_offer(kticker, ticker(token), pbooks[token], market["fee_schedule"])]
-        days = (start + self.cfg.resolution_hours * 3600 - now) / 86400
+        # Games in progress trade too; past the expected payout, hold for at least an hour.
+        days = max(start + self.cfg.resolution_hours * 3600 - now, 3600) / 86400
         cap = max_capital if max_capital is not None else self.limits(pair.game.event)
         return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, max(cap, Decimal(0)),
                     Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr,
@@ -730,7 +728,6 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-apr", type=lambda v: None if v == "none" else float(v), default=d.max_apr)
     p.add_argument("--any-venue", action="store_true",
                    help="also trade baskets with every leg on one venue (default: a leg on each)")
-    p.add_argument("--min-lead", type=float, default=d.min_lead_minutes, help="skip games starting within this many minutes (10)")
     p.add_argument("--resolution-hours", type=float, default=d.resolution_hours,
                    help="hours from the start to payout, for the hurdle (6)")
     p.add_argument("--unwind-slippage", type=float, default=d.unwind_slippage,
@@ -765,7 +762,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = Config(leagues=tuple(x for x in a.leagues.split(",") if x), interval_seconds=a.interval,
                  discover_minutes=a.discover, max_event_frac=a.max_event_frac, max_total_frac=a.max_total_frac,
                  max_open_events=a.max_open_events, max_sets=a.max_sets, risk_free=a.risk_free, min_net=a.min_net,
-                 min_edge=a.min_edge, max_apr=a.max_apr, require_cross=not a.any_venue, min_lead_minutes=a.min_lead,
+                 min_edge=a.min_edge, max_apr=a.max_apr, require_cross=not a.any_venue,
                  resolution_hours=a.resolution_hours, unwind_slippage=a.unwind_slippage,
                  kalshi_latency=a.kalshi_latency, polymarket_latency=a.polymarket_latency, cooldown=a.cooldown,
                  duration_minutes=a.duration, markets=not a.no_markets,

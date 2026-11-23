@@ -67,7 +67,11 @@ def test_allocation_moves_recorded_cash_and_the_group_reconciles(tmp_path):
         allocate(store, "a", "b", D("61"))
     buy(store, "b")
     api.cents, api.positions = 9600, [{"ticker": "M", "position_fp": "10"}]
-    assert account_pass(store, api)["status"] == "healthy"
+    status = account_pass(store, api)
+    assert status["status"] == "healthy"
+    [balance] = status["balances"]
+    assert (balance["subaccount"], balance["cash"], balance["positions"]) == (0, "96", 1)
+    assert {k: D(v) for k, v in balance["recorded"].items()} == {"a": 60, "b": 36}
     api.cents = 9500
     status = account_pass(store, api)
     assert {d["portfolio"] for d in status["discrepancies"] if d["kind"] == "cash_mismatch"} == {"a", "b"}
