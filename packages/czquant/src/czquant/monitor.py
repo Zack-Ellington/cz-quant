@@ -20,6 +20,7 @@ from .paper import update_consumed
 from .polymarket import Polymarket, is_polymarket
 from .polymarket_us import PolymarketUS, amount, is_polymarket_us, position_quantity, slug_of
 from .sportsbook import settle_lots
+from .operator import account_of, active_live, kalshi_cash, kalshi_positions
 from .store import Store, decimal, utc
 
 log = logging.getLogger(__name__)
@@ -172,7 +173,11 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         epoch = datetime.fromisoformat(cutoff.replace("Z", "+00:00")).timestamp() if isinstance(cutoff, str) else float(cutoff)
         if since < epoch:
             fills += list(api.pages("/historical/fills", "fills", min_ts=since, limit=1000))
-    live = [p for p in store.portfolios() if p["mode"] == "live"]
+    live = active_live(store)
+    # Portfolios sharing one Kalshi account are reconciled against it together.
+    groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for p in live:
+        groups.setdefault(account_of(p["metadata"]), []).append(p)
     # Recover venue IDs after lost acknowledgements before joining fills.
     for p in live:
         for order in api.pages("/portfolio/orders", "orders", **scope(p["metadata"]), limit=1000):
@@ -235,59 +240,66 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                 if transfer.get("exchange_index",0) != p["metadata"].get("exchange_index",0):
                     continue
                 direction = int(transfer["to_subaccount"]==sub)-int(transfer["from_subaccount"]==sub)
-                if direction:
+                if direction and len(groups[account_of(p["metadata"])]) > 1:
+                    # Whose share of a shared account moved is the operator's call: `allocate`.
+                    discrepancies.append({"portfolio": p["id"], "kind": "shared_account_transfer",
+                                          "transfer": transfer.get("transfer_id")})
+                elif direction:
                     cash = direction*decimal(transfer["amount_cents"])/100
                     store.append("transaction", {"reason":"funding","cash_delta":str(cash),
                         "external_delta":str(cash),"fee":"0","legs":[],"evidence":transfer},p["id"],
                         source=f"transfer:{transfer['exchange_index']}:{transfer['transfer_id']}:{sub}",at=at)
-    for p in store.portfolios():
-        if p["mode"] != "live":
-            continue
-        sub = p["metadata"]["subaccount"]
-        for settlement in api.pages("/portfolio/settlements","settlements",**scope(p["metadata"]),min_ts=since,limit=1000):
+    for (sub, _), group in groups.items():
+        lead = group[0]["metadata"]
+        ids = [p["id"] for p in group]
+        for settlement in api.pages("/portfolio/settlements","settlements",**scope(lead),min_ts=since,limit=1000):
             source = f"settlement:{settlement.get('exchange_index',0)}:{sub}:{settlement['ticker']}:{settlement['settled_time']}"
             if store.db.execute("SELECT 1 FROM events WHERE source_key=?",(source,)).fetchone():
                 continue
-            state = portfolio_state(store, p["id"])
-            lots = [lot for lot in state.lots.values() if lot["market"]==settlement["ticker"]]
+            lots = [(p["id"], lot) for p in group for lot in portfolio_state(store, p["id"]).lots.values()
+                    if lot["market"]==settlement["ticker"]]
+            holders = sorted({pid for pid, _ in lots}) or ids
             yes = decimal(settlement['value'])/100 if settlement.get('value') is not None else (Decimal(1) if settlement['market_result']=='yes' else Decimal(0))
-            expected = sum((lot['quantity']*(yes if lot['side']=='yes' else 1-yes) for lot in lots),Decimal(0))
+            expected = sum((lot['quantity']*(yes if lot['side']=='yes' else 1-yes) for _, lot in lots),Decimal(0))
             revenue = decimal(settlement['revenue'])/100
-            quantities = {side:sum((l['quantity'] for l in lots if l['side']==side),Decimal(0)) for side in ('yes','no')}
+            quantities = {side:sum((l['quantity'] for _, l in lots if l['side']==side),Decimal(0)) for side in ('yes','no')}
             if expected != revenue or any(quantities[side]!=decimal(settlement[side+'_count_fp']) for side in ('yes','no')):
-                discrepancies.append({'portfolio':p['id'],'kind':'unresolved_settlement','market':settlement['ticker']})
+                discrepancies.extend({'portfolio':pid,'kind':'unresolved_settlement','market':settlement['ticker']} for pid in holders)
                 continue
             with store.transaction():
-                for lot in lots:
+                for pid, lot in lots:
                     payout = yes if lot['side']=='yes' else 1-yes
                     store.append('transaction',{'reason':'settlement','cash_delta':str(lot['quantity']*payout),
                         'fee':'0','context':lot['context'],'evidence':settlement,
                         'legs':[{'market':lot['market'],'side':lot['side'],'quantity_delta':str(-lot['quantity']),
-                                 'price':str(payout),'lot_id':lot['record_id']}]},p['id'],
+                                 'price':str(payout),'lot_id':lot['record_id']}]},pid,
                         source=source+':'+lot['record_id'],at=settlement['settled_time'])
-                store.append('account_evidence',{'kind':'settlement','raw':settlement},p['id'],source=source)
-        actual = api.get("/portfolio/balance", scope(p["metadata"]))
-        state = portfolio_state(store, p["id"])
+                store.append('account_evidence',{'kind':'settlement','raw':settlement},
+                             holders[0] if len(holders)==1 else None,source=source)
+        actual = api.get("/portfolio/balance", scope(lead))
         cash = decimal(actual["balance_dollars"]) if "balance_dollars" in actual else decimal(actual["balance"]) / 100
-        observed_positions = list(api.pages("/portfolio/positions", "market_positions", **scope(p["metadata"]), limit=1000))
-        expected_positions = {}
-        for lot in state.lots.values():
-            if venue_of(lot["market"]) != "kalshi":
-                continue  # another venue's lots are reconciled by that venue's monitor
-            expected_positions[lot["market"]] = expected_positions.get(lot["market"],Decimal(0)) + lot["quantity"]*(1 if lot["side"]=="yes" else -1)
+        observed_positions = list(api.pages("/portfolio/positions", "market_positions", **scope(lead), limit=1000))
+        # Another venue's lots are reconciled by that venue's monitor.
+        expected_positions = kalshi_positions(store, group)
         actual_positions = {row["ticker"]:decimal(row["position_fp"]) for row in observed_positions if decimal(row["position_fp"])}
-        if actual_positions != {k:v for k,v in expected_positions.items() if v}:
-            discrepancies.append({"portfolio":p["id"],"kind":"inventory_mismatch"})
+        wrong = sorted(m for m in set(actual_positions) | set(expected_positions)
+                       if actual_positions.get(m) != expected_positions.get(m))
+        if wrong:
+            owners = sorted({p["id"] for p in group for lot in portfolio_state(store, p["id"]).lots.values()
+                             if lot["market"] in wrong}) or ids
+            discrepancies.extend({"portfolio": pid, "kind": "inventory_mismatch", "markets": wrong} for pid in owners)
         # Unknown collateral/transfer effects are never converted to invented profit.
-        recorded = state.venue_cash.get("kalshi", Decimal(0)) if p["metadata"].get("venues") else state.cash
+        # On a shared account a cash difference can't be attributed: every sharer sees it.
+        recorded = sum((kalshi_cash(store, p) for p in group), Decimal(0))
         if cash != recorded:
-            discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "venue": "kalshi",
-                                  "recorded": str(recorded), "observed": str(cash)})
-        for order in api.pages("/portfolio/orders", "orders", **scope(p["metadata"]), limit=1000):
-            row = store.db.execute("SELECT id,filled FROM orders WHERE venue_id=?", (order["order_id"],)).fetchone()
+            discrepancies.extend({"portfolio": pid, "kind": "cash_mismatch", "venue": "kalshi",
+                                  "recorded": str(recorded), "observed": str(cash),
+                                  **({"shared_with": ids} if len(ids) > 1 else {})} for pid in ids)
+        for order in api.pages("/portfolio/orders", "orders", **scope(lead), limit=1000):
+            row = store.db.execute("SELECT id,filled,portfolio_id FROM orders WHERE venue_id=?", (order["order_id"],)).fetchone()
             if row and order.get("status") in ("canceled", "executed"):
                 if decimal(order.get("fill_count_fp", "0")) == decimal(row["filled"]):
-                    Broker(store, p["id"]).finish(row["id"], order["status"])
+                    Broker(store, row["portfolio_id"]).finish(row["id"], order["status"])
     store.db.execute("INSERT OR REPLACE INTO checkpoints VALUES('account',?)", (str(watermark),))
     status = {"component": "account", "status": "healthy" if not discrepancies else "degraded",
               "mapped_fills": mapped, "unattributed_fills": unattributed, "quarantined_fills": quarantined,
@@ -456,8 +468,7 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
        a discrepancy (never booked as profit), and the trader halts on one.
     """
     discrepancies: list[dict[str, Any]] = []
-    mapped = [p for p in store.portfolios()
-              if p["mode"] == "live" and "polymarket_us" in (p["metadata"].get("venues") or [])]
+    mapped = [p for p in active_live(store) if "polymarket_us" in (p["metadata"].get("venues") or [])]
     if mapped and not client.authenticated:
         raise ValueError("a live portfolio is mapped to Polymarket US: the monitor needs its credentials")
     settled, recovered = _settle_paper(store, client), 0

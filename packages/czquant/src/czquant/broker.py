@@ -85,6 +85,8 @@ class Broker:
         quantity, price = decimal(order["count"]), decimal(order["price"])
         if quantity <= 0 or not 0 <= price <= 1:
             raise ValueError("invalid quantity or price")
+        if self.metadata.get("retired_at"):
+            raise ValueError(f"portfolio {self.portfolio} is retired")
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
         if self.mode == "live" and venue_of(order["ticker"]) not in self.venues:
             raise ValueError(f"portfolio {self.portfolio} has no {venue_of(order['ticker'])} account")

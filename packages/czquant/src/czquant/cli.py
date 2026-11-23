@@ -48,13 +48,25 @@ def main() -> None:
     mapping.add_argument('--subaccount',type=int,required=True)
     mapping.add_argument('--exchange-index',type=int,default=0)
     mapping.add_argument('--primary-account', action='store_true',
-                         help='with --subaccount 0: dedicate the primary account to this portfolio')
-    cross = commands.add_parser('map-live-cross', help='map a Kalshi subaccount and the Polymarket US account to one live portfolio')
+                         help='with --subaccount 0: trade the primary account from this portfolio')
+    mapping.add_argument('--share-account', action='store_true', help='join a Kalshi account other live portfolios already trade (opens with the cash none of them records)')
+    cross = commands.add_parser('map-live-cross', help='map a Kalshi subaccount and the Polymarket US account to one live '
+                                'portfolio, or move an existing live portfolio to another Kalshi account')
     cross.add_argument('id')
     cross.add_argument('--subaccount', type=int, required=True)
     cross.add_argument('--exchange-index', type=int, default=0)
     cross.add_argument('--primary-account', action='store_true',
-                       help='with --subaccount 0: dedicate the primary account to this portfolio')
+                       help='with --subaccount 0: trade the primary account from this portfolio')
+    cross.add_argument('--share-account', action='store_true', help='join a Kalshi account other live portfolios already trade (opens with the cash none of them records)')
+    retire = commands.add_parser('retire-live', help='retire a live portfolio: settle, reconcile and release its cash')
+    retire.add_argument('id')
+    retire.add_argument('--book-difference', action='store_true',
+                        help='book an unexplained Kalshi cash difference as an external adjustment')
+    retire.add_argument('--to', help='on a shared account: the portfolio that receives its Kalshi cash')
+    allocation = commands.add_parser('allocate', help='move recorded Kalshi cash between portfolios on one account')
+    allocation.add_argument('--from', dest='source', required=True)
+    allocation.add_argument('--to', dest='target', required=True)
+    allocation.add_argument('--dollars', required=True)
     commands.add_parser('check-polymarket-us', help='authenticated read of the Polymarket US balance (no orders)')
     commands.add_parser('create-subaccount')
     transfer = commands.add_parser('transfer')
@@ -95,9 +107,23 @@ def main() -> None:
         from .kalshi import Kalshi
         from .operator import map_live_cross
         from .polymarket_us import PolymarketUS
-        map_live_cross(store, Kalshi(), PolymarketUS.from_env(), args.id, args.subaccount,
-                       args.exchange_index, args.primary_account)
-        print(f'Mapped {args.id} to Kalshi subaccount {args.subaccount} and the Polymarket US account.')
+        existed = any(p['id'] == args.id for p in store.portfolios())
+        map_live_cross(store, Kalshi(), PolymarketUS.from_env(authenticated=not existed), args.id, args.subaccount,
+                       args.exchange_index, args.primary_account, args.share_account)
+        from .broker import Broker
+        cash = Broker(store, args.id).state().venue_cash
+        print(f'{"Moved" if existed else "Mapped"} {args.id} to Kalshi subaccount {args.subaccount}'
+              f'{"" if existed else " and the Polymarket US account"}. Recorded cash: '
+              + ', '.join(f'{venue} ${amount}' for venue, amount in cash.items()))
+    elif args.command == 'retire-live':
+        from .kalshi import Kalshi
+        from .operator import retire_live
+        print(encode(retire_live(store, Kalshi(), args.id, args.book_difference, args.to)))
+    elif args.command == 'allocate':
+        from .operator import allocate
+        from .store import decimal
+        allocate(store, args.source, args.target, decimal(args.dollars))
+        print(f'Allocated ${args.dollars} of Kalshi cash from {args.source} to {args.target}.')
     elif args.command == 'check-polymarket-us':
         from .polymarket_us import PolymarketUS
         client = PolymarketUS.from_env()
@@ -112,7 +138,7 @@ def main() -> None:
         from .operator import map_live, transfer
         api = Kalshi()
         if args.command == 'map-live':
-            map_live(store,api,args.id,args.subaccount,args.exchange_index,args.primary_account)
+            map_live(store,api,args.id,args.subaccount,args.exchange_index,args.primary_account,args.share_account)
         elif args.command == 'create-subaccount':
             print(encode(api.request('POST','/portfolio/subaccounts',{})))
         else:

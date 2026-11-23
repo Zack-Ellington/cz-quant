@@ -301,6 +301,24 @@ free cash pays its legs.
    It opens the portfolio at each account's current cash. From then on, nothing else
    should trade either account: the monitors flag anything they can't attribute.
 
+   An account without subaccount access trades from the primary account instead:
+   `--subaccount 0 --primary-account`. Running the command again on an existing live
+   portfolio with nothing open on Kalshi moves its Kalshi side to the named account.
+
+   One Kalshi account can back several live portfolios. Add `--share-account` to map
+   beside the portfolios already there. The new portfolio opens with the cash none of
+   them records, and `czquant allocate --from A --to B --dollars N` moves recorded cash
+   between them. The account monitor reconciles the account against their combined
+   ledger. A cash difference on a shared account halts every portfolio on it. A
+   position difference halts only the portfolios holding that market.
+
+   `czquant retire-live <id>` frees an account a finished portfolio held. It books
+   that portfolio's settled Kalshi lots from Kalshi's records and refuses if any are
+   still open. It also refuses on an unexplained cash difference unless you pass
+   `--book-difference`, which books the difference as an external adjustment, never
+   as profit. Then it releases the cash to the account; with `--to <id>`, it hands the
+   cash to a portfolio sharing the account.
+
 3. Run both account monitors in their own shells:
 
    ```bash
