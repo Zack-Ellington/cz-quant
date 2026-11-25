@@ -5,6 +5,7 @@ from decimal import Decimal as D
 
 import pytest
 from czquant import Broker, Store
+from czquant.accounting import combine_states
 from czquant.polymarket import Polymarket
 
 from trader import Config, Engine
@@ -83,11 +84,15 @@ class FakePoly(Polymarket):
 @pytest.fixture
 def engine_for(tmp_path, monkeypatch):
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_PORTFOLIO", "pm")
-    Store(tmp_path).create("pm", "1000")
+    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "k")
+    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm")
+    store = Store(tmp_path)
+    store.create_pool("k", "kalshi", "600")
+    store.create_pool("pm", "polymarket", "400")
+    store.close()
 
     def build(kalshi=None, poly=None):
-        return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0),
+        return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None),
                       kalshi or FakeKalshi(), poly or FakePoly(), LEAGUES, {"pairs": {}, "blocked": set()}, "test")
     return build
 
@@ -95,7 +100,9 @@ def engine_for(tmp_path, monkeypatch):
 def test_a_scan_pairs_prices_and_fills_a_cross_venue_basket(engine_for):
     engine = engine_for()
     engine.step()
-    state = Broker(engine.store, "pm").state()
+    assert engine.kalshi_broker.venue == "kalshi" and engine.poly_broker.venue == "polymarket"
+    assert engine.kalshi_broker.run_id == engine.poly_broker.run_id == engine.run_id
+    state = combine_states([b.state() for b in engine.brokers.values()])
     held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
     assert held == {f"{EVENT}-BOS": 100, "PM:tok-sac": 100}  # Boston on Kalshi, Sacramento on Polymarket
     record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
@@ -112,7 +119,7 @@ def test_a_short_first_leg_sizes_the_next(engine_for):
     basket, pair, league = candidates[0]
     poly.depth = "25"  # by the time the order lands, only 25 are left
     engine.execute(basket, pair, league)
-    state = Broker(engine.store, "pm").state()
+    state = combine_states([b.state() for b in engine.brokers.values()])
     held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
     assert held == {f"{EVENT}-BOS": 25, "PM:tok-sac": 25}  # Kalshi was asked for 25, not 40
 
@@ -120,7 +127,7 @@ def test_a_short_first_leg_sizes_the_next(engine_for):
 def test_no_basket_without_an_edge(engine_for):
     engine = engine_for(kalshi=FakeKalshi({"BOS": "0.66", "SAC": "0.42"}))
     engine.step()
-    assert not Broker(engine.store, "pm").state().lots
+    assert not combine_states([b.state() for b in engine.brokers.values()]).lots
     scan = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "scan_complete"][-1]
     assert scan["counts"]["ok"] == 1 and scan["candidates"] == 0
 
@@ -143,7 +150,7 @@ def test_a_short_later_leg_has_the_extras_sold_back(engine_for):
     basket, pair, league = engine.scan()[0]
     kalshi.fill_depth = "10"  # priced at 100, but when the Kalshi leg lands only 10 are left
     engine.execute(basket, pair, league)
-    state = Broker(engine.store, "pm").state()
+    state = combine_states([b.state() for b in engine.brokers.values()])
     held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
     assert held == {f"{EVENT}-BOS": 10, "PM:tok-sac": 10}  # 30 Sacramento tokens sold back at 0.36
     record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
@@ -157,3 +164,42 @@ def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         trader.main(["--once"])
     assert "STRATEGY_RUNS_DIR" in capsys.readouterr().err
+
+
+def test_restart_recovers_both_venues_without_refunding(engine_for):
+    engine = engine_for()
+    engine.step()
+    cash, positions = engine.cash, engine.positions
+    restarted = engine_for()
+    assert restarted.cash == cash and restarted.positions == positions
+    assert restarted.kalshi_broker.available + restarted.poly_broker.available == cash
+    assert restarted.run_id != engine.run_id
+    assert len(restarted.kalshi_broker.state().lots) == len(restarted.poly_broker.state().lots) == 1
+
+
+def test_paper_rejects_a_basket_when_only_the_other_venue_has_enough_cash(engine_for):
+    engine = engine_for()
+    engine.store.append('transaction', {'reason': 'funding', 'cash_delta': '-390',
+                                      'external_delta': '-390', 'legs': []}, engine.poly_broker.pool_id)
+    engine.step()
+    assert engine.kalshi_broker.available == 600 and engine.poly_broker.available == 10
+    assert not engine.store.events(kinds=('order',))
+
+
+def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch):
+    import trader
+    monkeypatch.setenv('STRATEGY_RUNS_DIR', str(tmp_path))
+    configs = []
+
+    class Captured(Exception):
+        pass
+
+    def capture(config):
+        configs.append(config)
+        raise Captured()
+
+    monkeypatch.setattr(trader, 'Engine', capture)
+    for args in (['--once'], ['--live', '--once']):
+        with pytest.raises(Captured):
+            trader.main(args)
+    assert [(c.max_sets, c.max_basket_dollars, c.max_total_dollars) for c in configs] == [(20, 25, 100)] * 2

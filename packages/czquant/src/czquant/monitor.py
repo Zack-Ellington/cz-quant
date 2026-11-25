@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -15,11 +16,9 @@ from .accounting import portfolio_state, replay, venue_of
 from .broker import PRIMARY, Broker, scope
 from .kalshi import Kalshi
 from .book import levels
-from .draftkings import DraftKings, is_sportsbook, parse_ticker
 from .paper import update_consumed
 from .polymarket import Polymarket, is_polymarket
 from .polymarket_us import PolymarketUS, amount, is_polymarket_us, position_quantity, slug_of
-from .sportsbook import settle_lots
 from .operator import account_of, active_live, kalshi_cash, kalshi_positions
 from .store import Store, decimal, utc
 
@@ -27,15 +26,16 @@ log = logging.getLogger(__name__)
 
 
 def market_pass(store: Store, api: Any) -> dict[str, Any]:
-    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
+    portfolios = store.pools("kalshi")
+    paper = {p["id"] for p in portfolios if p["mode"] == "paper"}
     states = {p["id"]: replay(store.events(p["id"], kinds=("transaction", "correction"))) for p in portfolios}
     tickers = {lot["market"] for state in states.values() for lot in state.lots.values()}
     for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
         tickers.add(json.loads(row[0])["ticker"])
     for p in portfolios:
         tickers.update(p["metadata"].get("watch", []))
-    # Sportsbook selections and Polymarket tokens have their own readers and monitors.
-    tickers = {t for t in tickers if not is_sportsbook(t) and not is_polymarket(t)}
+    # Collect only this venue; other or retired namespaces are never sent to Kalshi.
+    tickers = {t for t in tickers if venue_of(t) == "kalshi"}
     if not tickers:
         # A real public-data probe, even for no-trade portfolios.
         probe = api.get("/markets", {"limit": 1, "status": "open"}).get("markets", [])
@@ -55,6 +55,8 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
             payout = market.get("settlement_value_dollars")
             if final and payout is not None:
                 for portfolio, state in states.items():
+                    if portfolio not in paper:
+                        continue
                     broker = Broker(store, portfolio, run_id="paper-account-monitor")
                     for lot_id, lot in state.lots.items():
                         if lot["market"] == ticker:
@@ -66,6 +68,8 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
             errors.append({"market": ticker, "reason": type(exc).__name__})
             log.exception("market observation failed for %s", ticker)
     for p in portfolios:
+        if p["id"] not in paper:
+            continue
         state = replay(store.events(p["id"], kinds=("transaction", "correction")))
         store.append("snapshot", {"source": "paper_replay", "cash": state.cash, "realized": state.realized,
             "reserved": store.reserved(p["id"]), "lots": list(state.lots.values())}, p["id"])
@@ -73,83 +77,6 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
               "markets": len(tickers), "errors": errors}
     store.append("health", status)
     return status
-
-
-def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
-    """Reference odds and paper settlement for held or pending sportsbook selections.
-
-    Odds cost credits, so this pass never buys them: it marks held selections from
-    the newest read any process cached (the trader's), dated when that read was
-    made, so a mark is as stale as it really is. It records a mark only when a newer
-    read or a status change arrives. Results are the one paid read: once per league
-    every `results_minutes`, only for games that started at least `settle_after_hours`
-    ago, all of a league's events in one call. Finalized selections settle every
-    paper lot: 1 or 0, or the lot's own price on a void, which returns the stake.
-    """
-    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
-    tickers = {lot["market"] for p in portfolios
-               for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
-    for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
-        tickers.add(json.loads(row[0])["ticker"])
-    for p in portfolios:
-        tickers.update(p["metadata"].get("watch", []))
-    tickers = {t for t in tickers if is_sportsbook(t)}
-    errors: list[dict[str, Any]] = []
-    now = time.time()
-    due: set[str] = set()
-    for ticker in tickers:
-        parts = parse_ticker(ticker)
-        if now - book.results_checked.get(parts["league"], -1e18) < book.results_minutes * 60:
-            continue
-        start = _start(store, book, ticker)
-        if start is not None and now - start >= book.settle_after_hours * 3600:
-            due.add(parts["event"])
-    try:
-        markets = book.markets(sorted(tickers), results_for=due, fetch=False) if tickers else {}
-        for ticker in tickers:
-            if parse_ticker(ticker)["event"] in due:
-                book.results_checked[parse_ticker(ticker)["league"]] = now
-    except Exception as exc:
-        log.exception("sportsbook read failed")
-        markets = {}
-        errors.append({"reason": type(exc).__name__, "detail": str(exc)[:300]})
-    settled = 0
-    for ticker in sorted(tickers):
-        if ticker not in markets:
-            if not errors:
-                errors.append({"market": ticker, "reason": "missing"})
-            continue
-        market, raw = markets[ticker]
-        key = (market.get("fetched_at"), market["status"])
-        if market["status"] == "finalized" or book.last_marked.get(ticker) != key:
-            observed = utc()
-            # Date the mark by its read, not by this pass, so report staleness rules apply honestly.
-            at = market.get("fetched_at") if market["status"] != "finalized" and market.get("fetched_at") else observed
-            store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=at)
-            book.last_marked[ticker] = key
-        if market["status"] == "finalized":
-            settled += settle_lots(store, ticker, market, {"market": market, "observed_at": utc()},
-                                   "sportsbook-monitor")
-        elif market["status"] == "closed":
-            errors.append({"market": ticker, "reason": "awaiting_result"})
-    status = {"component": "draftkings", "source": book.source.name,
-              "status": "healthy" if not errors else "degraded", "markets": len(tickers),
-              "settled_lots": settled, "results_checked": sorted(due), "credits_remaining": book.credits(),
-              "errors": errors}
-    store.append("health", status)
-    return status
-
-
-def _start(store: Store, book: DraftKings, ticker: str) -> float | None:
-    """A selection's start time: from the newest cached read, else its last recorded mark."""
-    parts = parse_ticker(ticker)
-    selection = next((s for s in book.selections(parts["league"], fetch=False) if s.ticker == ticker), None)
-    if selection is not None:
-        return datetime.fromisoformat(selection.start).timestamp()
-    row = store.db.execute("SELECT json_extract(data,'$.market.start') FROM events WHERE type='market' AND "
-                           "json_extract(data,'$.ticker')=? AND json_extract(data,'$.market.start') IS NOT NULL "
-                           "ORDER BY sequence DESC LIMIT 1", (ticker,)).fetchone()
-    return datetime.fromisoformat(row[0]).timestamp() if row else None
 
 
 def fill_time(fill: dict[str, Any]) -> str:
@@ -173,7 +100,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         epoch = datetime.fromisoformat(cutoff.replace("Z", "+00:00")).timestamp() if isinstance(cutoff, str) else float(cutoff)
         if since < epoch:
             fills += list(api.pages("/historical/fills", "fills", min_ts=since, limit=1000))
-    live = active_live(store)
+    live = [p for p in active_live(store) if p["venue"] == "kalshi"]
     # Portfolios sharing one Kalshi account are reconciled against it together.
     groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
     for p in live:
@@ -315,7 +242,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
 def polymarket_pass(store: Store, client: Polymarket) -> dict[str, Any]:
     """Mark every Polymarket token a paper portfolio holds or watches, and settle the
     lots of any whose result is final. Public reads only: no credentials."""
-    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
+    portfolios = [p for p in store.pools("polymarket") if p["mode"] == "paper"]
     tickers = {lot["market"] for p in portfolios
                for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
     for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
@@ -333,8 +260,13 @@ def polymarket_pass(store: Store, client: Polymarket) -> dict[str, Any]:
             with store.transaction():
                 update_consumed(store, ticker, levels(raw), time.time())
             if market["status"] == "finalized":
-                settled += settle_lots(store, ticker, market, {"market": market, "observed_at": observed},
-                                       "paper-polymarket-monitor")
+                for p in portfolios:
+                    broker = Broker(store, p["id"], venue="polymarket", run_id="paper-polymarket-monitor")
+                    for lot_id, lot in list(broker.state().lots.items()):
+                        if lot["market"] == ticker:
+                            broker.settle(lot_id, str(market["settlement_value_dollars"]),
+                                          {"market": market, "observed_at": observed})
+                            settled += 1
         except Exception as exc:
             errors.append({"market": ticker, "reason": type(exc).__name__})
             log.exception("polymarket observation failed for %s", ticker)
@@ -462,26 +394,45 @@ def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any],
     return pending_advances
 
 
-def _settle(store: Store, client: PolymarketUS, p: dict[str, Any]) -> int:
+def _settle(store: Store, client: PolymarketUS, p: dict[str, Any], observed_cash: Decimal,
+            positions: dict[str, Any], evidence: dict[str, Any]) -> int:
+    """Book resolved lots only when account cash and retired inventory support them."""
     settled = 0
-    state = portfolio_state(store, p["id"])
+    state = deepcopy(portfolio_state(store, p["id"]))
+    candidates = []
     for market in sorted({lot["market"] for lot in state.lots.values() if is_polymarket_us(lot["market"])}):
         normalized = client.market(market)
         observed = utc()
-        store.append("market", {"ticker": market, "market": normalized, "book": {}}, at=observed)
+        store.append("market", {"ticker": market, "market": normalized,
+                     "book": client.book(market) if normalized["status"] == "active" else {}}, at=observed)
         if normalized["status"] != "finalized":
             continue
+        if position_quantity(positions.get(slug_of(market), {})):
+            continue
         yes = decimal(normalized["settlement_value_dollars"])
-        with store.transaction():
-            for lot in [lot for lot in portfolio_state(store, p["id"]).lots.values() if lot["market"] == market]:
+        for lot in state.lots.values():
+            if lot["market"] == market:
                 payout = yes if lot["side"] == "yes" else 1 - yes
-                store.append("transaction", {"reason": "settlement", "venue": "polymarket_us",
-                    "cash_delta": str(lot["quantity"] * payout), "fee": "0", "context": lot["context"],
-                    "evidence": {"market": normalized, "observed_at": observed},
-                    "legs": [{"market": market, "side": lot["side"], "quantity_delta": str(-lot["quantity"]),
-                              "price": str(payout), "lot_id": lot["record_id"]}]},
-                    p["id"], source=f"pmus-settlement:{p['id']}:{lot['record_id']}", at=observed)
-                settled += 1
+                candidates.append((lot, payout, normalized, observed))
+    with store.transaction():
+        current = portfolio_state(store, p["id"])
+        # A public outcome alone does not establish an account payout. Unexplained
+        # differences remain reconciliation gaps, including reads racing a new fill.
+        if current.lots != state.lots or current.venue_cash != state.venue_cash:
+            return 0
+        expected = state.venue_cash.get("polymarket_us", Decimal(0))
+        expected += sum((lot["quantity"] * payout for lot, payout, _, _ in candidates), Decimal(0))
+        if expected != observed_cash:
+            return 0
+        for lot, payout, normalized, observed in candidates:
+            market = lot["market"]
+            store.append("transaction", {"reason": "settlement", "venue": "polymarket_us",
+                "cash_delta": str(lot["quantity"] * payout), "fee": "0", "context": lot["context"],
+                "evidence": {"market": normalized, "observed_at": observed, "account": evidence},
+                "legs": [{"market": market, "side": lot["side"], "quantity_delta": str(-lot["quantity"]),
+                          "price": str(payout), "lot_id": lot["record_id"]}]},
+                p["id"], source=f"pmus-settlement:{p['id']}:{lot['record_id']}", at=observed)
+            settled += 1
     return settled
 
 
@@ -489,10 +440,10 @@ def _settle_paper(store: Store, client: PolymarketUS) -> int:
     """Mark the Polymarket US markets paper portfolios hold, and settle their lots once
     a market's settlement is final. Public reads only."""
     settled = 0
-    for p in store.portfolios():
+    for p in store.pools("polymarket_us"):
         if p["mode"] != "paper":
             continue
-        broker = Broker(store, p["id"], run_id="polymarket-us-monitor")
+        broker = Broker(store, p["id"], run_id="polymarket-us-monitor", venue="polymarket_us")
         markets = {lot["market"] for lot in broker.state().lots.values() if is_polymarket_us(lot["market"])}
         for market in sorted(markets):
             normalized = client.market(market)
@@ -519,29 +470,33 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
        looked up, since the venue has no client order ID: it's reported.
     2. Completed deposits and withdrawals after the mapping become funding, and taker
        fee rebates with an amount become rebates. One the monitor can't read is reported.
-    3. Lots in markets whose settlement is final are settled at the settlement price.
-       The venue pays resolutions into the balance automatically.
+    3. Finalized lots settle when authenticated cash and retired positions reconcile
+       with the payout. Public resolution alone does not create live cash.
     4. The account's cash and positions are compared with the ledger. Any difference is
        a discrepancy (never booked as profit), and the trader halts on one.
     """
     discrepancies: list[dict[str, Any]] = []
-    mapped = [p for p in active_live(store) if "polymarket_us" in (p["metadata"].get("venues") or [])]
+    mapped = [p for p in active_live(store) if p["venue"] == "polymarket_us"]
     if mapped and not client.authenticated:
         raise ValueError("a live portfolio is mapped to Polymarket US: the monitor needs its credentials")
     settled, recovered = _settle_paper(store, client), 0
     balances: list[dict[str, Any]] = []
     for p in mapped:
-        broker = Broker(store, p["id"], run_id="polymarket-us-monitor")
+        broker = Broker(store, p["id"], run_id="polymarket-us-monitor", venue="polymarket_us")
         recovered += _recover_orders(store, client, p, broker, discrepancies)
         advanced = _book_activities(store, client, p, discrepancies)
-        settled += _settle(store, client, p)
-        state = portfolio_state(store, p["id"])
         balance = client.balance()
+        positions = client.positions()
+        evidence = {"kind": "polymarket_us_snapshot", "balance": balance, "positions": positions,
+                    "observed_at": utc()}
+        store.append("account_evidence", evidence, p["id"])
         # A deposit still clearing is in currentBalance (and its buying power) but held as
         # depositReservation. The part Polymarket advanced is booked as cash already; any
         # rest is booked once the deposit completes, so until then it's left out.
         observed_cash = (decimal(balance["currentBalance"]) - decimal(balance.get("depositReservation") or 0)
                          + advanced)
+        settled += _settle(store, client, p, observed_cash, positions, evidence)
+        state = portfolio_state(store, p["id"])
         recorded = state.venue_cash.get("polymarket_us", Decimal(0))
         balances.append({"portfolio": p["id"], "cash": str(observed_cash), "recorded": str(recorded),
                          "clearing_deposits": str(decimal(balance.get("depositReservation") or 0)),
@@ -555,13 +510,12 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
             if is_polymarket_us(lot["market"]):
                 slug = slug_of(lot["market"])
                 expected[slug] = expected.get(slug, Decimal(0)) + lot["quantity"] * (1 if lot["side"] == "yes" else -1)
-        observed = {slug: position_quantity(row) for slug, row in client.positions().items() if position_quantity(row)}
+        observed = {slug: position_quantity(row) for slug, row in positions.items() if position_quantity(row)}
         expected = {k: v for k, v in expected.items() if v}
         if observed != expected:
             discrepancies.append({"portfolio": p["id"], "kind": "inventory_mismatch", "venue": "polymarket_us",
                                   "recorded": {k: str(v) for k, v in expected.items()},
                                   "observed": {k: str(v) for k, v in observed.items()}})
-        store.append("account_evidence", {"kind": "polymarket_us_snapshot", "balance": balance}, p["id"])
     status = {"component": "polymarket_us", "status": "healthy" if not discrepancies else "degraded",
               "portfolios": [p["id"] for p in mapped], "recovered_orders": recovered, "settled_lots": settled,
               "balances": balances, "discrepancies": discrepancies}
@@ -571,10 +525,10 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
 
 def run_monitor(root: str, component: str, interval: float = 60, once: bool = False) -> None:
     store = Store(root)
-    api: Any = (DraftKings.from_env() if component == "draftkings" else Polymarket.from_env()
-                if component == "polymarket" else PolymarketUS.from_env() if component == "polymarket-us"
-                else Kalshi(authenticated=component == "account"))
-    passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass,
+    api: Any = (Polymarket.from_env() if component == "polymarket" else
+                PolymarketUS.from_env() if component == "polymarket-us" else
+                Kalshi(authenticated=component == "account"))
+    passes = {"market": market_pass, "account": account_pass,
               "polymarket": polymarket_pass, "polymarket-us": polymarket_us_pass}
     while True:
         start = time.monotonic()

@@ -149,7 +149,8 @@ def test_fee_allocation_sums_exactly_to_order_fee(tmp_path):
 
 def test_concurrent_duplicate_client_order_id_calls_venue_once(tmp_path):
     store = Store(tmp_path)
-    store.create("live", mode="live", subaccount=3)
+    store.create_pool("live", "kalshi", mode="live", subaccount=3)
+    store.append("transaction", {"reason": "funding", "cash_delta": "1000", "external_delta": "1000", "legs": []}, "live")
     store.close()
     calls, barrier = [], threading.Barrier(8)
 
@@ -176,7 +177,8 @@ def test_concurrent_duplicate_client_order_id_calls_venue_once(tmp_path):
 
 def live_order(tmp_path, count="10", price="0.40"):
     store = Store(tmp_path)
-    store.create("live", mode="live", subaccount=3)
+    store.create_pool("live", "kalshi", mode="live", subaccount=3)
+    store.append("transaction", {"reason": "funding", "cash_delta": "1000", "external_delta": "1000", "legs": []}, "live")
 
     class Adapter:
         amended, canceled = [], []
@@ -208,7 +210,8 @@ def test_amend_up_resizes_the_cash_reservation(tmp_path):
 
 def test_amend_or_cancel_refuses_an_order_without_a_venue_id(tmp_path):
     store = Store(tmp_path)
-    store.create("live", mode="live", subaccount=3)
+    store.create_pool("live", "kalshi", mode="live", subaccount=3)
+    store.append("transaction", {"reason": "funding", "cash_delta": "1000", "external_delta": "1000", "legs": []}, "live")
 
     class LostAck:
         amended = []
@@ -302,7 +305,8 @@ def test_out_of_order_and_duplicated_fills_book_once_in_time_order(tmp_path):
 
 def test_lost_acknowledgement_is_recovered_from_the_order_list(tmp_path):
     store = Store(tmp_path)
-    store.create("live", mode="live", subaccount=3)
+    store.create_pool("live", "kalshi", mode="live", subaccount=3)
+    store.append("transaction", {"reason": "funding", "cash_delta": "1000", "external_delta": "1000", "legs": []}, "live")
 
     class LostAck:
         def create_order(self, order):
@@ -396,3 +400,12 @@ def test_repeated_quarantined_fill_is_recorded_once(tmp_path):
     account_pass(store, Account(bad, []))
     assert len([e for e in store.events() if e["type"] == "quarantine"]) == 1
     assert not broker.state().lots
+
+
+def test_amend_cannot_exceed_the_pools_budget(tmp_path):
+    store, broker, adapter = live_order(tmp_path)
+    before = store.reserved('live')
+    sent = list(adapter.amended)
+    with pytest.raises(ValueError, match='insufficient cash'):
+        broker.amend('o1', {'count': '3000', 'price': '0.60'})
+    assert store.reserved('live') == before and adapter.amended == sent

@@ -37,11 +37,12 @@ and a common economic record. Keep research choices inside each strategy.
    interface; prefer local copies when shared changes would couple experiments.
 4. Make uniform trade logging the minimal integration requirement. A thin
    broker wraps one venue's execution API and records what was requested and
-   what happened locally. Paper execution must produce the same economic facts
-   as live execution, with its simulation assumptions identified.
-5. Bind each broker to one venue and an explicitly selected cash pool or
-   portfolio allocation. Every strategy must make every trade through a
-   broker, including exits, repairs, and retries. Use a broker for each venue
+   what happened locally. Paper execution simulates live execution using the
+   same venue ownership,
+   capital constraints, reservations, and economic accounting. Only the
+   execution/evidence source differs, with simulation assumptions identified.
+5. Bind each broker to one venue and an explicitly selected cash pool. Every
+   strategy must make every trade through a broker, including exits, repairs, and retries. Use a broker for each venue
    and allocation being traded. Shared accounts and allocation management belong
    in broker infrastructure and must preserve ownership of every cash and
    position change.
@@ -50,6 +51,12 @@ and a common economic record. Keep research choices inside each strategy.
    may read markets directly and need not call monitors, read their storage, or
    consume their health records. A strategy may choose to use monitor outputs;
    that choice does not become a requirement for other strategies.
+7. Keep reporting outside strategies. Performance reports, dashboards, and
+   valuation belong in independent reporting services that read the shared
+   ledger and recorded reference data. Strategies emit economic facts through
+   their brokers and may attach diagnostics or arbitrary context; they do not
+   maintain a second P&L ledger or implement reporting views. Reporting must
+   not import strategy code or require the strategy process to remain running.
 
 The broker is the only mandatory strategy integration surface. Installing it
 may install accounting and venue dependencies internally. That does not impose
@@ -64,12 +71,30 @@ Here, venue means an execution service such as Kalshi or Polymarket US. It
 does not mean one event or contract within that service. One broker may trade
 many contracts at its venue, but it does not route between venues.
 
-A cash pool persists beyond any one process run. Reopening its broker must
-not fund it again, erase losses, or discard outstanding orders and positions.
-Each run records which strategy revision used which allocation. A reporting
-portfolio may aggregate allocations across venues without becoming a broker
-that sends orders to all of them. Cash at one venue cannot fund an order at
-another without an actual, recorded transfer.
+An account holds cash and positions at a venue. A cash pool is a persistent
+allocation of that account's cash and positions, with one venue and one mode.
+Several pools may share a real account, but their allocations cannot count the
+same cash twice. A broker binds to exactly one pool; its state and available
+cash exclude every other pool, including other pools at the same venue.
+
+A portfolio is a flat reporting selection of cash pools. It owns no cash,
+executes no orders, and does not make its pools' balances interchangeable.
+For example, a cross-market experiment uses two venue pools and two brokers;
+a reporting portfolio can combine their performance. A strategy need not
+create or know about this reporting selection.
+
+Pool identity persists across runs. Reopening a broker does not fund its pool
+again, erase losses, or discard outstanding orders and positions. A run records
+which strategy revision used the pools. Fresh experiments use explicitly
+funded new pools; a new run or reporting portfolio alone does not isolate cash.
+
+Paper pools can be funded with any explicit nonnegative hypothetical amount,
+including large balances. They remain venue-specific. Paper and live use the
+same broker budget checks, reservations, ownership and accounting; the adapter
+supplies simulated or actual venue results. Total cash across pools is not
+buying power at an individual venue. A pool cannot borrow from another pool
+implicitly. Cross-venue transfers need an explicit supported mechanism and
+recorded completion, including simulated timing when supported in paper mode.
 
 ```mermaid
 flowchart LR
@@ -106,11 +131,15 @@ a rule that all future strategies must use those order types.
 
 ## Shared broker interface
 
-The current Python interface is Broker(store, portfolio, adapter=None,
-run_id=None). Store selects the shared logging directory. The portfolio must
-already exist; construction does not create or fund it. The adapter implements
-execution for the chosen venue and mode. An omitted adapter allows accounting
-access but cannot submit orders. Venue-specific examples are in the
+The current Python interface is Broker(store, pool_id, adapter=None,
+run_id=None, *, venue=None). Store selects the shared logging directory. The venue cash pool
+must already exist; construction does not create or fund it. The adapter implements
+execution for the chosen venue and mode. The pool declares the venue and mode;
+built-in adapters must match both.
+The optional venue keyword is an assertion, not a routing choice. A conflicting
+adapter declaration is rejected. Orders, fills,
+completion, cancellation, settlement, and corrections cannot cross that boundary.
+An omitted adapter allows accounting access but cannot submit orders. Venue-specific examples are in the
 [Kalshi](services/kalshi-broker.md) and [Polymarket](services/polymarket-broker.md)
 guides. Their current order format is a binary YES-book convention, not a
 requirement that future instruments share those economics.
@@ -124,21 +153,22 @@ The strategy-facing operations are:
 - cancel(identifier) and amend(identifier, changes): act on a broker-owned
   client order ID. Availability depends on venue and execution mode. An
   acknowledgement is not evidence of a fill or completed reconciliation.
-- state() and available: inspect reconstructed holdings and cash, with open
-  reservations deducted from available cash. They may lag asynchronous live
+- state(): inspect only the broker's cash pool and its holdings.
+- available: inspect that pool's cash after reservations, in either mode.
+  Both state and available may lag asynchronous live
   execution evidence; they do not silently turn uncertainty into zero fills.
 - observe(kind, data): attach diagnostics without changing economic state.
 
-Infrastructure uses fill, finish, settle, and correct to ingest executions,
-complete order tracking, settle supported paper positions, and apply audited
-corrections. Strategies do not manufacture fills or settlement facts. Public
+Infrastructure uses acknowledge, fill, finish, settle, and correct to record
+venue confirmations, ingest executions, complete order tracking, settle
+supported paper positions, and apply audited corrections. Strategies do not manufacture fills or settlement facts. Public
 strategy integration must not require access to the broker's private order
 helpers or database tables.
 
 Submission context accepts arbitrary nested JSON-compatible data. The broker
 persists it before submission and carries it into resulting economic records.
 There are no mandatory model, basket, or signal fields. Context cannot select
-another portfolio or override accounting fields. Store large inputs by immutable
+another cash pool or override accounting fields. Store large inputs by immutable
 artifact reference. Serialization details and optional helpers must not grow
 into a common research interface.
 
@@ -160,9 +190,13 @@ implement a second ledger or write SQL to meet the contract.
 ### Event envelope and economic schema
 
 Each event has schema_version, record_id, source_key, sequence, portfolio_id,
-run_id, type, effective_at, recorded_at, and data. Portfolio/run identity can
-be absent on shared market or account observations. Portfolio metadata records
-live or paper mode and account mapping. UTC effective time says when a fact
+run_id, type, effective_at, recorded_at, and data. Ownership/run identity can
+be absent on shared market or account observations. For cash pools, the existing
+portfolio_id storage field identifies the pool,
+not a reporting group. This retained column name preserves old logs and exports.
+Pool metadata records live or paper mode and account mapping; cash_pools fixes
+the venue. Reporting membership is stored separately in reporting_portfolios.
+UTC effective time says when a fact
 occurred; recorded time says when reporting could know it. Sequence orders
 facts with equal effective times. Money and quantities use decimal strings.
 
@@ -191,7 +225,7 @@ A transaction contains reason, cash_delta, fee, optional external_delta and
 prepaid_delta, optional order_id, context, evidence, and legs. The current
 binary-contract schema permits zero or one inventory leg per transaction.
 A leg has market, yes/no side, quantity_delta, and price; lot_id can identify
-the opening lot retired by settlement. Order and portfolio records establish
+the opening lot retired by settlement. Order and cash-pool records establish
 ownership. Services may add evidence records such as probes, quarantined
 fills, and transfer intent without treating them as economic transactions.
 
@@ -207,7 +241,7 @@ from economic replay. Related changes must be corrected together if removing
 only one would leave unmatched inventory retirement. Correcting a paper fill
 does not automatically restore its consumed simulated liquidity.
 
-The event stream and portfolio metadata support reporting. Orders,
+The event stream, pool metadata and reporting membership support reporting. Orders,
 reservations, collector checkpoints, and consumed-liquidity tables also matter
 for execution recovery. Back up the full database for recovery; a JSONL event
 export is not a replacement for those operational tables.
@@ -216,9 +250,14 @@ export is not a replacement for those operational tables.
 
 The execution boundary owns run provenance, order intent, execution receipts,
 and the resulting economic transactions described above. Record intent before
-submission. Preserve partial fills as individual facts; an acknowledgement
-alone never creates inventory. Exits and repairs preserve the same ownership
-and evidence as entries.
+submission. Preserve partial fills as individual facts. Acceptance alone does
+not establish a fill. An acknowledgement with an explicit confirmed execution
+quantity can establish pool-owned inventory for an immediate close while
+account reconciliation is pending. Order records retain confirmed_filled and
+terminal with the raw response. This evidence does not create spendable cash,
+priced lots, fees, or profit. Exact execution receipts establish those accounting
+facts; booked quantities replace pending confirmations without double counting.
+Exits and repairs preserve the same ownership and evidence as entries.
 
 Optional context can hold intended baskets, model outputs, expected returns,
 or immutable artifact references. These observations never determine realized
@@ -229,7 +268,7 @@ timing, depth, and fee assumptions needed to interpret the simulation.
 
 Account collectors record authoritative balances, positions, orders, fills,
 settlements, and supported funding or other account activity. They retain
-source evidence and reconcile it with portfolio allocations and executions.
+source evidence and reconcile it with cash-pool allocations and executions.
 Funding, withdrawals, internal allocations, fees, rebates, and collateral
 effects must remain distinguishable. An unexplained cash difference is a
 reconciliation gap, not invented trading profit.
@@ -275,6 +314,20 @@ data cutoff. It reconstructs opening holdings, cash flows, and remaining
 positions. Funding is capital, not return. Fees enter the economics; actual
 holdings include incomplete baskets. Corrections can restate a result, so
 retain the original snapshot and report provenance.
+
+The shared package owns the reporting implementation. It reports each cash
+pool and optional portfolio totals across their runs. A total sums equity and
+dollar P&L once per member pool; it derives returns and drawdown from the combined
+curve and external capital flows, rather than averaging pool percentages.
+An allocation between included pools is internal to that portfolio and cannot
+create profit or external funding. Its fees remain costs. Group membership and
+mode are retained in report provenance. Paper and live pools cannot be members
+of the same reporting portfolio. Pool rows and portfolio totals overlap and
+must not be added together. Run identifiers
+retain execution provenance; restarting a process does not reset a report's
+cost basis or create a new performance series. Research-specific views, if
+needed, also live outside strategies and consume recorded evidence. A second
+ledger or live venue reads in a report must not substitute for that evidence.
 
 Use common accounting and valuation rules within a comparison. Record the
 reporting policy and implementation revision, paper fill policies, and data

@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .accounting import State, active_events
+from .accounting import State, active_events, combine_states, replay
 from .book import levels
 from .store import Store, decimal, encode, utc
 
@@ -75,12 +75,31 @@ def value(state: State, marks: dict[str, dict[str, Any]], at: datetime) -> tuple
             None if unbounded else upper, sorted(set(missing)))
 
 
+def reporting_units(store: Store) -> list[dict[str, Any]]:
+    """Pool rows, flat portfolio totals, and explicitly deprecated historical rows."""
+    pools = {p['id']: p for p in store.pools()}
+    units = []
+    for p in store.portfolios():
+        pool = pools.get(p['id'])
+        units.append({**p, 'kind': 'pool' if pool else 'legacy', 'pools': [p['id']],
+                      'venue': pool['venue'] if pool else '',
+                      'venues': [pool['venue']] if pool else p['metadata'].get('venues', ['kalshi']),
+                      'deprecated': not bool(pool)})
+    for group in store.reporting_portfolios():
+        members = [pools[pid] for pid in group['pools']]
+        units.append({'id': group['id'], 'kind': 'portfolio', 'pools': group['pools'],
+                      'mode': members[0]['mode'], 'metadata': {'label': group['label']},
+                      'created_at': max(p['created_at'] for p in members), 'defined_at': group['created_at'],
+                      'venue': '', 'venues': sorted({p['venue'] for p in members}), 'deprecated': False})
+    return units
+
+
 def compare(store: Store, start: str, end: str, recorded: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     first, last = timestamp(start), timestamp(end)
     if last < first:
         raise ValueError('end precedes start')
     events = active_events(store.events(until=last.isoformat(timespec='microseconds'), recorded_until=recorded,
-        kinds=('transaction','correction','market','execution','observation','health')))
+        kinds=('transaction','correction','market','execution','order','observation','health')))
     points = [first]
     while points[-1] + timedelta(minutes=1) < last:
         points.append(points[-1] + timedelta(minutes=1))
@@ -89,9 +108,10 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
     points = sorted(set(points + [timestamp(e['effective_at']) for e in events
         if e['type']=='transaction' and decimal(e['data'].get('external_delta','0'))
         and first < timestamp(e['effective_at']) < last]))
-    states = {p['id']: State() for p in store.portfolios() if timestamp(p['created_at']) <= first}
+    units = {u['id']: u for u in reporting_units(store) if timestamp(u['created_at']) <= first}
+    states = {p['id']: State() for p in store.portfolios()}
     marks: dict[str, dict[str, Any]] = {}
-    history: dict[str, list[dict[str, Any]]] = {p: [] for p in states}
+    history: dict[str, list[dict[str, Any]]] = {p: [] for p in units}
     cursor = 0
     for at in points:
         while cursor < len(events) and timestamp(events[cursor]['effective_at']) <= at:
@@ -101,24 +121,33 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
             elif event['portfolio_id'] in states:
                 states[event['portfolio_id']].apply(event)
             cursor += 1
-        for portfolio, state in states.items():
+        for portfolio, unit in units.items():
+            state = combine_states([states[pid] for pid in unit['pools']])
             equity, low, high, missing = value(state, marks, at)
-            history[portfolio].append({'portfolio': portfolio, 'time': at.isoformat(), 'equity': equity,
+            history[portfolio].append({'portfolio': portfolio, 'kind': unit['kind'], 'pools': ','.join(unit['pools']), 'time': at.isoformat(), 'equity': equity,
                 'equity_lower': low, 'equity_upper': high,
-                'cash': state.cash, 'contributed': state.contributed, 'realized': state.realized,
+                'cash': state.cash, 'reserved': state.reserved if not unit['deprecated'] else None,
+                'available': state.cash - state.reserved if unit['kind'] == 'pool' else None, 'contributed': state.contributed, 'realized': state.realized,
                 'fees': state.fees, 'rewards': state.rewards, 'notional': state.notional,
                 'settlements': state.settlements, 'cost': state.cost, 'missing': ','.join(missing)})
     metrics, curves = [], []
-    portfolio_metadata = {p['id']:p for p in store.portfolios()}
+    portfolio_metadata = units
     for portfolio, rows in history.items():
+        unit = units[portfolio]
+        members = set(unit['pools'])
         a, b = rows[0], rows[-1]
         complete = all(r['equity'] is not None for r in rows)
         if portfolio_metadata[portfolio]['mode']=='live':
-            account_health = [e for e in events if e['type']=='health' and e['data'].get('component')=='account']
-            complete = complete and bool(account_health) and account_health[-1]['data']['status']=='healthy' and (last-timestamp(account_health[-1]['effective_at'])).total_seconds()<=120
+            venues = unit['venues']
+            for venue in venues:
+                component = {'kalshi': 'account', 'polymarket_us': 'polymarket_us'}.get(venue)
+                health = [e for e in events if e['type']=='health' and e['data'].get('component')==component]
+                complete = (complete and component is not None and bool(health)
+                            and health[-1]['data']['status']=='healthy'
+                            and (last-timestamp(health[-1]['effective_at'])).total_seconds()<=120)
         cashflow = b['contributed'] - a['contributed']
         pnl = b['equity'] - a['equity'] - cashflow if a['equity'] is not None and b['equity'] is not None else None
-        flows = any(e['portfolio_id']==portfolio and e['type']=='transaction' and decimal(e['data'].get('external_delta','0')) and first < timestamp(e['effective_at']) <= last for e in events)
+        flows = any(current['contributed'] != previous['contributed'] for previous, current in zip(rows, rows[1:]))
         ret = pnl / a['equity'] if complete and not flows and a['equity'] else None
         peak = Decimal(1)
         growth = Decimal(1)
@@ -135,10 +164,10 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
                 dt = Decimal(str((timestamp(row['time'])-timestamp(previous['time'])).total_seconds()))
                 utilization += (previous['cost']/previous['equity'] if previous['equity'] else Decimal(0))*dt
         fills = sum(1 for e in events if e['portfolio_id'] == portfolio and e['type']=='execution' and first < timestamp(e['effective_at']) <= last)
-        own = [e for e in events if e['portfolio_id']==portfolio and first < timestamp(e['effective_at']) <= last]
+        own = [e for e in events if e['portfolio_id'] in members and first < timestamp(e['effective_at']) <= last]
         policies = sorted({e['data']['evidence'].get('policy','live') for e in own if e['type']=='execution'})
         health_coverage = {}
-        for component in ('market','account'):
+        for component in ('market','account','polymarket_us'):
             records = [e for e in events if e['type']=='health' and e['data'].get('component')==component]
             healthy = 0
             for at in points:
@@ -148,7 +177,9 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
                     healthy += latest['data']['status']=='healthy' and (at-timestamp(latest['effective_at'])).total_seconds()<=120
             health_coverage[component+'_health_coverage'] = healthy/len(points)
         metrics.append({**health_coverage, 'strategy_heartbeats':sum(e['type']=='observation' and e['data'].get('kind') in ('heartbeat','scan_complete') for e in own),
-            'strategy_errors':sum(e['type']=='observation' and e['data'].get('kind')=='error' for e in own), 'portfolio':portfolio, 'complete':complete, 'net_pnl':pnl,
+            'strategy_errors':sum(e['type']=='observation' and e['data'].get('kind')=='error' for e in own), 'portfolio':portfolio, 'kind':unit['kind'], 'pools':','.join(unit['pools']), 'venue':unit['venue'],
+            'deprecated':unit['deprecated'], 'cash':b['cash'], 'reserved':b['reserved'], 'available':b['available'],
+            'ending_equity':b['equity'], 'mode':portfolio_metadata[portfolio]['mode'], 'complete':complete, 'net_pnl':pnl,
             'net_pnl_lower':b['equity_lower']-a['equity_upper']-cashflow if b['equity_lower'] is not None and a['equity_upper'] is not None else None,
             'net_pnl_upper':b['equity_upper']-a['equity_lower']-cashflow if b['equity_upper'] is not None and a['equity_lower'] is not None else None,
             'return_on_opening_equity':ret, 'time_weighted_return':growth-1 if complete and a['equity'] is not None and a['equity']>0 else None, 'max_drawdown':drawdown if complete else None,
@@ -157,7 +188,7 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
             'capital_utilization':utilization/seconds if complete and seconds else None,
             'fees':b['fees']-a['fees'], 'rewards':b['rewards']-a['rewards'],
             'filled_notional':b['notional']-a['notional'], 'fills':fills,
-            'settlement_lots':b['settlements']-a['settlements'], 'open_lots':len(states[portfolio].lots),
+            'settlement_lots':b['settlements']-a['settlements'], 'open_lots':sum(len(states[pid].lots) for pid in members),
             'range_coverage':sum(r['equity_lower'] is not None for r in rows)/len(rows),
             'valuation_coverage':sum(r['equity'] is not None for r in rows)/len(rows),
             'external_flows':cashflow, 'execution_policy':','.join(policies) or 'no fills'})
@@ -182,6 +213,22 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
             writer = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else ['portfolio'])
             writer.writeheader()
             writer.writerows(rows)
+    positions = []
+    for unit in reporting_units(frozen):
+        if unit['kind'] == 'portfolio':
+            continue
+        state = replay(frozen.events(unit['id'], until=end, recorded_until=recorded,
+                                    kinds=('transaction', 'correction')))
+        for lot in state.lots.values():
+            positions.append({'owner': unit['id'], 'kind': unit['kind'], 'mode': unit['mode'],
+                              'market': lot['market'], 'side': lot['side'], 'quantity': lot['quantity'],
+                              'cost': lot['cost'], 'opened_at': lot['opened_at'],
+                              'context': encode(lot['context'])})
+    with (destination/'positions.csv').open('w') as f:
+        writer = csv.DictWriter(f, fieldnames=['owner', 'kind', 'mode', 'market', 'side', 'quantity',
+                                              'cost', 'opened_at', 'context'])
+        writer.writeheader()
+        writer.writerows(positions)
     import plotly.graph_objects as go
     fig = go.Figure()
     colors = ['#087e8b','#279359','#6850ad','#df8935','#7c8798']
@@ -189,17 +236,22 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
         rows = [r for r in curves if r['portfolio']==metric['portfolio']]
         color = colors[index % len(colors)]
         for key, fill in [('equity_upper',None),('equity_lower','tonexty')]:
-            fig.add_scatter(name=metric['portfolio']+' quote range', legendgroup=metric['portfolio'],
+            fig.add_scatter(name=metric['portfolio'] + (' (deprecated)' if metric['deprecated'] else '')+' quote range', legendgroup=metric['portfolio'],
                 x=[r['time'] for r in rows], y=[float(r[key]) if r[key] is not None else None for r in rows],
                 line={'color':color,'width':0.5}, fill=fill, opacity=0.25,
                 showlegend=False, connectgaps=False)
-        fig.add_scatter(name=metric['portfolio'], legendgroup=metric['portfolio'], line={'color':color}, x=[r['time'] for r in rows],
+        fig.add_scatter(name=metric['portfolio'] + (' (deprecated)' if metric['deprecated'] else ''), legendgroup=metric['portfolio'], line={'color':color}, x=[r['time'] for r in rows],
                        y=[float(r['equity']) if r['equity'] is not None else None for r in rows], connectgaps=False)
-    fig.update_layout(title='Paper equity · midpoint lines and quote ranges (not liquidation values)', yaxis_title='USD')
+    fig.update_layout(title='Pool and portfolio equity · overlapping views, not liquidation values', yaxis_title='USD')
     fig.write_html(destination/'report.html', include_plotlyjs=True)
     manifest = {'schema_version':1, 'generated_at':utc(), 'start':start, 'cutoff':end, 'recorded_cutoff':recorded,
-        'valuation':'midpoint-v1 plus quote-range-v1; one-minute grid; maximum book age 120 seconds',
-        'cost_basis':'FIFO, fees included', 'metrics':metrics,
+        'valuation':f'midpoint-v2 plus quote-range-v1; one-sided midpoint when width <= {ONE_SIDED_MAX_WIDTH}; one-minute grid; maximum book age 120 seconds',
+        'implementation_sha256':{name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                                 for name in ('report.py', 'accounting.py', 'book.py', 'store.py')},
+        'cost_basis':'FIFO per cash pool, fees included', 'metrics':metrics,
+        'reporting_units': reporting_units(frozen),
+        'deprecations': ['Legacy pooled-capital portfolios are report-only; use explicit venue cash pools for new runs.']
+                        if any(u['deprecated'] for u in reporting_units(frozen)) else [],
         'limitations':['Paper fills do not establish real execution quality.',
             'Missing midpoints exclude complete-period rankings. Fresh one-sided books retain quote ranges with 0/1 boundaries.',
             'Quote ranges are neither executable liquidation values nor guaranteed settlement values; exit fees and depth are not modeled.',
@@ -207,13 +259,14 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
             'Short trials cannot establish long-run profitability.'],
         'health':[e for e in frozen.events(until=end,recorded_until=recorded,kinds=('health',)) if e['type']=='health']}
     lines = ['# Experiment comparison', '', f'Window: {start} to {end}.', '',
-             'Paper portfolios; midpoint and quote-range valuation with 120-second maximum book age.', '',
-             '| Portfolio | Net P&L | P&L range | Realized | Fees | Fills | Midpoint coverage | Range coverage |',
-             '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+             'Rows identify cash pools, reporting portfolios, and deprecated legacy portfolios. Portfolio totals overlap their pool rows; do not sum all rows.', '',
+             'Paper and live modes are identified per portfolio; midpoint and quote-range valuation with 120-second maximum book age.', '',
+             '| ID | Kind | Mode | Net P&L | P&L range | Realized | Fees | Fills | Midpoint coverage | Range coverage |',
+             '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
     for m in metrics:
         pnl = f"${float(m['net_pnl']):.4f}" if m['net_pnl'] is not None else 'incomplete'
         envelope = f"${float(m['net_pnl_lower']):.2f} to ${float(m['net_pnl_upper']):.2f}" if m['net_pnl_lower'] is not None else 'unavailable'
-        lines.append(f"| {m['portfolio']} | {pnl} | {envelope} | ${float(m['realized_pnl']):.2f} | ${float(m['fees']):.2f} | {m['fills']} | {100*m['valuation_coverage']:.1f}% | {100*m['range_coverage']:.1f}% |")
+        lines.append(f"| {m['portfolio']} | {m['kind']}{' (deprecated)' if m['deprecated'] else ''} | {m['mode']} | {pnl} | {envelope} | ${float(m['realized_pnl']):.2f} | ${float(m['fees']):.2f} | {m['fills']} | {100*m['valuation_coverage']:.1f}% | {100*m['range_coverage']:.1f}% |")
     lines += ['', 'A zero-fill result measures inactivity, not demonstrated profitability. Short trials and paper execution cannot establish durable returns.', '',
               'Ranges use fresh bid/ask quotes and 0/1 for missing sides. They do not model executable liquidation, exit fees, or guaranteed settlement. Stale or absent references remain gaps.', '',
               'Fees are included in P&L. Open positions remain valued at the cutoff; the report does not liquidate them.', '']

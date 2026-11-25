@@ -24,13 +24,16 @@ independently.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
-- [cross-market-sportbook](strategies/cross-market-sportbook/): the sum check across venues. Kalshi NBA, NHL and MLB game markets are priced against DraftKings moneylines, and baskets with legs on both venues are paper-traded through the shared broker. A new `czquant.draftkings` data flow, paper adapter and monitor support it.
-
-- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue are paper-traded through the shared broker. A new `czquant.polymarket` data flow, paper adapter and monitor support it.
+- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue use separate brokers. Polymarket US supports paper and live execution; international Polymarket supports paper execution.
 
 - [kalshi-sum-check-unwind](strategies/kalshi-sum-check-unwind/): the Kalshi sum check, but when a basket fills only some legs it keeps the complete sets and sells the extra contracts back within a slippage limit.
 
 - [kalshi-sum-check-retry](strategies/kalshi-sum-check-retry/): the Kalshi sum check, but when a basket fills only some legs it buys the missing legs again, as long as the completed basket still breaks even (or loses no more than a set amount).
+
+## Research
+
+- [DraftKings odds](research/draftkings/): independent, read-only odds and score collection.
+- [Kalshi calibration](research/kalshi-calibration/): empirical price calibration.
 
 ## Quickstart
 
@@ -114,7 +117,7 @@ on the shared CLI can select a different root for inspection or restore.
 - [Kalshi broker](docs/services/kalshi-broker.md): paper orders, authentication,
   live mapping, allocation operations, and recovery.
 - [Polymarket broker](docs/services/polymarket-broker.md): international outcome
-  tokens, paper orders, and settlement collection.
+  tokens, US paper/live orders, and settlement collection.
 - [Market monitor](docs/services/market-monitor.md): public reference data,
   paper settlements, coverage, and process operation.
 - [Account monitor](docs/services/account-monitor.md): authenticated evidence,
@@ -129,12 +132,18 @@ must use the broker contract.
 
 ## Runs and reporting
 
-Broker-backed runs write to the shared store. Use the reporting service for
-uniform accounting and independent valuation. The election strategies also
-retain standalone paper ledgers under runs/<strategy-id>/<UTC time>. Their
-strategy READMEs describe that compatibility path. The commands in
-[scripts/pnl.py](scripts/pnl.py) read those JSONL ledgers, not the shared store;
-they are not the integration path for new strategies.
+Reporting lives in packages/czquant, outside strategies. Its dashboard and
+frozen comparison reports read the shared accounting ledger and recorded
+market and account evidence. Strategies record executions through brokers
+and can attach diagnostics; they do not supply reporting implementations.
+See [reporting](docs/services/reporting.md) for commands and portfolio lifetime.
+
+A cross-market experiment uses two venue cash pools and two brokers in both
+paper and live mode. A reporting portfolio groups those pools without merging
+their spending authority. Reusing a pool preserves its cash, positions, and
+losses across runs. Paper funding can be arbitrarily large but remains bound
+to its venue. Reports show pool results and portfolio totals; historical pooled
+records remain readable with a deprecation label.
 
 ## Create a new strategy
 
@@ -181,9 +190,9 @@ they are not the integration path for new strategies.
 cz-quant/
 ├── README.md
 ├── scripts/
-│   ├── new-strategy.sh          # creates a strategy from the template
-│   └── pnl.py                   # `uv run pnl`: one CSV, a P&L table, a P&L plot across strategies
+│   └── new-strategy.sh          # creates a strategy from the template
 ├── packages/czquant/            # broker, accounting, monitors, reports
+├── research/                    # independent data collection and analysis
 ├── docs/design-principles.md    # authoritative development contract
 ├── runs/                        # legacy JSONL output; shared state lives outside worktrees
 │   └── <strategy-id>/<UTC time>/

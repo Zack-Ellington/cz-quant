@@ -12,13 +12,13 @@ ZERO = Decimal(0)
 
 
 def venue_of(market: str) -> str:
-    """The venue a ticker trades on: PMUS: Polymarket US, PM: Polymarket, else Kalshi.
-    (Venue cash only matters for live portfolios, which trade Kalshi and Polymarket US.)"""
+    """Known venue names; keep other namespaces distinct for historical replay."""
     if market.startswith("PMUS:"):
         return "polymarket_us"
     if market.startswith("PM:"):
         return "polymarket"
-    return "kalshi"
+    namespace, separator, _ = market.partition(":")
+    return namespace.lower() if separator else "kalshi"
 
 
 @dataclass
@@ -36,12 +36,28 @@ class State:
     markets: set[str] = field(default_factory=set)
     # Cash by venue: a transaction's `venue`, else its leg's ticker's, else Kalshi.
     venue_cash: dict[str, Decimal] = field(default_factory=dict)
+    reservations: dict[str, Decimal] = field(default_factory=dict)
+
+    @property
+    def reserved(self) -> Decimal:
+        return sum(self.reservations.values(), ZERO)
 
     @property
     def cost(self) -> Decimal:
         return sum((lot["cost"] for lot in self.lots.values()), ZERO)
 
     def apply(self, event: dict[str, Any]) -> None:
+        d = event['data']
+        if event['type'] == 'order':
+            if d.get('status') == 'intent' and 'reserved' in d:
+                self.reservations[d['order']['client_order_id']] = decimal(d['reserved'])
+            elif d.get('release'):
+                self.reservations.pop(d['client_order_id'], None)
+        elif event['type'] == 'observation':
+            if d.get('kind') == 'amend_intent':
+                self.reservations[d['client_order_id']] = decimal(d['reserved_during'])
+            elif d.get('kind') == 'amend_acknowledged':
+                self.reservations[d['client_order_id']] = decimal(d['reserved'])
         if event["type"] != "transaction":
             return
         d = event["data"]
@@ -111,7 +127,7 @@ def replay(events: list[dict[str, Any]]) -> State:
     return state
 
 
-ECONOMIC = ("transaction", "correction")
+ECONOMIC = ("transaction", "correction", "order", "observation")
 
 
 def portfolio_state(store: Any, portfolio: str) -> State:
@@ -130,7 +146,7 @@ def portfolio_state(store: Any, portfolio: str) -> State:
         new = store.events(portfolio, kinds=ECONOMIC, after_sequence=sequence)
         if not new:
             return state
-        if all(e["type"] == "transaction" and e["effective_at"] >= latest for e in new):
+        if all(e["type"] != "correction" and e["effective_at"] >= latest for e in new):
             try:
                 for event in sorted(new, key=lambda e: (e["effective_at"], e["sequence"])):
                     state.apply(event)
@@ -145,3 +161,17 @@ def portfolio_state(store: Any, portfolio: str) -> State:
     if events:
         store.state_cache[portfolio] = (max(e["sequence"] for e in events), max(e["effective_at"] for e in events), state)
     return state
+
+
+def combine_states(states: list[State]) -> State:
+    """Sum independently replayed owners; never net FIFO lots across cash pools."""
+    result = State()
+    for state in states:
+        for name in ("cash", "contributed", "realized", "fees", "rewards", "prepaid", "notional", "fills", "settlements"):
+            setattr(result, name, getattr(result, name) + getattr(state, name))
+        result.lots.update(state.lots)
+        result.reservations.update(state.reservations)
+        result.markets.update(state.markets)
+        for venue, cash in state.venue_cash.items():
+            result.venue_cash[venue] = result.venue_cash.get(venue, ZERO) + cash
+    return result

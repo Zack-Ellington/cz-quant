@@ -34,24 +34,15 @@ The polymarket component reads public Gamma/CLOB data and records marks and
 final payouts. Neither public collector needs an account key. They collect
 their own venue's tickers; running one does not cover the other venue.
 
-For DraftKings paper bets, use the configured source:
+For Polymarket US, use its own component:
 
 ```bash
-export DRAFTKINGS_SOURCE=oddsapi
-uv run czquant monitor draftkings
+uv run czquant monitor polymarket-us --interval 60
 ```
 
-The oddsapi source needs ODDS_API_KEY. The collector reuses odds already in
-the shared odds_cache directory, preserving their read times. It requests
-results for eligible held games, paced by its configured result interval.
-It does not independently refresh odds, so quote coverage depends on another
-process refreshing that cache. See the
-[sportsbook strategy's source configuration](../../strategies/cross-market-sportbook/README.md#draftkings-data).
-
-When a supported sportsbook result needs operator evidence, the explicit
-settle-sportsbook command accepts a ticker, --result yes, no, or void, and
---note describing the source. It records the result and settles paper lots.
-A void returns their stake. This operation changes the paper ledger.
+It marks held paper and live markets and settles paper lots from final results.
+A mapped live account also enables authenticated recovery and reconciliation;
+see the [account guide](account-monitor.md#polymarket-us-recovery).
 
 ## Coverage and verification
 
@@ -67,12 +58,15 @@ health. An outer collector failure writes failed health and exits so a
 process supervisor can restart it. A successful command exit alone does not
 prove every market was collected; inspect errors and reference coverage.
 
-The current collectors derive inventory from paper portfolios, then add
-outstanding orders and paper watchlists. In particular, Kalshi positions held
-after live orders finish are not discovered through a live-inventory scan.
-Do not assume this collector provides complete live valuation coverage.
+The Kalshi collector discovers both paper and live holdings, outstanding
+orders, and cash pool watchlists. It continues marking positions after live
+orders finish, but public outcomes settle only paper lots. International
+Polymarket collection covers its supported paper inventory.
+The Polymarket US component marks held paper and live markets; it combines
+public references with authenticated recovery when a live account is mapped.
+None of these discovery paths guarantees uninterrupted reference coverage.
 
-Paper watchlists can be supplied when creating a portfolio with Store.create
+Paper watchlists can be supplied when creating a cash pool with Store.create_pool
 and its watch metadata. Held positions do not require strategy-specific
 registration. A missing final payout remains an error rather than an invented
 settlement. Consumed paper liquidity is updated as book levels disappear.
@@ -81,7 +75,7 @@ settlement. Consumed paper liquidity is updated as book levels disappear.
 
 Supervise each collector independently and send its stdout/stderr to a log
 under STRATEGY_RUNS_DIR. Use absolute environment and key paths. Restart with
-the same state directory; never recreate portfolios to recover a collector.
+the same state directory; never recreate cash pools to recover a collector.
 Keep collectors running while positions need marks or settlement evidence.
 An outage leaves a historical gap even after new observations resume.
 

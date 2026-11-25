@@ -6,7 +6,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from czquant import Broker, Store
-from czquant.live import KalshiLive, LiveRoute
+from czquant.live import KalshiLive
 from czquant.monitor import polymarket_us_pass
 from czquant.operator import map_live_cross
 from czquant.polymarket_us import (PolymarketUS, PolymarketUSLive, fee, kalshi_layout, load_key,
@@ -147,9 +147,11 @@ def live(tmp_path):
 
 def test_mapping_opens_each_venue_at_its_own_cash(live):
     store, _, _ = live
-    state = Broker(store, "x").state()
-    assert state.venue_cash == {"kalshi": D("300"), "polymarket_us": D("500")} and state.cash == D("800")
-    assert Broker(store, "x").venues == ["kalshi", "polymarket_us"]
+    assert Broker(store, "x:kalshi").state().cash == D("300")
+    assert Broker(store, "x:polymarket_us").state().cash == D("500")
+    assert store.reporting_portfolios()[0]["pools"] == ["x:kalshi", "x:polymarket_us"]
+    with pytest.raises(ValueError, match="explicit venue cash pool"):
+        Broker(store, "x")
 
 
 def test_a_deposit_still_clearing_is_not_a_cash_mismatch(live):
@@ -165,7 +167,7 @@ def test_a_deposit_still_clearing_is_not_a_cash_mismatch(live):
     clearing.__dict__.update(us.__dict__)
     status = polymarket_us_pass(store, clearing)
     assert status["status"] == "healthy", status["discrepancies"]
-    assert status["balances"] == [{"portfolio": "x", "cash": "500", "recorded": "500",
+    assert status["balances"] == [{"portfolio": "x:polymarket_us", "cash": "500", "recorded": "500",
                                    "clearing_deposits": "51", "advanced": "0", "buying_power": "0"}]
 
 
@@ -197,12 +199,12 @@ def test_an_advanced_deposit_is_cash_at_once_and_counted_once(live):
     for _ in range(2):
         status = polymarket_us_pass(store, pending)
         assert status["status"] == "healthy", status["discrepancies"]
-    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("551")
+    assert Broker(store, "x:polymarket_us").state().venue_cash["polymarket_us"] == D("551")
     assert status["balances"][0]["advanced"] == "51"
     done = advancing(us, deposit("COMPLETED"), {"currentBalance": "551"})
     for _ in range(2):
         assert polymarket_us_pass(store, done)["status"] == "healthy"
-    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("551")
+    assert Broker(store, "x:polymarket_us").state().venue_cash["polymarket_us"] == D("551")
 
 
 def test_a_failed_advanced_deposit_is_taken_back_and_reported(live):
@@ -210,7 +212,7 @@ def test_a_failed_advanced_deposit_is_taken_back_and_reported(live):
     polymarket_us_pass(store, advancing(us, deposit("PENDING"), {"currentBalance": "551", "depositReservation": "51"}))
     status = polymarket_us_pass(store, advancing(us, deposit("FAILED"), {"currentBalance": "500"}))
     assert [d["kind"] for d in status["discrepancies"]] == ["deposit_failed"]
-    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("500")
+    assert Broker(store, "x:polymarket_us").state().venue_cash["polymarket_us"] == D("500")
 
 
 def test_mapping_refuses_a_polymarket_us_account_with_positions(tmp_path):
@@ -220,30 +222,31 @@ def test_mapping_refuses_a_polymarket_us_account_with_positions(tmp_path):
         map_live_cross(Store(tmp_path), FakeKalshi(), us, "x", subaccount=3)
 
 
-def test_live_orders_route_by_venue_and_only_kalshi_gets_the_subaccount(live):
+def test_two_live_brokers_share_a_portfolio_and_only_kalshi_gets_the_subaccount(live):
     store, us, kalshi = live
-    broker = Broker(store, "x", LiveRoute(KalshiLive(kalshi), PolymarketUSLive(us)))
+    broker = Broker(store, "x:kalshi", KalshiLive(kalshi))
+    poly_broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
     k = broker.submit({"ticker": "KXNBAGAME-26NOV21BOSSAC-BOS", "side": "bid", "count": "4", "price": "0.55",
                        "time_in_force": "immediate_or_cancel"})
-    p = broker.submit({"ticker": TICKER, "side": "ask", "count": "4", "price": "0.86",
+    p = poly_broker.submit({"ticker": TICKER, "side": "ask", "count": "4", "price": "0.86",
                        "time_in_force": "immediate_or_cancel"})
     assert kalshi.sent[0]["subaccount"] == 3 and "subaccount" not in us.sent[0]
     assert k["status"] == "filled" and k["filled"] == "4"
     assert p["status"] == "filled" and D(p["filled"]) == 4
     assert us.sent[0]["intent"] == "ORDER_INTENT_BUY_SHORT" and us.sent[0]["price"]["value"] == "0.86"
-    state = broker.state()
+    state = poly_broker.state()
     lot = [lot for lot in state.lots.values() if lot["market"] == TICKER][0]
     assert lot["side"] == "no" and lot["quantity"] == 4  # Sacramento (NO) at 1 - 0.86
     # 4 x 0.14 + 0.05 fee came out of Polymarket US cash only; Kalshi's waits for its monitor.
     assert state.venue_cash["polymarket_us"] == D("500") - D("0.56") - D("0.05")
-    assert state.venue_cash["kalshi"] == D("300")
-    assert broker.available_at("kalshi") < D("300")  # its reservation stands until the monitor books the fill
+    assert broker.state().cash == D("300") and "kalshi" not in state.venue_cash
+    assert broker.available < D("300")  # its reservation stands until the monitor books the fill
 
 
 def test_a_reply_without_a_final_state_is_unknown_and_keeps_its_reservation(live):
     store, _, _ = live
     us = FakeUS(executions=[{"id": "e1", "lastShares": "0", "order": {"state": "ORDER_STATE_NEW"}}])
-    broker = Broker(store, "x", LiveRoute(KalshiLive(FakeKalshi()), PolymarketUSLive(us)))
+    broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
     result = broker.submit({"ticker": TICKER, "side": "bid", "count": "4", "price": "0.5",
                             "time_in_force": "immediate_or_cancel"})
     assert result["status"] == "unknown"
@@ -254,8 +257,9 @@ def test_a_reply_without_a_final_state_is_unknown_and_keeps_its_reservation(live
 def test_dry_run_signs_but_sends_nothing(live):
     store, _, _ = live
     us, kalshi = FakeUS(dry_run=True), FakeKalshi()
-    broker = Broker(store, "x", LiveRoute(KalshiLive(kalshi, dry_run=True), PolymarketUSLive(us)))
-    for ticker in (TICKER, "KXNBAGAME-26NOV21BOSSAC-BOS"):
+    broker = Broker(store, "x:kalshi", KalshiLive(kalshi, dry_run=True))
+    poly_broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
+    for broker, ticker in ((poly_broker, TICKER), (broker, "KXNBAGAME-26NOV21BOSSAC-BOS")):
         result = broker.submit({"ticker": ticker, "side": "bid", "count": "4", "price": "0.5",
                                 "time_in_force": "immediate_or_cancel"})
         assert result["status"] == "dry_run" and result["filled"] == "0"
@@ -265,8 +269,8 @@ def test_dry_run_signs_but_sends_nothing(live):
 
 def test_the_monitor_recovers_fills_settles_and_reconciles(live):
     store, us, _ = live
-    broker = Broker(store, "x", LiveRoute(KalshiLive(FakeKalshi()), PolymarketUSLive(
-        FakeUS(executions=[{"id": "e1", "lastShares": "0", "order": {"state": "ORDER_STATE_NEW"}}]))))
+    broker = Broker(store, "x:polymarket_us", PolymarketUSLive(
+        FakeUS(executions=[{"id": "e1", "lastShares": "0", "order": {"state": "ORDER_STATE_NEW"}}])))
     broker.submit({"ticker": TICKER, "side": "bid", "count": "10", "price": "0.80", "time_in_force": "immediate_or_cancel"})
     # The venue says it filled 10 at 0.80 with a 0.15 fee.
     us.orders["o1"] = {"state": "ORDER_STATE_FILLED", "cumQuantity": 10, "avgPx": {"value": "0.80"},
@@ -280,7 +284,7 @@ def test_the_monitor_recovers_fills_settles_and_reconciles(live):
     us.market_status, us.settlement, us.cash, us.held = "MARKET_STATUS_RESOLVED", "1", us.cash + 10, {}
     status = polymarket_us_pass(store, us)
     assert status["status"] == "healthy" and status["settled_lots"] == 1
-    assert Broker(store, "x").state().venue_cash["polymarket_us"] == D("501.85")
+    assert Broker(store, "x:polymarket_us").state().venue_cash["polymarket_us"] == D("501.85")
     # Money the ledger can't explain is a discrepancy, never profit.
     us.cash += 1
     status = polymarket_us_pass(store, us)
@@ -290,7 +294,7 @@ def test_the_monitor_recovers_fills_settles_and_reconciles(live):
 def test_the_monitor_settles_paper_lots_without_credentials(tmp_path):
     from czquant.polymarket_us import PolymarketUSPaper
     store = Store(tmp_path)
-    store.create("paper", "100")
+    store.create_pool("paper", "polymarket_us", "100")
     us = FakeUS()
     us.public = lambda path, params=None: (  # an open market with Celtics bid at 0.62
         {"market": {"slug": SLUG, "status": us.market_status, "marketSides": [], "feeCoefficient": 0.095}}
@@ -307,3 +311,85 @@ def test_the_monitor_settles_paper_lots_without_credentials(tmp_path):
     assert status["settled_lots"] == 1 and not broker.state().lots
     # 100 - 3.80 cost - 0.22 fee + 10 x $1
     assert broker.state().cash == D("100") - D("3.80") - D("0.22") + 10
+
+
+def test_kalshi_unknown_reply_persists_unknown_and_keeps_only_its_venue_reserved(live):
+    store, us, kalshi = live
+    kalshi.create_order = lambda order: {"order": {"order_id": "unresolved"}}
+    broker = Broker(store, "x:kalshi", KalshiLive(kalshi))
+    request = {"ticker": "M", "client_order_id": "unknown", "side": "bid", "count": "4", "price": "0.5",
+               "time_in_force": "immediate_or_cancel"}
+    assert broker.submit(request)["status"] == "unknown"
+    assert broker.submit(request)["status"] == "unknown"  # durable retry result
+    assert broker.available == D("297.93")
+    assert Broker(store, "x:polymarket_us", PolymarketUSLive(us)).available == D("500")
+    assert not broker.state().lots
+
+
+@pytest.mark.parametrize("account_still_holds", [False, True])
+def test_live_resolution_needs_account_payout_and_retired_position(live, account_still_holds):
+    store, us, _ = live
+    broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
+    broker.submit({"ticker": TICKER, "side": "bid", "count": "4", "price": "0.5",
+                   "time_in_force": "immediate_or_cancel"})
+    cash = broker.state().venue_cash["polymarket_us"]
+    us.market_status, us.settlement = "MARKET_STATUS_RESOLVED", "1"
+    us.cash = cash + 4 if account_still_holds else cash
+    us.held = {SLUG: D(4)} if account_still_holds else {}
+    assert polymarket_us_pass(store, us)["settled_lots"] == 0
+    assert len(broker.state().lots) == 1
+    us.cash, us.held = cash + 4, {}
+    status = polymarket_us_pass(store, us)
+    assert status["settled_lots"] == 1 and status["status"] == "healthy"
+    settlement = [e for e in store.events(kinds=("transaction",)) if e["data"]["reason"] == "settlement"][-1]
+    assert settlement["data"]["evidence"]["account"]["positions"] == {}
+    assert settlement["data"]["evidence"]["account"]["balance"]["currentBalance"] == str(us.cash)
+    assert polymarket_us_pass(store, us)["settled_lots"] == 0
+
+
+def test_live_polymarket_holdings_keep_public_books_for_reporting(live):
+    store, us, _ = live
+    broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
+    broker.submit({"ticker": TICKER, "side": "bid", "count": "4", "price": "0.5",
+                   "time_in_force": "immediate_or_cancel"})
+    us.cash, us.held = broker.state().venue_cash["polymarket_us"], {SLUG: D(4)}
+    status = polymarket_us_pass(store, us)
+    assert status["status"] == "healthy"
+    mark = [e for e in store.events(kinds=("market",)) if e["data"]["ticker"] == TICKER][-1]
+    assert mark["data"]["book"] == us.book(TICKER) and mark["data"]["book"]
+
+
+def test_settlement_defers_when_ledger_changes_during_reference_reads(live):
+    store, us, _ = live
+    broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
+    broker.submit({"ticker": TICKER, "side": "bid", "count": "4", "price": "0.5",
+                   "time_in_force": "immediate_or_cancel"})
+    us.cash = broker.state().venue_cash["polymarket_us"] + 4
+    us.market_status, us.settlement, us.held = "MARKET_STATUS_RESOLVED", "1", {}
+    read = us.market
+
+    def changing_market(ticker):
+        # Another writer books a cash-neutral fill while public data is being read.
+        # A shared replay-cache object must not hide that change from reconciliation.
+        store.append("transaction", {"reason": "fill", "venue": "polymarket_us", "cash_delta": "0", "fee": "0",
+                     "legs": [{"market": "PMUS:other", "side": "yes", "quantity_delta": "1", "price": "0"}]}, "x:polymarket_us")
+        return read(ticker)
+
+    us.market = changing_market
+    assert polymarket_us_pass(store, us)["settled_lots"] == 0
+    assert any(lot["market"] == TICKER for lot in broker.state().lots.values())
+
+
+@pytest.mark.parametrize("operation", ["cancel", "amend"])
+def test_live_mutations_cannot_cross_venue_or_exceed_adapter_capabilities(live, operation):
+    store, us, kalshi = live
+    broker = Broker(store, "x:polymarket_us", PolymarketUSLive(us))
+    broker.submit({"ticker": TICKER, "client_order_id": "us-order", "side": "bid", "count": "4", "price": "0.5",
+                   "time_in_force": "immediate_or_cancel"})
+    args = ("us-order", {}) if operation == "amend" else ("us-order",)
+    before = store.events()
+    with pytest.raises(ValueError, match="does not belong"):
+        getattr(Broker(store, "x:kalshi", KalshiLive(kalshi)), operation)(*args)
+    with pytest.raises(NotImplementedError, match="does not support"):
+        getattr(broker, operation)(*args)
+    assert store.events() == before

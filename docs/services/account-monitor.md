@@ -1,8 +1,8 @@
 # Account monitor
 
 The account collector records authoritative account evidence, recovers live
-executions, and reconciles the recorded portfolio with the venue. The available
-authenticated component supports Kalshi. Paper positions are reconstructed
+executions, and reconciles recorded allocations with the venue. Authenticated
+components support Kalshi and Polymarket US. Paper positions are reconstructed
 and settled by the [market monitor](market-monitor.md); they are not evidence
 from a real account.
 
@@ -21,7 +21,7 @@ uv run czquant monitor account --once
 
 The command logs a status containing mapped, unattributed, and quarantined
 fill counts plus reconciliation discrepancies. It retains account snapshots
-and evidence even when no live portfolio is mapped. Successful public paper
+and evidence even when no live cash pool is mapped. Successful public paper
 collection does not establish that account authentication works.
 
 Run continuously under a separate process supervisor:
@@ -39,16 +39,19 @@ counts agree. Restart it with the same database.
 
 ## Reconciliation and recovery
 
-The available live mapping assigns each account/subaccount to one portfolio.
-The collector compares that portfolio's reconstructed cash and inventory with
-the account. Supported funding and settlements become economic transactions;
+Kalshi cash pools can share an account/subaccount through explicit mappings
+and allocations. The collector compares their aggregate cash and inventory
+with the account. Cash discrepancies apply to all its allocations; position
+discrepancies identify the holders of the affected market. The collector
+records these facts without imposing a universal strategy halt.
+Supported funding and settlements become economic transactions;
 raw venue evidence remains available for audit. See the
 [schema](../design-principles.md#event-envelope-and-economic-schema).
 
 An invalid or conflicting fill is quarantined rather than silently accepted.
 Unmatched fills are retained as unattributed evidence. Unknown collateral,
 manual trading, or other unsupported account effects remain discrepancies.
-Resolve their source before treating the portfolio as fully reconciled.
+Resolve their source before treating the cash pool as fully reconciled.
 Do not insert a balancing profit or delete the original facts.
 
 If an order acknowledgement was lost, the collector can recover its venue
@@ -80,3 +83,32 @@ a strategy to resume. Resume behavior belongs to that strategy.
 Account responses and logs are private. Send operational logs under the shared
 root, keep credentials outside Git, and use a full database backup for
 recovery. Implementation: [monitor.py](../../packages/czquant/src/czquant/monitor.py).
+
+## Polymarket US recovery
+
+Run its component alongside the Kalshi collector when both venues are mapped:
+
+```bash
+uv run czquant monitor polymarket-us --interval 60
+```
+
+It needs US credentials when a live cash pool is mapped. Without live mappings,
+it can use public data to mark and settle paper positions. It records held-market
+books for live valuation as well as public outcomes.
+
+For live orders with a recorded venue ID, the collector reads cumulative fills
+and fees, books missing executions through the US broker, and releases terminal
+reservations. The implemented API path cannot recover a lost acknowledgement
+without its venue ID. That order remains a discrepancy for investigation.
+
+Supported deposits, withdrawals, rebates, and deposit advances are logged as
+separate account effects. Pending advances and their reversals change funding,
+not trading profit. Balance and position snapshots retain the account evidence.
+A public resolution can retire live lots only when the observed account no
+longer holds them and its cash matches the recorded balance plus their payout.
+If those observations disagree, the lots remain and reconciliation reports
+the difference. Public paper settlement does not need this account evidence.
+
+The US component emits polymarket_us health. Report completeness for a
+reporting portfolio containing pools at both venues requires fresh healthy evidence from both
+account components, independently of a strategy's chosen halt policy.

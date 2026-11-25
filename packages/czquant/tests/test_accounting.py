@@ -76,7 +76,8 @@ def test_duplicate_fill_conflict_and_overfill(tmp_path):
     with pytest.raises(ValueError): b.fill('one','1','.4','0','extra',{})
 
 def test_timeout_retains_live_intent_without_resubmission(tmp_path):
-    store=Store(tmp_path);store.create('p',mode='live',subaccount=2)
+    store=Store(tmp_path);store.create_pool('p','kalshi',mode='live',subaccount=2)
+    store.append('transaction', {'reason':'funding','cash_delta':'1000','external_delta':'1000','legs':[]}, 'p')
     class Timeout:
         calls=0
         def create_order(self,order):
@@ -199,7 +200,8 @@ def test_multi_price_fill_cash_is_exact(tmp_path):
     assert b.state().cash==D('98.73')  # 1.21 premium + .06 fee
 
 def test_live_amend_cancel_keep_context_and_wait_for_reconciliation(tmp_path):
-    store=Store(tmp_path);store.create('p',mode='live',subaccount=2)
+    store=Store(tmp_path);store.create_pool('p','kalshi',mode='live',subaccount=2)
+    store.append('transaction', {'reason':'funding','cash_delta':'1000','external_delta':'1000','legs':[]}, 'p')
     class Adapter:
         def create_order(self,request):return {'order':{'order_id':'venue-id'}}
         def amend_order(self,identifier,changes):

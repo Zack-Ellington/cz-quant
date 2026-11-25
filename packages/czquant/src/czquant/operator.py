@@ -20,7 +20,7 @@ ZERO = Decimal(0)
 
 def active_live(store: Store) -> list[dict[str, Any]]:
     """Live portfolios that still own their accounts (retired ones are history only)."""
-    return [p for p in store.portfolios() if p['mode'] == 'live' and not p['metadata'].get('retired_at')]
+    return [p for p in store.pools() if p['mode'] == 'live' and not p['metadata'].get('retired_at')]
 
 
 def account_of(metadata: dict[str, Any]) -> tuple[int, int]:
@@ -59,7 +59,7 @@ def _check_account(subaccount: int, primary: bool) -> None:
 
 def _sharers(store: Store, subaccount: int, exchange: int, exclude: str | None = None) -> list[dict[str, Any]]:
     return [p for p in active_live(store)
-            if account_of(p['metadata']) == (subaccount, exchange) and p['id'] != exclude]
+            if p['venue'] == 'kalshi' and account_of(p['metadata']) == (subaccount, exchange) and p['id'] != exclude]
 
 
 def _opening_kalshi(store: Store, api: Any, subaccount: int, exchange: int, share: bool,
@@ -98,10 +98,10 @@ def map_live(store: Store, api: Any, portfolio: str, subaccount: int, exchange: 
     them records (often $0: use `allocate` to give it some). Subaccount 0, the primary
     account, needs `primary=True`.
     """
-    _check_account(subaccount, primary)
-    cash, evidence = _opening_kalshi(store, api, subaccount, exchange, share)
     with store.transaction():
-        store.create(portfolio, mode='live', subaccount=subaccount, exchange_index=exchange)
+        _check_account(subaccount, primary)
+        cash, evidence = _opening_kalshi(store, api, subaccount, exchange, share)
+        store.create_pool(portfolio, 'kalshi', mode='live', subaccount=subaccount, exchange_index=exchange)
         store.append('transaction', {'reason': 'funding', 'venue': 'kalshi', 'cash_delta': str(cash),
             'external_delta': str(cash), 'fee': '0', 'legs': [], 'evidence': evidence}, portfolio,
             source=f'opening-live:{portfolio}')
@@ -120,43 +120,32 @@ def transfer(store: Store, api: Any, identifier: str, source: int, target: int, 
     return result
 
 
+def map_polymarket_us(store: Store, api: Any, pool: str) -> None:
+    """Map the authenticated Polymarket US account to one explicit venue pool."""
+    with store.transaction():
+        if any(p['venue'] == 'polymarket_us' for p in active_live(store)):
+            raise ValueError('the Polymarket US account is already mapped to a live cash pool')
+        if not api.authenticated:
+            raise ValueError('Polymarket US credentials are required')
+        from .polymarket_us import position_quantity
+        if any(position_quantity(v) for v in api.positions().values()) or api.open_orders():
+            raise ValueError('Map a flat Polymarket US account with no open orders')
+        balance = api.balance()
+        cash = decimal(balance['currentBalance'])
+        store.create_pool(pool, 'polymarket_us', mode='live')
+        store.append('transaction', {'reason': 'funding', 'venue': 'polymarket_us', 'cash_delta': str(cash),
+                     'external_delta': str(cash), 'fee': '0', 'legs': [], 'evidence': {'balance': balance}},
+                     pool, source=f'opening-live-polymarket-us:{pool}')
+
+
 def map_live_cross(store: Store, kalshi: Any, polymarket_us: Any, portfolio: str, subaccount: int,
                    exchange: int = 0, primary: bool = False, share: bool = False) -> None:
-    """Map a Kalshi account and a flat Polymarket US account to one new live portfolio,
-    opening it at both accounts' cash (each booked to its own venue). The Kalshi side
-    follows `map_live`'s rules, sharing included.
-
-    Called on an existing live portfolio, it moves the portfolio's Kalshi side to another
-    Kalshi account instead (see `remap_kalshi`); its Polymarket US side is unchanged.
-
-    The Polymarket US account has no subaccounts, so the whole account belongs to this
-    portfolio: manual trades, deposits the monitor can't attribute, or another program
-    trading it show up as mismatches and halt the trader.
-    """
-    _check_account(subaccount, primary)
-    if any(p['id'] == portfolio for p in store.portfolios()):
-        remap_kalshi(store, kalshi, portfolio, subaccount, exchange, share)
-        return
-    if any('polymarket_us' in (p['metadata'].get('venues') or []) for p in active_live(store)):
-        raise ValueError('the Polymarket US account is already mapped to a live portfolio')
-    if not polymarket_us.authenticated:
-        raise ValueError('Polymarket US credentials are required (POLYMARKET_US_KEY_ID, POLYMARKET_US_SECRET_KEY_PATH)')
-    opening, evidence = _opening_kalshi(store, kalshi, subaccount, exchange, share)
-    from .polymarket_us import position_quantity
-    pm_positions = {k: v for k, v in polymarket_us.positions().items() if position_quantity(v)}
-    if pm_positions or polymarket_us.open_orders():
-        raise ValueError('Map a flat Polymarket US account with no open orders')
-    pm_balance = polymarket_us.balance()
-    pm_cash = decimal(pm_balance['currentBalance'])
+    """Create two venue pools and a reporting-only portfolio. Existing IDs never remap."""
     with store.transaction():
-        store.create(portfolio, mode='live', subaccount=subaccount, exchange_index=exchange,
-                     venues=['kalshi', 'polymarket_us'])
-        store.append('transaction', {'reason': 'funding', 'venue': 'kalshi', 'cash_delta': str(opening),
-            'external_delta': str(opening), 'fee': '0', 'legs': [], 'evidence': evidence}, portfolio,
-            source=f'opening-live:{portfolio}')
-        store.append('transaction', {'reason': 'funding', 'venue': 'polymarket_us', 'cash_delta': str(pm_cash),
-            'external_delta': str(pm_cash), 'fee': '0', 'legs': [], 'evidence': {'balance': pm_balance}},
-            portfolio, source=f'opening-live-polymarket-us:{portfolio}')
+        k, p = portfolio + ':kalshi', portfolio + ':polymarket_us'
+        map_live(store, kalshi, k, subaccount, exchange, primary, share)
+        map_polymarket_us(store, polymarket_us, p)
+        store.create_portfolio(portfolio, [k, p])
 
 
 def _active(store: Store, portfolio: str) -> dict[str, Any]:
@@ -190,6 +179,8 @@ def remap_kalshi(store: Store, api: Any, portfolio: str, subaccount: int, exchan
     `share` whatever the account's other portfolios don't record.
     """
     p = _active(store, portfolio)
+    if p['venue'] != 'kalshi':
+        raise ValueError('remap-kalshi requires a Kalshi cash pool')
     old = account_of(p['metadata'])
     if old == (subaccount, exchange):
         raise ValueError(f'{portfolio} already trades Kalshi subaccount {subaccount}')
@@ -216,18 +207,19 @@ def allocate(store: Store, source: str, target: str, dollars: Decimal) -> None:
     No money moves at Kalshi; only each portfolio's share of the account changes."""
     if dollars <= 0 or source == target:
         raise ValueError('a positive amount between two portfolios is required')
-    a, b = _active(store, source), _active(store, target)
-    if account_of(a['metadata']) != account_of(b['metadata']):
-        raise ValueError(f'{source} and {target} trade different Kalshi accounts: use `transfer` to move money')
-    free = kalshi_cash(store, a) - _kalshi_reserved(store, source)
-    if dollars > free:
-        raise ValueError(f'{source} has ${free} of free Kalshi cash')
-    tag = uuid.uuid4().hex
     with store.transaction():
+        a, b = _active(store, source), _active(store, target)
+        if a['venue'] != 'kalshi' or b['venue'] != 'kalshi' or account_of(a['metadata']) != account_of(b['metadata']):
+            raise ValueError(f'{source} and {target} trade different Kalshi accounts: use `transfer` to move money')
+        free = kalshi_cash(store, a) - _kalshi_reserved(store, source)
+        if dollars > free:
+            raise ValueError(f'{source} has ${free} of free Kalshi cash')
+        tag = uuid.uuid4().hex
+        at = utc()
         for portfolio, delta in ((source, -dollars), (target, dollars)):
             store.append('transaction', {'reason': 'funding', 'purpose': 'allocation', 'venue': 'kalshi',
                 'cash_delta': str(delta), 'external_delta': str(delta), 'fee': '0', 'legs': [],
-                'evidence': {'from': source, 'to': target}}, portfolio, source=f'allocate:{tag}:{portfolio}')
+                'evidence': {'from': source, 'to': target}}, portfolio, source=f'allocate:{tag}:{portfolio}', at=at)
 
 
 def _settle_for_retirement(store: Store, api: Any, portfolio: str, params: dict[str, Any], sub: int,
@@ -279,6 +271,8 @@ def retire_live(store: Store, api: Any, portfolio: str, book_difference: bool = 
     reconciled or traded.
     """
     p = _active(store, portfolio)
+    if p['venue'] != 'kalshi':
+        raise ValueError('retire-live currently supports Kalshi cash pools only')
     if store.reserved(portfolio):
         raise ValueError(f'{portfolio} has orders open')
     sub, exchange = account_of(p['metadata'])

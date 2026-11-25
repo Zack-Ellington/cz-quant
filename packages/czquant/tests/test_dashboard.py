@@ -25,23 +25,25 @@ def ledger_fixture(tmp_path):
     store = Store(tmp_path)
     store.create("sum-low", "1000")
     store.create("cross", "500")
+    # Historical pooled-capital fixture remains readable, but cannot execute new trades.
+    store.db.execute("DELETE FROM cash_pools WHERE id='cross'")
     store.append("run", {"status": "started", "strategy": "kalshi_sum_check", "revision": "r", "config": {}}, "sum-low")
-    store.append("run", {"status": "started", "strategy": "cross-market-sportbook", "revision": "r", "config": {}}, "cross")
+    store.append("run", {"status": "started", "strategy": "cross-market-polymarket", "revision": "r", "config": {}}, "cross")
     # sum-low: a lot on K1 bought at 0.40, then 10 of 20 sold at 0.50: realized +1 before fees.
     store.append("transaction", {"reason": "fill", "cash_delta": "-8.10", "fee": "0.10", "context": {},
                  "legs": [{"market": "K1", "side": "yes", "quantity_delta": "20", "price": "0.40"}]}, "sum-low")
     store.append("transaction", {"reason": "fill", "cash_delta": "5", "fee": "0", "context": {},
                  "legs": [{"market": "K1", "side": "yes", "quantity_delta": "-10", "price": "0.50"}]}, "sum-low")
-    # cross: a Kalshi lot and a DraftKings bet, which has no bid and is never midpoint-marked.
+    # cross: a Kalshi lot and a Polymarket token whose wide one-sided book has no midpoint.
     store.append("transaction", {"reason": "fill", "cash_delta": "-7", "fee": "0", "context": {},
                  "legs": [{"market": "K2", "side": "yes", "quantity_delta": "10", "price": "0.70"}]}, "cross")
     store.append("transaction", {"reason": "fill", "cash_delta": "-2.5", "fee": "0", "context": {},
-                 "legs": [{"market": "DK:oddsapi:nba:e:ML2:away", "side": "yes", "quantity_delta": "10", "price": "0.25"}]}, "cross")
+                 "legs": [{"market": "PM:token", "side": "yes", "quantity_delta": "10", "price": "0.25"}]}, "cross")
     store.append("market", {"ticker": "K1", "market": {"status": "active"}, "book": book("0.55", "0.57")}, at=iso(5))
     store.append("market", {"ticker": "K2", "market": {"status": "active"}, "book": book("0.72", "0.76")}, at=iso(5))
-    store.append("market", {"ticker": "DK:oddsapi:nba:e:ML2:away", "market": {"status": "open"},
+    store.append("market", {"ticker": "PM:token", "market": {"status": "open"},
                             "book": book(None, "0.25")}, at=iso(5))
-    store.append("observation", {"kind": "heartbeat", "odds_credits_remaining": 450}, "cross")
+    store.append("observation", {"kind": "heartbeat"}, "cross")
     store.append("health", {"component": "market", "status": "healthy"})
     return store
 
@@ -52,18 +54,17 @@ def test_tick_reports_realized_unrealized_and_unmarked_cost(tmp_path):
     ledger.backfill()
     rows = {r["id"]: r for r in ledger.tick()["portfolios"]}
     low, cross = rows["sum-low"], rows["cross"]
-    assert low["strategy"] == "kalshi_sum_check" and cross["strategy"] == "cross-market-sportbook"
+    assert low["strategy"] == "kalshi_sum_check" and cross["strategy"] == "cross-market-polymarket"
     n = low["now"]
     # Realized: proceeds 5 less half the 8.10 basis. Unrealized: 10 at mid 0.56 less basis 4.05.
     assert n["realized"] == D("0.95") and n["unrealized"] == D("1.55") and n["unrealized_marked"] == D("1.55")
     assert n["net_pnl"] == n["realized"] + n["unrealized"] and n["unmarked_cost"] == 0
     c = cross["now"]
-    assert c["unrealized"] is None and c["net_pnl"] is None  # the bet has no midpoint
+    assert c["unrealized"] is None and c["net_pnl"] is None  # the token has no midpoint
     assert c["unrealized_marked"] == D("0.40") and c["unmarked_cost"] == D("2.5")  # K2 mid 0.74 on 10
-    # The quote range still bounds the bet at [0, 0.25] and K2 at [0.72, 0.76].
+    # The quote range still bounds the token at [0, 0.25] and K2 at [0.72, 0.76].
     assert c["unrealized_lower"] == D("7.2") - D("9.5") and c["unrealized_upper"] == D("7.6") + D("2.5") - D("9.5")
     assert ledger.health["market"]["status"] == "healthy"
-    assert cross["activity"]["odds_credits_remaining"] == 450
 
 
 def test_the_current_point_matches_the_offline_report(tmp_path):
@@ -116,15 +117,6 @@ def test_halts_show_until_cleared(tmp_path):
     store.append("observation", {"kind": "halt_cleared", "halt_id": halt, "reason": "reviewed"}, "cross")
     rows = {r["id"]: r for r in ledger.tick()["portfolios"]}
     assert rows["cross"]["halted"] == []
-
-
-def test_odds_budget_comes_from_files_not_requests(tmp_path):
-    store = ledger_fixture(tmp_path)
-    (tmp_path / "odds_cache").mkdir()
-    (tmp_path / "odds_cache" / "credits.json").write_text(json.dumps({"source": "oddsapi", "remaining": 431, "at": 1}))
-    ledger = Ledger(store)
-    ledger.backfill()
-    assert ledger.tick()["odds"]["credits"]["remaining"] == 431
 
 
 def test_server_serves_the_page_and_streams_snapshot_then_ticks(tmp_path):
@@ -210,3 +202,18 @@ def test_a_correction_or_a_new_step_discards_the_saved_replay(tmp_path):
     assert Ledger(store, step=60)._load() is None
     (tmp_path / "dashboard_replay.json").write_text("{not json")
     assert Ledger(store, step=60)._load() is None
+
+
+def test_new_reporting_group_rebuilds_history_and_never_exposes_spendable_total(tmp_path):
+    store = Store(tmp_path)
+    store.create_pool('k', 'kalshi', '600')
+    store.create_pool('p', 'polymarket_us', '400')
+    ledger = Ledger(store, step=1)
+    ledger.backfill()
+    store.create_portfolio('combined', ['k', 'p'])
+    update = ledger.tick()
+    assert update['type'] == 'snapshot' and 'combined' in update['series']
+    combined = next(row for row in update['portfolios'] if row['id'] == 'combined')
+    assert combined['kind'] == 'portfolio' and combined['pools'] == ['k', 'p']
+    assert combined['now']['equity'] == 1000 and combined['now']['available'] is None
+    assert all(p['now']['available'] is not None for p in update['portfolios'] if p['kind'] == 'pool')
