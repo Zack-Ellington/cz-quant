@@ -16,7 +16,7 @@ edge per set = 1 − Σ over outcomes of min(Kalshi YES ask + taker fee, 1 / Dra
 | BKN @ BOS | BOS YES ask 0.70, fee ≈ 0.015 | BKN 4.00 → 0.25 | 0.965 per $1: edge 0.035 |
 
 It is paper only. Kalshi legs and DraftKings bets both go through the shared
-[broker](../../docs/broker-and-reporting.md), into one portfolio with one cash
+[broker interface](../../docs/design-principles.md#shared-broker-interface), into one portfolio with one cash
 balance. The shared market and DraftKings monitors settle them, and the shared
 report measures them.
 
