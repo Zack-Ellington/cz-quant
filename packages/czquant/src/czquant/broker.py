@@ -280,7 +280,7 @@ class Broker:
             for target in targets:
                 data = known[target]["data"]
                 legs = data.get("legs", [])
-                venue = data.get("venue") or (venue_of(legs[0]["market"]) if legs else "kalshi")
+                venue = venue_of(legs[0]["market"]) if legs else data.get("venue", "kalshi")
                 if venue != self.venue:
                     raise ValueError("correction targets must belong to this venue")
             identifier = self.store.append("correction", {"targets": targets, "reason": reason}, self.portfolio, self.run_id,

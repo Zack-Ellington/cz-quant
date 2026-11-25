@@ -131,3 +131,17 @@ def test_cross_venue_report_requires_both_accounts_and_records_mode_and_code(tmp
     assert all(len(digest) == 64 for digest in manifest["implementation_sha256"].values())
     assert "| live | live |" in (output / "comparison.md").read_text()
     assert json.loads((output / "manifest.json").read_text())["implementation_sha256"] == manifest["implementation_sha256"]
+
+
+def test_legacy_sportsbook_transaction_uses_its_instrument_for_correction_ownership(tmp_path):
+    store = Store(tmp_path)
+    store.create("p", "10")
+    # Earlier venue_cash logging classified DK tickers as Kalshi. Their instrument
+    # still identifies the broker that owns their inventory and corrections.
+    target = store.append("transaction", {"reason": "fill", "venue": "kalshi", "cash_delta": "-1",
+                          "fee": "0", "legs": [{"market": "DK:selection", "side": "yes",
+                          "quantity_delta": "2", "price": "0.5"}]}, "p")
+    with pytest.raises(ValueError, match="this venue"):
+        Broker(store, "p").correct([target], "legacy attribution")
+    Broker(store, "p", venue="draftkings").correct([target], "fixture correction")
+    assert Broker(store, "p").state().cash == 10
