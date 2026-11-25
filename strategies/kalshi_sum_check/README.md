@@ -7,7 +7,7 @@ and CZQUANT_PORTFOLIO, then run `uv run python paper_ws.py --preset low --feed r
 or preset high. Export credentials explicitly when using WebSockets; code does
 not read .env. Both presets use independent per-leg IOC simulation. Start the
 separate market monitor to settle positions. Use the
-[shared report](../../docs/broker-and-reporting.md) for portfolio results.
+[shared report](../../docs/services/reporting.md) for portfolio results.
 The JSONL dashboard and void commands below apply only to historical ledgers.
 
 
@@ -83,7 +83,7 @@ uv run python ledger_dash.py                       # dashboard at http://localho
 Credentials come from exported environment variables. Use KALSHI_API_KEY_ID
 and an absolute KALSHI_PRIVATE_KEY_PATH. After editing .env, explicitly export
 it with `set -a; source .env; set +a`. The application does not load this file.
-See [account setup](../../docs/kalshi-setup.md).
+See [account setup](../../docs/services/kalshi-broker.md#credentials-and-account-setup).
 
 **Feed.** Kalshi's `orderbook_delta` WebSocket rejects connections without an API
 key. Set `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` to a **production** key;

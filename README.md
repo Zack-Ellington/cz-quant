@@ -1,21 +1,22 @@
 # cz-quant
 
-## Shared broker experiments
+## Design and shared accounting
 
-The [broker and reporting guide](docs/broker-and-reporting.md) describes the
-common economic log, persistent portfolios, independent market/account
-monitors, and offline comparison. It supports both sum presets and the two
-election strategies. Strategies retain their own market readers and models.
-The trial and recovery instructions are in [experiment operations](docs/experiment-operations.md).
-
+The [design principles](docs/design-principles.md) are the authoritative
+reference for development and review: independent strategies, all trades
+through a broker scoped to one venue and cash pool, and common local logging
+for fair comparison. Rewrites and code duplication support experimentation.
+Strategies own their market readers, models, and schedules; using the shared
+market or account monitors is not a required strategy interface.
 
 Quantitative trading strategies. The first venue is the Kalshi prediction
 market.
 
-The repo is a monorepo of strategies. Each strategy is a standalone project:
-it has its own install, its own secrets, and one command that runs it. There is
-no shared library and no root install, so a strategy can be deployed, pinned,
-or retired without an effect on the others.
+The repo is a monorepo of separately installed strategy projects. There is no
+root install. The shared packages/czquant library provides execution accounting
+and reporting infrastructure. Each strategy owns its research implementation
+and entry point, so it can be deployed, pinned, rewritten, or retired
+independently.
 
 ## Strategies
 
@@ -36,9 +37,9 @@ or retired without an effect on the others.
 You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct
 Python version for each strategy.
 
-For authenticated monitoring and future live subaccounts, see
-[Kalshi account setup](docs/kalshi-setup.md). Advanced API access is required
-to create subaccounts; public-data paper runs do not require it.
+For authenticated monitoring and live account mapping, see the
+[Kalshi broker guide](docs/services/kalshi-broker.md). Public-data paper runs
+do not require account credentials.
 
 ```bash
 git clone git@github.com:Zack-Ellington/cz-quant.git
@@ -87,54 +88,55 @@ model-vs-market table, and paper-trades into `runs/` (nothing is ever sent). See
 [README](strategies/2026-midterm-prediction-arbitrage/README.md) for the method,
 a sample report, and the reproducible `--snapshot-in` run.
 
-## Runs and reporting
+## Shared services
 
-Every `uv run strategy` writes one directory, `runs/<strategy-id>/<UTC time>/`,
-at the repo root (gitignored). The strategies share nothing but this layout,
-and it is what makes them comparable.
-
-| File | Content |
-| --- | --- |
-| `ledger.jsonl` | the accounting record: one flat row per cash flow or mark, the only file reporting reads |
-| `events.jsonl` | what the strategy saw and decided (scans, accepted and rejected signals, notes); diagnostics |
-| `run.json` | strategy id, start and end, git commit, command line, API base URL, mode, paper policy, status |
-| `run.log` | what the run printed |
-
-Every ledger row has the same thirteen columns, so the ledgers of every run of
-every strategy concatenate into one table:
-
-| Column | |
-| --- | --- |
-| `ts`, `run_id`, `strategy` | when, which run, which strategy |
-| `type` | `fill` (a leg bought), `settlement` (a leg paid out), `mark` (an open leg valued at the current market) |
-| `position_id`, `basket` | the position the row belongs to; a position is open until a settlement row appears |
-| `ticker`, `side`, `quantity` | the contract (`yes` or `no`) and how many |
-| `price` | dollars per contract paid (fill), $1 or $0 (settlement), or what a buyer pays now (mark) |
-| `fee`, `cash_delta` | the net Kalshi fee, and the change in the account balance (0 for a mark) |
-| `simulated` | true in paper mode |
-
-From the rows alone: capital committed is minus the sum of fill cash deltas;
-cash is the sum of fill and settlement cash deltas; the value of the open book
-is quantity times the latest mark per open leg; P&L is cash plus value; return
-is P&L over capital committed. The schema is documented in each strategy's
-`src/strategy/ledger.py`.
-
-`scripts/` is a small uv project that reads the tree:
+Install the shared CLI separately from strategy environments. From the
+repository root:
 
 ```bash
-cd scripts
+cd packages/czquant
 uv sync
-uv run pnl csv -o ../ledger.csv                  # every row of every strategy, one CSV
-uv run pnl report                                # latest capital, cash, value, P&L, return per strategy
-uv run pnl plot --strategies 2026-midterm-prediction-arbitrage,2026-midterm-dependence-arbitrage \
-    --since 2026-10-01 --until 2026-12-31 -o ../pnl.html   # P&L and return over time, plus pnl.csv
 ```
 
-`--since` and `--until` select positions by entry date; every later mark and
-settlement of a selected position is kept. The plot has one point per run per
-strategy. Tests: `uv run --group dev pytest` from `scripts/`.
+Select an absolute state directory outside the checkout. Replace the example
+path with a writable private directory, and export the same value in every
+strategy, monitor, and reporting shell:
 
-### Create a new strategy
+```bash
+export STRATEGY_RUNS_DIR=/absolute/path/to/czquant-runs
+mkdir -p "$STRATEGY_RUNS_DIR"
+```
+
+The directory holds accounting.sqlite3 and supporting artifacts. Services do
+not load .env files; export their variables explicitly. The --runs-dir option
+on the shared CLI can select a different root for inspection or restore.
+
+- [Kalshi broker](docs/services/kalshi-broker.md): paper orders, authentication,
+  live mapping, allocation operations, and recovery.
+- [Polymarket broker](docs/services/polymarket-broker.md): international outcome
+  tokens, paper orders, and settlement collection.
+- [Market monitor](docs/services/market-monitor.md): public reference data,
+  paper settlements, coverage, and process operation.
+- [Account monitor](docs/services/account-monitor.md): authenticated evidence,
+  live fill recovery, reconciliation, and halt inspection.
+- [Reporting](docs/services/reporting.md): comparisons, dashboard, export,
+  valuation policy, and backup/restore.
+
+The guides describe available commands. The design contract can require
+boundaries that existing implementations have not yet enforced; capability
+limits are stated in the relevant service guide. All new strategy trades
+must use the broker contract.
+
+## Runs and reporting
+
+Broker-backed runs write to the shared store. Use the reporting service for
+uniform accounting and independent valuation. The election strategies also
+retain standalone paper ledgers under runs/<strategy-id>/<UTC time>. Their
+strategy READMEs describe that compatibility path. The commands in
+[scripts/pnl.py](scripts/pnl.py) read those JSONL ledgers, not the shared store;
+they are not the integration path for new strategies.
+
+## Create a new strategy
 
 1. From the repo root, run the script with a new strategy id. Use lowercase letters, digits, and hyphens, for example `2026-midterm-prediction-arbitrage`. The script copies `strategies/_template/` to `strategies/<strategy-id>/` and sets the project name.
 
@@ -152,7 +154,7 @@ strategy. Tests: `uv run --group dev pytest` from `scripts/`.
    uv run strategy
    ```
 
-3. Write the strategy in `src/strategy/runner.py`. Read secrets with `os.environ`. The code must not read `.env`; the user exports the variables. Add modules under `src/strategy/` as the strategy grows. Add options to the parser in `cli.py` and pass them to `run()`.
+3. Write the strategy in `src/strategy/runner.py`, or replace the scaffold with the structure the experiment needs. Route every trade through a broker bound to its venue and cash pool; see the [design principles](docs/design-principles.md) and [broker example](docs/services/kalshi-broker.md#paper-execution). Read secrets with `os.environ`. The code must not read `.env`; the user exports the variables. The scaffold's options go in `cli.py` and pass to `run()`.
 
    ```python
    import os
@@ -181,14 +183,16 @@ cz-quant/
 ├── scripts/
 │   ├── new-strategy.sh          # creates a strategy from the template
 │   └── pnl.py                   # `uv run pnl`: one CSV, a P&L table, a P&L plot across strategies
-├── runs/                        # gitignored; one directory per run, per strategy
+├── packages/czquant/            # broker, accounting, monitors, reports
+├── docs/design-principles.md    # authoritative development contract
+├── runs/                        # legacy JSONL output; shared state lives outside worktrees
 │   └── <strategy-id>/<UTC time>/
 │       ├── ledger.jsonl         # flat accounting rows: fill, settlement, mark
 │       ├── events.jsonl         # scans and signals, diagnostics
 │       ├── run.json             # run metadata
 │       └── run.log              # what the run printed
 └── strategies/
-    ├── _template/               # the template that every strategy starts from
+    ├── _template/               # optional starting scaffold
     └── <strategy-id>/
         ├── pyproject.toml       # standalone install
         ├── uv.lock              # pinned dependencies, committed
@@ -202,8 +206,9 @@ cz-quant/
 
 ## How a strategy runs
 
-Every strategy has the same interface: `uv sync`, then `uv run strategy`, from
-the strategy directory.
+The template and election strategies use `uv sync`, then `uv run strategy`,
+from the strategy directory. Other strategies use their documented script
+entry points. A common command or engine is not a strategy requirement.
 
 `uv sync` creates `.venv/` in the strategy directory from `pyproject.toml` and
 `uv.lock`. The `strategy` command is `main()` in `src/strategy/cli.py`. It
@@ -221,8 +226,9 @@ each strategy installs into its own virtual environment, and it keeps the
 template free of names that must be changed.
 
 Do not import code from one strategy into another. If two strategies need the
-same code, copy it first. Propose a shared package only when a second real use
-makes the duplication a problem.
+same research code, copy it so each can change independently. Shared execution
+accounting is the required boundary; a shared strategy utility or framework
+must not become an additional integration requirement.
 
 ## Secrets
 
