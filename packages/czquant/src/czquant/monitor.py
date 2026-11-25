@@ -16,11 +16,9 @@ from .accounting import portfolio_state, replay, venue_of
 from .broker import PRIMARY, Broker, scope
 from .kalshi import Kalshi
 from .book import levels
-from .draftkings import DraftKings, is_sportsbook, parse_ticker
 from .paper import update_consumed
 from .polymarket import Polymarket, is_polymarket
 from .polymarket_us import PolymarketUS, amount, is_polymarket_us, position_quantity, slug_of
-from .sportsbook import settle_lots
 from .operator import account_of, active_live, kalshi_cash, kalshi_positions
 from .store import Store, decimal, utc
 
@@ -36,7 +34,7 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
         tickers.add(json.loads(row[0])["ticker"])
     for p in portfolios:
         tickers.update(p["metadata"].get("watch", []))
-    # Sportsbook selections and Polymarket tokens have their own readers and monitors.
+    # Collect only this venue; other or retired namespaces are never sent to Kalshi.
     tickers = {t for t in tickers if venue_of(t) == "kalshi"}
     if not tickers:
         # A real public-data probe, even for no-trade portfolios.
@@ -79,83 +77,6 @@ def market_pass(store: Store, api: Any) -> dict[str, Any]:
               "markets": len(tickers), "errors": errors}
     store.append("health", status)
     return status
-
-
-def sportsbook_pass(store: Store, book: DraftKings) -> dict[str, Any]:
-    """Reference odds and paper settlement for held or pending sportsbook selections.
-
-    Odds cost credits, so this pass never buys them: it marks held selections from
-    the newest read any process cached (the trader's), dated when that read was
-    made, so a mark is as stale as it really is. It records a mark only when a newer
-    read or a status change arrives. Results are the one paid read: once per league
-    every `results_minutes`, only for games that started at least `settle_after_hours`
-    ago, all of a league's events in one call. Finalized selections settle every
-    paper lot: 1 or 0, or the lot's own price on a void, which returns the stake.
-    """
-    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
-    tickers = {lot["market"] for p in portfolios
-               for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
-    for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
-        tickers.add(json.loads(row[0])["ticker"])
-    for p in portfolios:
-        tickers.update(p["metadata"].get("watch", []))
-    tickers = {t for t in tickers if is_sportsbook(t)}
-    errors: list[dict[str, Any]] = []
-    now = time.time()
-    due: set[str] = set()
-    for ticker in tickers:
-        parts = parse_ticker(ticker)
-        if now - book.results_checked.get(parts["league"], -1e18) < book.results_minutes * 60:
-            continue
-        start = _start(store, book, ticker)
-        if start is not None and now - start >= book.settle_after_hours * 3600:
-            due.add(parts["event"])
-    try:
-        markets = book.markets(sorted(tickers), results_for=due, fetch=False) if tickers else {}
-        for ticker in tickers:
-            if parse_ticker(ticker)["event"] in due:
-                book.results_checked[parse_ticker(ticker)["league"]] = now
-    except Exception as exc:
-        log.exception("sportsbook read failed")
-        markets = {}
-        errors.append({"reason": type(exc).__name__, "detail": str(exc)[:300]})
-    settled = 0
-    for ticker in sorted(tickers):
-        if ticker not in markets:
-            if not errors:
-                errors.append({"market": ticker, "reason": "missing"})
-            continue
-        market, raw = markets[ticker]
-        key = (market.get("fetched_at"), market["status"])
-        if market["status"] == "finalized" or book.last_marked.get(ticker) != key:
-            observed = utc()
-            # Date the mark by its read, not by this pass, so report staleness rules apply honestly.
-            at = market.get("fetched_at") if market["status"] != "finalized" and market.get("fetched_at") else observed
-            store.append("market", {"ticker": ticker, "market": market, "book": raw}, at=at)
-            book.last_marked[ticker] = key
-        if market["status"] == "finalized":
-            settled += settle_lots(store, ticker, market, {"market": market, "observed_at": utc()},
-                                   "sportsbook-monitor")
-        elif market["status"] == "closed":
-            errors.append({"market": ticker, "reason": "awaiting_result"})
-    status = {"component": "draftkings", "source": book.source.name,
-              "status": "healthy" if not errors else "degraded", "markets": len(tickers),
-              "settled_lots": settled, "results_checked": sorted(due), "credits_remaining": book.credits(),
-              "errors": errors}
-    store.append("health", status)
-    return status
-
-
-def _start(store: Store, book: DraftKings, ticker: str) -> float | None:
-    """A selection's start time: from the newest cached read, else its last recorded mark."""
-    parts = parse_ticker(ticker)
-    selection = next((s for s in book.selections(parts["league"], fetch=False) if s.ticker == ticker), None)
-    if selection is not None:
-        return datetime.fromisoformat(selection.start).timestamp()
-    row = store.db.execute("SELECT json_extract(data,'$.market.start') FROM events WHERE type='market' AND "
-                           "json_extract(data,'$.ticker')=? AND json_extract(data,'$.market.start') IS NOT NULL "
-                           "ORDER BY sequence DESC LIMIT 1", (ticker,)).fetchone()
-    return datetime.fromisoformat(row[0]).timestamp() if row else None
 
 
 def fill_time(fill: dict[str, Any]) -> str:
@@ -339,8 +260,13 @@ def polymarket_pass(store: Store, client: Polymarket) -> dict[str, Any]:
             with store.transaction():
                 update_consumed(store, ticker, levels(raw), time.time())
             if market["status"] == "finalized":
-                settled += settle_lots(store, ticker, market, {"market": market, "observed_at": observed},
-                                       "paper-polymarket-monitor")
+                for p in portfolios:
+                    broker = Broker(store, p["id"], venue="polymarket", run_id="paper-polymarket-monitor")
+                    for lot_id, lot in list(broker.state().lots.items()):
+                        if lot["market"] == ticker:
+                            broker.settle(lot_id, str(market["settlement_value_dollars"]),
+                                          {"market": market, "observed_at": observed})
+                            settled += 1
         except Exception as exc:
             errors.append({"market": ticker, "reason": type(exc).__name__})
             log.exception("polymarket observation failed for %s", ticker)
@@ -599,10 +525,10 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
 
 def run_monitor(root: str, component: str, interval: float = 60, once: bool = False) -> None:
     store = Store(root)
-    api: Any = (DraftKings.from_env() if component == "draftkings" else Polymarket.from_env()
-                if component == "polymarket" else PolymarketUS.from_env() if component == "polymarket-us"
-                else Kalshi(authenticated=component == "account"))
-    passes = {"market": market_pass, "account": account_pass, "draftkings": sportsbook_pass,
+    api: Any = (Polymarket.from_env() if component == "polymarket" else
+                PolymarketUS.from_env() if component == "polymarket-us" else
+                Kalshi(authenticated=component == "account"))
+    passes = {"market": market_pass, "account": account_pass,
               "polymarket": polymarket_pass, "polymarket-us": polymarket_us_pass}
     while True:
         start = time.monotonic()

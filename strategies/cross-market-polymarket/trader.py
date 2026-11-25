@@ -1,34 +1,9 @@
-"""Trader for the cross-market sum check: Kalshi game markets against Polymarket
-moneylines, on Polymarket US (default) or the international exchange (paper only).
+"""Independent cross-market sum check using one broker per venue.
 
-Paper by default. With --live it sends real IOC orders to Kalshi and Polymarket US for
-a live portfolio mapped to both accounts (`czquant map-live-cross`), within dollar caps
-(--max-basket-dollars, --max-total-dollars). --live --dry-run builds and signs every
-order and sends none. A live run trades only while `czquant monitor account` and
-`czquant monitor polymarket-us` report recently and agree with the ledger; it halts on
-any discrepancy or on an order whose outcome is unknown.
-
-Each tick
-  discover  every --discover minutes, the open Kalshi game events and the open
-            Polymarket game events of each enabled league in leagues.json, and each
-            Kalshi series' fee schedule
-  pair      each Kalshi game with exactly one Polymarket moneyline (matching.py,
-            pairs.json): same date, same two team abbreviations
-  price     both venues' books for every paired game (public reads; Kalshi through the
-            shared request budget); the best basket that beats the hurdle (sum_check.py)
-  execute   highest APR first, within limits: re-check on fresh books, then send the
-            legs one at a time as IOC orders, the thinnest book first. Each later leg
-            asks for no more than the smallest fill so far, and contracts beyond the
-            complete sets are sold back (reduce-only IOC) within --unwind-slippage.
-Settlement belongs to the monitors: `czquant monitor market` settles Kalshi legs and
-`czquant monitor polymarket` settles international Polymarket tokens (paper) and
-`czquant monitor polymarket-us` reconciles and settles the live Polymarket US account. A fully filled basket that
-settles at a loss halts new trades, also after a restart; partial baskets are
-recorded only.
-
-Usage
-  uv run python trader.py --duration 1:00
-  uv run python trader.py --once --leagues nba
+Paper by default; --live uses Kalshi and Polymarket US. The strategy owns matching,
+sizing, sequential IOC execution, partial-fill repairs, and monitor-health gates.
+Brokers retain execution evidence in the shared portfolio log. See README.md for
+configuration, collectors, recovery, and the supported venue modes.
 """
 
 from __future__ import annotations

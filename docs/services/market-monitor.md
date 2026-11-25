@@ -44,25 +44,6 @@ It marks held paper and live markets and settles paper lots from final results.
 A mapped live account also enables authenticated recovery and reconciliation;
 see the [account guide](account-monitor.md#polymarket-us-recovery).
 
-For DraftKings paper bets, use the configured source:
-
-```bash
-export DRAFTKINGS_SOURCE=oddsapi
-uv run czquant monitor draftkings
-```
-
-The oddsapi source needs ODDS_API_KEY. The collector reuses odds already in
-the shared odds_cache directory, preserving their read times. It requests
-results for eligible held games, paced by its configured result interval.
-It does not independently refresh odds, so quote coverage depends on another
-process refreshing that cache. See the
-[sportsbook strategy's source configuration](../../strategies/cross-market-sportbook/README.md#draftkings-data).
-
-When a supported sportsbook result needs operator evidence, the explicit
-settle-sportsbook command accepts a ticker, --result yes, no, or void, and
---note describing the source. It records the result and settles paper lots.
-A void returns their stake. This operation changes the paper ledger.
-
 ## Coverage and verification
 
 Add --once to run one collection pass and exit:
@@ -80,7 +61,7 @@ prove every market was collected; inspect errors and reference coverage.
 The Kalshi collector discovers both paper and live holdings, outstanding
 orders, and portfolio watchlists. It continues marking positions after live
 orders finish, but public outcomes settle only paper lots. International
-Polymarket and DraftKings collectors cover their supported paper inventory.
+Polymarket collection covers its supported paper inventory.
 The Polymarket US component marks held paper and live markets; it combines
 public references with authenticated recovery when a live account is mapped.
 None of these discovery paths guarantees uninterrupted reference coverage.

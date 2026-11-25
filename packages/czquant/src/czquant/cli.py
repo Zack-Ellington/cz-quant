@@ -15,13 +15,9 @@ def main() -> None:
     create.add_argument('--cash', default='1000')
     create.add_argument('--label', default='')
     monitor = commands.add_parser('monitor')
-    monitor.add_argument('component', choices=['market','account','draftkings','polymarket','polymarket-us'])
+    monitor.add_argument('component', choices=['market','account','polymarket','polymarket-us'])
     monitor.add_argument('--once', action='store_true')
     monitor.add_argument('--interval', type=float, default=60)
-    settle = commands.add_parser('settle-sportsbook')
-    settle.add_argument('ticker')
-    settle.add_argument('--result', choices=['yes','no','void'], required=True)
-    settle.add_argument('--note', required=True, help='the evidence: source and final score')
     dashboard = commands.add_parser('dashboard', help='live portfolio comparison in the browser (read-only)')
     dashboard.add_argument('--host', default='127.0.0.1')
     dashboard.add_argument('--port', type=int, default=8790)
@@ -83,9 +79,6 @@ def main() -> None:
     elif args.command == 'monitor':
         from .monitor import run_monitor
         run_monitor(str(store.root), args.component, args.interval, args.once)
-    elif args.command == 'settle-sportsbook':
-        from .sportsbook import operator_settle
-        print(encode({'settled_lots': operator_settle(store, args.ticker, args.result, args.note)}))
     elif args.command == 'dashboard':
         import asyncio
         from .dashboard import serve

@@ -1,6 +1,6 @@
 """Live comparison of every portfolio over a websocket.
 
-Reads the shared store only: no credentials, no venue requests, no odds credits.
+Reads the shared store only: no credentials or venue requests.
 Every portfolio in the store appears on its own, so a new strategy needs nothing
 here; its name comes from the portfolio's latest run record.
 
@@ -12,8 +12,7 @@ range is at most 2 cents wide), and the quote range otherwise. Per portfolio and
   unrealized          midpoint value of open lots minus their cost basis, only when
                       every open lot has a midpoint (as in the report)
   unrealized_marked   the same over the lots that have a midpoint; unmarked_cost is
-                      the cost basis of the rest (DraftKings bets have no bid, so
-                      they are never midpoint-marked; stale books are unmarked)
+                      the cost basis of the rest, including stale or missing books
   unrealized range    quote envelope of all open lots, None if any mark is stale
   net P&L             equity minus net external funding (point and range)
 
@@ -103,8 +102,6 @@ class Ledger:
                 self.halts.get(pid, {}).pop(d.get("halt_id"), None)
             if kind in ("heartbeat", "scan_complete"):
                 self.activity.setdefault(pid, {})["last"] = event["effective_at"]
-                if d.get("odds_credits_remaining") is not None:
-                    self.activity[pid]["odds_credits_remaining"] = d["odds_credits_remaining"]
             if kind == "error":
                 self.activity.setdefault(pid, {})["last_error"] = {"at": event["effective_at"], **d}
 
@@ -219,24 +216,13 @@ class Ledger:
             self.replayed_through, self.market_sequence = now.isoformat(), self.sequence
             self.marks_at_grid = dict(self.marks)
         self.latest = {"generated_at": now.isoformat(timespec="seconds"), "step": self.step, "portfolios": rows,
-                       "health": self.health, "odds": self.odds()}
+                       "health": self.health}
         return {"type": "tick", **self.latest, "append": appended}
 
     def snapshot(self) -> dict[str, Any]:
         if not self.latest:
             self.tick()
         return {"type": "snapshot", **self.latest, "series": self.series}
-
-    def odds(self) -> dict[str, Any]:
-        """Credits and trial end, from the files the DraftKings flow writes. No request."""
-        out: dict[str, Any] = {}
-        for name in ("credits", "trial"):
-            path = Path(self.store.root) / "odds_cache" / f"{name}.json"
-            try:
-                out[name] = json.loads(path.read_text())
-            except (OSError, ValueError):
-                pass
-        return out
 
 
 def _share(rows: list[dict[str, Any]], key: str) -> float | None:
@@ -322,9 +308,8 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th
 <section class="panel scroll"><table id="table"><thead><tr>
 <th>Strategy</th><th>Portfolio</th><th>Realized</th><th>Unrealized</th><th>Unrealized (marked)</th><th>Unmarked cost</th>
 <th>Net P&amp;L</th><th>Net P&amp;L range</th><th>Fees</th><th>Fills</th><th>Settled</th><th>Open</th><th>Midpoint cov.</th><th>Last activity</th></tr></thead><tbody></tbody></table>
-<p class="muted">Valuation follows the shared report: 120-second marks, a midpoint only from a two-sided book, quote ranges otherwise.
-Unrealized is shown only when every open lot has a midpoint; "marked" covers the lots that do, and unmarked cost is the rest
-(DraftKings bets have no bid, so they stay unmarked until settled). Ranges are quote envelopes, not liquidation values.</p></section>
+<p class="muted">Valuation follows the shared report: 120-second marks, two-sided midpoints or one-sided midpoints for quote ranges at most 2 cents wide.
+Unrealized is shown only when every open lot has a midpoint; "marked" covers the lots that do, and unmarked cost is the rest. Ranges are quote envelopes, not liquidation values.</p></section>
 <section class="charts">
 <div class="panel"><div class="chart" id="realized"></div></div>
 <div class="panel"><div class="chart" id="unrealized"></div></div>
@@ -356,12 +341,9 @@ function render(){const ps=state.portfolios;
   return`<tr><td>${p.strategy}${halt}</td><td>${p.id}</td><td>${money(n.realized)}</td><td>${money(n.unrealized)}</td><td>${money(n.unrealized_marked)}</td>
   <td>${num(n.unmarked_cost)?money(n.unmarked_cost):'<span class="muted">$0.00</span>'}</td><td>${money(n.net_pnl)}</td><td>${range}</td><td>${money(n.fees)}</td>
   <td>${n.fills}</td><td>${n.settlements}</td><td>${n.open_lots}</td><td>${pct(p.midpoint_coverage)}</td><td>${ago(p.activity.last)}</td></tr>`}).join('')||'<tr><td colspan="14" class="muted">No portfolios yet. Create one with czquant portfolio.</td></tr>';
- const cards=['market','account','draftkings'].map(c=>{const h=state.health[c];if(!h)return`<div class="card"><b>${c} monitor</b><span class="muted">not running</span></div>`;
+ const cards=['market','account','polymarket','polymarket_us'].map(c=>{const h=state.health[c];if(!h)return`<div class="card"><b>${c} monitor</b><span class="muted">not running</span></div>`;
   const age=(Date.now()-new Date(h.at))/1000;const st=age>300?'stale':h.status;
   return`<div class="card"><b>${c} monitor</b><span><i class="dot ${st}"></i>${st}, ${ago(h.at)}</span></div>`});
- const o=state.odds||{};const cr=o.credits;const tr=o.trial;
- cards.push(`<div class="card"><b>Odds API credits</b><span>${cr?cr.remaining+' left, '+ago(cr.observed_at):'<span class="muted">no reads yet</span>'}</span></div>`);
- if(tr)cards.push(`<div class="card"><b>Odds trial ends</b><span>${new Date(tr.end*1000).toLocaleString()}</span></div>`);
  $('health').innerHTML=cards.join('');$('status').textContent=`updated ${new Date(state.generated_at).toLocaleTimeString()} · grid ${state.step}s`}
 function connect(){const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);
  ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='snapshot'){series=m.series}else{for(const[k,v]of Object.entries(m.append||{}))(series[k]=series[k]||[]).push(v)}

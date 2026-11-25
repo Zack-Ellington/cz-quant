@@ -1,7 +1,7 @@
 [project]
 name = "cross-market-polymarket"
 version = "0.1.0"
-description = "Cross-venue sum check: Kalshi game markets against Polymarket moneylines, paper traded through the shared broker."
+description = "Cross-market sum check with separate Kalshi and Polymarket brokers."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

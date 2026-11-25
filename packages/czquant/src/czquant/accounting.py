@@ -12,14 +12,13 @@ ZERO = Decimal(0)
 
 
 def venue_of(market: str) -> str:
-    """Venue identity for the supported contract ticker namespaces."""
-    if market.startswith("DK:"):
-        return "draftkings"
+    """Known venue names; keep other namespaces distinct for historical replay."""
     if market.startswith("PMUS:"):
         return "polymarket_us"
     if market.startswith("PM:"):
         return "polymarket"
-    return "kalshi"
+    namespace, separator, _ = market.partition(":")
+    return namespace.lower() if separator else "kalshi"
 
 
 @dataclass

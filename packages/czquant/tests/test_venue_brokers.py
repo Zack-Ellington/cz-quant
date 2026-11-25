@@ -23,8 +23,7 @@ def order(ticker, identifier):
     return {"ticker": ticker, "client_order_id": identifier, "side": "bid", "count": "2", "price": "0.5"}
 
 
-@pytest.mark.parametrize("venue,ticker", [("polymarket", "PM:token"), ("polymarket_us", "PMUS:slug"),
-                                          ("draftkings", "DK:selection")])
+@pytest.mark.parametrize("venue,ticker", [("polymarket", "PM:token"), ("polymarket_us", "PMUS:slug")])
 def test_wrong_venue_rejected_before_intent_or_adapter_call(tmp_path, venue, ticker):
     store = Store(tmp_path)
     store.create("p", "10")
@@ -133,15 +132,40 @@ def test_cross_venue_report_requires_both_accounts_and_records_mode_and_code(tmp
     assert json.loads((output / "manifest.json").read_text())["implementation_sha256"] == manifest["implementation_sha256"]
 
 
-def test_legacy_sportsbook_transaction_uses_its_instrument_for_correction_ownership(tmp_path):
+def test_historical_transaction_keeps_its_namespace_for_replay_and_corrections(tmp_path):
     store = Store(tmp_path)
     store.create("p", "10")
-    # Earlier venue_cash logging classified DK tickers as Kalshi. Their instrument
-    # still identifies the broker that owns their inventory and corrections.
+    # Historical instruments remain readable without an active venue adapter.
     target = store.append("transaction", {"reason": "fill", "venue": "kalshi", "cash_delta": "-1",
-                          "fee": "0", "legs": [{"market": "DK:selection", "side": "yes",
+                          "fee": "0", "legs": [{"market": "RETIRED:selection", "side": "yes",
                           "quantity_delta": "2", "price": "0.5"}]}, "p")
     with pytest.raises(ValueError, match="this venue"):
         Broker(store, "p").correct([target], "legacy attribution")
-    Broker(store, "p", venue="draftkings").correct([target], "fixture correction")
+    Broker(store, "p", venue="retired").correct([target], "fixture correction")
     assert Broker(store, "p").state().cash == 10
+
+
+def test_retired_instruments_remain_in_history_without_reaching_kalshi(tmp_path):
+    store = Store(tmp_path)
+    store.create("p", "10")
+    store.append("transaction", {"reason": "fill", "cash_delta": "-1", "fee": "0", "legs": [
+        {"market": "RETIRED:selection", "side": "yes", "quantity_delta": "2", "price": "0.5"}]}, "p")
+    adapter = PendingPaper("kalshi")
+    broker = Broker(store, "p", adapter)
+    with pytest.raises(ValueError, match="kalshi broker"):
+        broker.submit(order("RETIRED:selection", "unsupported"))
+    assert not adapter.sent
+
+    class PublicKalshi:
+        def get(self, path, params=None):
+            assert path == "/markets"  # only a no-exposure public probe
+            return {"markets": []}
+
+        def market(self, ticker):
+            pytest.fail("retired instrument must not reach the Kalshi API")
+
+    assert market_pass(store, PublicKalshi())["markets"] == 0
+    assert broker.state().cash == 9 and len(broker.state().lots) == 1
+    at = utc()
+    metrics, _ = compare(store, at, at)
+    assert metrics[0]["open_lots"] == 1 and not metrics[0]["complete"]
