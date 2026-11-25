@@ -74,7 +74,7 @@ def test_books_use_the_kalshi_layout_so_shared_tools_read_them():
 
 def test_paper_fills_walk_the_asks_and_charge_the_taker_fee(tmp_path):
     store = Store(tmp_path)
-    store.create("p", "100")
+    store.create_pool("p", "polymarket", "100")
     broker = Broker(store, "p", PolymarketPaper(Client(), latency=0))
     result = broker.submit({"ticker": ticker(CELTICS), "side": "bid", "count": "30", "price": "0.82",
                             "time_in_force": "immediate_or_cancel"}, {"trade_id": "t"})
@@ -89,7 +89,7 @@ def test_paper_fills_walk_the_asks_and_charge_the_taker_fee(tmp_path):
 
 def test_closed_markets_do_not_fill(tmp_path):
     store = Store(tmp_path)
-    store.create("p", "100")
+    store.create_pool("p", "polymarket", "100")
     broker = Broker(store, "p", PolymarketPaper(Client(gamma_market(accepting=False)), latency=0))
     result = broker.submit({"ticker": ticker(CELTICS), "side": "bid", "count": "5", "price": "0.9",
                             "time_in_force": "immediate_or_cancel"}, {})
@@ -107,8 +107,9 @@ def test_separate_brokers_send_each_ticker_to_its_venue(tmp_path):
             return {"status": "canceled", "filled": "0"}
 
     store = Store(tmp_path)
-    store.create("p", "100")
-    broker = Broker(store, "p", Recorder())
+    store.create_pool("p", "polymarket", "100")
+    store.create_pool("k", "kalshi", "100")
+    broker = Broker(store, "k", Recorder())
     poly_broker = Broker(store, "p", PolymarketPaper(Client(), latency=0))
     broker.submit({"ticker": "KXNBAGAME-26NOV21BOSSAC-BOS", "side": "bid", "count": "1", "price": "0.5"}, {})
     filled = poly_broker.submit({"ticker": ticker(CELTICS), "side": "bid", "count": "1", "price": "0.9"}, {})
@@ -119,7 +120,7 @@ def test_separate_brokers_send_each_ticker_to_its_venue(tmp_path):
 
 def test_the_monitor_marks_tokens_and_settles_them_once_final(tmp_path):
     store = Store(tmp_path)
-    store.create("p", "100")
+    store.create_pool("p", "polymarket", "100")
     client = Client()
     Broker(store, "p", PolymarketPaper(client, latency=0)).submit(
         {"ticker": ticker(CELTICS), "side": "bid", "count": "10", "price": "0.82"}, {})
@@ -136,7 +137,7 @@ def test_the_monitor_marks_tokens_and_settles_them_once_final(tmp_path):
 
 def test_the_kalshi_monitor_leaves_polymarket_tokens_alone(tmp_path):
     store = Store(tmp_path)
-    store.create("p", "100")
+    store.create_pool("p", "polymarket", "100")
     Broker(store, "p", PolymarketPaper(Client(), latency=0)).submit(
         {"ticker": ticker(CELTICS), "side": "bid", "count": "10", "price": "0.82"}, {})
 

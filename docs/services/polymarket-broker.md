@@ -13,10 +13,10 @@ schema.
 
 ## Paper execution
 
-Create a portfolio with hypothetical cash:
+Create a venue-specific pool with explicit hypothetical cash:
 
 ```bash
-uv run czquant portfolio example-polymarket --cash 1000
+uv run czquant pool example-polymarket --venue polymarket --cash 1000
 ```
 
 Set EXAMPLE_TOKEN_ID to an outcome token's CLOB ID, not an event or market
@@ -55,7 +55,7 @@ do not model an unsupported naked short by treating it as the token's NO side.
 Books are normalized to the existing binary layout: token bids become YES
 bids and token asks at price p become NO bids at 1 minus p. The paper policy
 is polymarket-ioc-depth-v1, with a default 500 ms latency, IOC/FOK depth
-simulation, persistent consumed liquidity, and per-portfolio cash checks.
+simulation, persistent consumed liquidity, and per-pool cash checks.
 Its implemented fee formula uses each market's fee schedule and rounds to
 five decimal places. Fee assumptions and observed books are retained in
 execution evidence.
@@ -79,10 +79,10 @@ settles paper lots when final results are available. Recorded payouts can be
 collector's API. See [market monitoring](market-monitor.md) and
 [reporting](reporting.md) for reference coverage and valuation.
 
-Each broker can share the logging directory with brokers for other venues.
-The current paper cash model is portfolio-scoped; use distinct paper
-portfolios when experiments need separate cash pools. Do not infer separate
-venue balances merely from creating two broker objects on one portfolio.
+Brokers share the logging directory, not spendable balances. Each pool belongs
+to one venue in paper and live mode. A large hypothetical paper pool is valid,
+but another venue cannot spend its cash. Shared reports can aggregate pools
+through a reporting-only portfolio.
 
 ## Polymarket US
 
@@ -91,7 +91,13 @@ long and NO is short. Orders use the common YES-book convention; the adapter
 converts bid/ask and existing holdings into the supported venue intent.
 International PM: token IDs are rejected by this broker.
 
-For public paper execution, create a paper portfolio as above, then use:
+For public paper execution, create a separate US pool:
+
+```bash
+uv run czquant pool example-polymarket-us --venue polymarket-us --cash 1000
+```
+
+Then open its venue-specific broker:
 
 ```python
 import os
@@ -101,7 +107,7 @@ from czquant.polymarket_us import PolymarketUS, PolymarketUSPaper
 
 store = Store()
 client = PolymarketUS.from_env(authenticated=False)
-broker = Broker(store, "example-polymarket", PolymarketUSPaper(client))
+broker = Broker(store, "example-polymarket-us", PolymarketUSPaper(client))
 result = broker.submit({
     "ticker": "PMUS:" + os.environ["EXAMPLE_MARKET_SLUG"],
     "side": "bid",
@@ -129,22 +135,27 @@ without placing an order:
 uv run czquant check-polymarket-us
 ```
 
-The available mapping command creates one reporting portfolio containing a
-Kalshi allocation and the Polymarket US account. Both must be flat for a new
-exclusive mapping; --share-account permits an already reconciled Kalshi
-account to be shared. The US account currently supports only one active
-portfolio mapping.
+Map the account to a new Polymarket US cash pool. It must be flat with no
+open orders. The current US account collector supports one active live pool;
+shared Kalshi allocations remain supported independently.
 
 ```bash
-uv run czquant map-live-cross example-live --subaccount 1
+uv run czquant map-live example-us-live --venue polymarket-us
 ```
 
-Use --subaccount 0 --primary-account for an explicit Kalshi primary-account
-mapping. The command records opening balances without moving money or placing
-orders. Kalshi sharing and allocation commands are described in the
-[Kalshi guide](kalshi-broker.md#live-portfolios).
+A two-venue experiment also maps a Kalshi pool and can define a reporting group:
 
-Construct one broker per venue on that portfolio. This example sends nothing;
+```bash
+uv run czquant map-live example-kalshi-live --venue kalshi --subaccount 1
+uv run czquant portfolio example-live --pools example-kalshi-live example-us-live
+```
+
+Use --subaccount 0 --primary-account for the Kalshi primary account, or
+--share-account to join an already reconciled Kalshi account. Mapping records
+opening balances without moving money or placing orders. See the
+[Kalshi guide](kalshi-broker.md#live-cash-pools) for allocation and recovery.
+
+Construct one broker per venue cash pool. This example sends nothing;
 its adapters also have dry-run enabled if an order is subsequently submitted.
 
 ```python
@@ -154,11 +165,11 @@ from czquant.live import KalshiLive
 from czquant.polymarket_us import PolymarketUS, PolymarketUSLive
 
 store = Store()
-kalshi = Broker(store, "example-live", KalshiLive(Kalshi(), dry_run=True), "example-run")
-polymarket = Broker(store, "example-live", PolymarketUSLive(
+kalshi = Broker(store, "example-kalshi-live", KalshiLive(Kalshi(), dry_run=True), "example-run")
+polymarket = Broker(store, "example-us-live", PolymarketUSLive(
     PolymarketUS.from_env(dry_run=True)), "example-run")
 print(kalshi.available, polymarket.available)  # each venue's unreserved cash
-print(kalshi.state().cash)  # aggregate reporting portfolio
+print(kalshi.state().cash)  # only the Kalshi pool; reporting aggregates separately
 store.close()
 ```
 

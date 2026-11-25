@@ -22,16 +22,17 @@ flowchart LR
     P[Polymarket reader] --> S
     S --> KB[Kalshi broker]
     S --> PB[Polymarket broker]
-    KB --> L[(Shared portfolio log)]
+    KB --> L[(Shared ledger)]
     PB --> L
     M[Independent monitors] --> L
     L --> R[Reporting]
 ```
 
-The brokers share a portfolio and run ID. Order context links legs by trade_id;
-it does not make execution atomic. Paper mode shares one hypothetical cash
-pool. Live mode tracks each venue's cash and reservations separately. Restarts
-retain positions, losses, and standing halts in STRATEGY_RUNS_DIR.
+Each broker owns one venue cash pool. Both record the same run ID, and optional
+order context links legs by trade_id; execution is not atomic. Paper and live
+use the same pool ownership, cash checks and reservations. Paper balances can
+be arbitrarily large but cannot fund another venue. Restarts retain both pools'
+positions, losses and standing halts. Reporting can group the pools independently.
 
 - matching.py pairs sports events by teams, date, and start time. leagues.json
   supplies aliases and rule notes. pairs.us.json and pairs.json contain pins
@@ -57,20 +58,22 @@ outside the checkout. Configuration comes from exported environment variables;
 
 ```bash
 uv sync --locked
-export CZQUANT_PORTFOLIO=cross-market-polymarket
-uv run czquant portfolio "$CZQUANT_PORTFOLIO" --cash 1000
+export CZQUANT_KALSHI_POOL=cross-kalshi-paper
+export CZQUANT_POLYMARKET_POOL=cross-us-paper
+uv run czquant pool "$CZQUANT_KALSHI_POOL" --venue kalshi --cash 600
+uv run czquant pool "$CZQUANT_POLYMARKET_POOL" --venue polymarket-us --cash 400
 uv run python trader.py --once --leagues nba
 ```
 
-Create the portfolio once. Both venue brokers use this one portfolio; they
-do not each receive $1,000. Paper cash is pooled, while live cash is recorded
-separately for each venue. Subsequent runs reuse the portfolio and its history:
+Create each pool once with its own hypothetical funding. The amounts above
+are examples, not limits. Subsequent runs reuse the same two pool IDs:
 
 ```bash
 uv run python trader.py --duration 4:00
 ```
 
-For international paper trading, add --venue polymarket. The US market uses
+For international paper trading, create the second pool with --venue polymarket,
+select its ID in CZQUANT_POLYMARKET_POOL, and run the trader with --venue polymarket. The US market uses
 one PMUS: slug with YES/NO sides. International markets use separate PM:
 outcome-token IDs. The broker adapters keep those representations distinct.
 
@@ -88,7 +91,7 @@ the same ledger without importing this strategy.
 ## Live run
 
 Follow the [live mapping guide](../../docs/services/polymarket-broker.md#us-live-mapping-and-execution)
-to create a portfolio with a Kalshi allocation and a Polymarket US account.
+to create a Kalshi cash pool and a separate Polymarket US cash pool.
 Shared Kalshi accounts and explicit ledger allocations are supported.
 Live trading is available only with Polymarket US.
 
@@ -99,7 +102,8 @@ reconciliation. Live settlement requires account evidence.
 A dry run builds orders and sends none:
 
 ```bash
-export CZQUANT_PORTFOLIO=cross-market-polymarket-live
+export CZQUANT_KALSHI_POOL=example-kalshi-live
+export CZQUANT_POLYMARKET_POOL=example-us-live
 uv run python trader.py --live --dry-run --leagues nba --once
 ```
 
@@ -109,15 +113,16 @@ A live run sends real IOC orders:
 uv run python trader.py --live --leagues nba --max-basket-dollars 25 --max-total-dollars 100
 ```
 
-Live defaults are $25 per basket, $100 total exposure, and 20 sets per basket.
+Both modes default to $25 per basket, $100 total exposure, and 20 sets per
+basket. Set larger caps explicitly for experiments that need them.
 Each venue must have enough recorded available cash for its leg. Kalshi fills
 arrive through account recovery, so reservations count toward exposure until
 reconciled. US fills are recorded from synchronous execution reports.
 
 This strategy pauses when either account monitor is missing or older than
-five minutes. It halts on an unknown order outcome, a portfolio discrepancy,
+five minutes. It halts on an unknown order outcome, a cash-pool discrepancy,
 a complete basket settling at a loss, or a KILL file under
-STRATEGY_RUNS_DIR/diagnostics/<portfolio>/. Halts persist across restarts;
+STRATEGY_RUNS_DIR/diagnostics/cross-market-polymarket/<kalshi-pool>/<polymarket-pool>/. Halts persist across restarts;
 inspect and resolve their evidence before using czquant clear-halt. Partial
 basket losses are recorded but do not by themselves trigger the complete-set
 loss rule. Dry runs skip monitor freshness checks.
@@ -136,7 +141,7 @@ Use trader.py --help for all flags. The main controls are:
 | --interval | 15 seconds | Scan interval |
 | --discover | 10 minutes | Universe refresh |
 | --max-event-frac | 0.10 | Capital per event |
-| --max-sets | 500 paper, 20 live | Basket size |
+| --max-sets | 20 in both modes | Basket size |
 | --min-edge | 0.01 | Net edge per set |
 | --min-net | 0.25 | Net dollars per basket |
 | --risk-free | 0.05 | Annual return hurdle |
@@ -165,9 +170,15 @@ Reviewed entries take precedence. These pairs are skipped on Polymarket US.
 
 ## Reporting
 
+An optional reporting portfolio groups the existing pools without changing their cash:
+
+```bash
+uv run czquant portfolio cross-market-paper --pools "$CZQUANT_KALSHI_POOL" "$CZQUANT_POLYMARKET_POOL"
+```
+
 Use the shared [reporting service](../../docs/services/reporting.md) from
 packages/czquant with the same STRATEGY_RUNS_DIR. Its dashboard shows current
-portfolio economics and monitor health; frozen reports compare portfolios over
+pool economics, portfolio totals, and monitor health; frozen reports compare them over
 a specified window. Both read the shared ledger without running or importing
 this strategy. The strategy records order context and diagnostics for external
 analysis and does not host its own reporting view.

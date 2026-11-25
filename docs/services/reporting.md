@@ -13,51 +13,83 @@ continue to work after a strategy stops or its source is removed.
 
 Use the [shared setup](../../README.md#shared-services) and run commands from
 packages/czquant. Choose the same STRATEGY_RUNS_DIR that execution and monitors
-write. The report's opening time must include the portfolios being compared;
-portfolios created after that time are not included by the current evaluator.
+write. The report's opening time must follow creation of every pool being compared;
+later-created pools are not included by the current evaluator.
 
-## Portfolio lifetime and reporting identity
+## Cash pools, portfolios, and runs
 
-A portfolio is a persistent accounting identity, not a process run or a broker.
-The cross-market strategy uses one portfolio with two brokers, one per venue.
-Both brokers record the same portfolio ID and run ID. Live cash is accounted
-for separately by venue; paper execution currently shares one hypothetical
-cash pool across both brokers. Two broker objects do not double the funding.
+A cash pool owns the persistent cash, positions, orders and reservations for
+one venue. A broker binds to that pool. A portfolio only groups existing pools
+for reporting; creating one neither funds anything nor changes buying power.
+The cross-market strategy uses two cash pools and two brokers in both modes.
 
-Create a paper portfolio once, from packages/czquant with STRATEGY_RUNS_DIR
-set to a persistent directory outside the checkout:
+From packages/czquant, create paper pools once with explicit venue funding:
 
 ```bash
-uv run czquant portfolio cross-market-paper --cash 1000
+uv run czquant pool cross-kalshi --venue kalshi --cash 600
+uv run czquant pool cross-polymarket --venue polymarket-us --cash 400
 ```
 
-This records initial funding. Repeating the creation command fails rather than
-resetting or refunding the portfolio. Live portfolios are created through
-map-live or map-live-cross, which record the mapped accounts and their opening
-cash; see the [live mapping guide](polymarket-broker.md#us-live-mapping-and-execution).
-Do not first create a paper portfolio for a live mapping.
+These amounts are hypothetical and can be arbitrarily large. The Kalshi pool
+can spend only its $600, and the Polymarket pool only its $400. Both use the
+same budget and reservation rules as live pools. Repeating either creation
+fails instead of resetting or refunding it. Live pools are created by map-live;
+see the [live mapping guide](polymarket-broker.md#us-live-mapping-and-execution).
 
-In each strategy shell, use the same STRATEGY_RUNS_DIR and set
-CZQUANT_PORTFOLIO to the existing ID. Starting the strategy creates a new run
-ID and records its revision and configuration. It reconstructs existing cash,
-positions, fees, and losses, and retains outstanding orders and reservations.
-Use a new portfolio ID when an experiment needs separate accounting; changing
-the run ID alone does not isolate its economics.
+Create an optional portfolio to compare the combined experiment:
 
-The shared root contains accounting.sqlite3. Its portfolios table stores
-identity, mode, creation time, and account metadata. Its events table stores
-funding, economic transactions, execution evidence, and run provenance. Its
-orders table retains requests, context, status, fills, and reservations;
-checkpoints retain collector progress. Cash and positions are reconstructed
-from economic events. Keep this root across code updates and process restarts;
-use the full database [backup](#backup-and-restore) for recovery.
+```bash
+uv run czquant portfolio cross-market --pools cross-kalshi cross-polymarket
+```
 
-Reports group by portfolio, combining both venues and every run contributing
-to the evaluation window. Earlier events establish opening cash and positions;
-window events determine subsequent cash flows and holdings. Run IDs remain
-available for attribution, but the current comparison does not produce separate
-per-run or per-venue performance rows. Reusing a portfolio across different
-strategy revisions combines their performance in that portfolio's history.
+Membership is a flat, fixed list of distinct pool IDs in one mode. Multiple
+pools at the same venue can be included. This selection can be defined after
+trading; its report still reconstructs the members' histories. A report window
+must start after all selected pools were created. Create a new portfolio ID
+for a different selection. Portfolio totals overlap their constituent pool
+rows; never sum all output rows as though they were independent holdings.
+
+Reuse the same STRATEGY_RUNS_DIR and pool IDs on every strategy restart. The
+cross-market strategy selects them with CZQUANT_KALSHI_POOL and
+CZQUANT_POLYMARKET_POOL. Each invocation records a new run ID and revision;
+existing cash, positions, fees, losses, orders and reservations persist.
+Separate experiments need separate pools; a new run or reporting group does
+not create an independent allocation.
+
+The shared root contains accounting.sqlite3. For storage compatibility,
+portfolios retains the ownership records and events/orders retain the
+portfolio_id column; for new data these identify a cash pool. cash_pools binds
+those identities to a venue. reporting_portfolios holds reporting-only
+membership. Events reconstruct funding, positions and economic performance;
+orders retain execution status and reservations, and checkpoints retain
+collector progress. Keep this root across updates and restarts. Use a full
+[database backup](#backup-and-restore) for recovery.
+
+Reports contain pool rows and portfolio totals, identified by kind and member
+pool IDs. They show cash, reservations, equity, fees and performance. Available
+cash is meaningful only for a pool; a portfolio's total cash is not venue buying
+power. Positions remain attributed to their owning pool. Earlier events establish
+opening balances, and all runs contributing to the window remain included.
+Returns and drawdown use the combined equity curve and funding boundaries;
+percentages from individual pools are not added or averaged. Allocations inside
+a reporting portfolio cancel as capital flows, while fees remain costs.
+
+## Deprecated pooled-capital records
+
+Historical portfolios without a venue cash-pool binding remain readable by
+reports and the dashboard. They are labelled legacy and deprecated, with a
+deprecation entry in the report manifest. Their original funding and execution
+facts are preserved; reporting does not invent a historical venue cash split.
+They cannot be reopened as execution brokers. Use explicitly funded new paper
+pools for new trials. Live mapping requires reconciled venue allocations and
+the account conditions in the venue guide. Existing immutable report artifacts
+remain valid records of the policy that generated them.
+
+The previous portfolio creation command with --cash and the cross-market
+CZQUANT_PORTFOLIO setting are replaced by explicit pool creation and selection.
+The Python Store.create spelling remains a deprecated single-venue helper for
+older callers; new integrations use Store.create_pool with an explicit venue.
+There is no scheduled removal date for historical report support.
 
 ## Generate a comparison
 
@@ -76,7 +108,7 @@ export REPORT_DIR="$STRATEGY_RUNS_DIR/reports/comparison-001"
 uv run czquant report --since "$START" --until "$END" --output "$REPORT_DIR"
 ```
 
-The output contains metrics.csv, equity.csv, a standalone report.html,
+The output contains metrics.csv, equity.csv, pool-owned positions.csv, a standalone report.html,
 comparison.md, accounting.sqlite3, and manifest.json with the window,
 recorded-data cutoff, policies, health, source-module hashes, and snapshot checksum. Retain a separate
 output directory for each report or restatement. The cutoff does not liquidate
@@ -129,7 +161,7 @@ remain separate measurements.
 uv run czquant dashboard
 ```
 
-Open http://127.0.0.1:8790/. The read-only dashboard streams portfolio cash,
+Open http://127.0.0.1:8790/. The read-only dashboard streams pool and portfolio cash,
 P&L, fees, positions, coverage, monitor health, and recorded halts. It uses the
 report's valuation rules and retains unmarked cost separately. No venue
 credentials or requests are needed. --host and --port change the binding;

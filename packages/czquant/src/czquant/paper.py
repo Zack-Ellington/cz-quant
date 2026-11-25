@@ -14,6 +14,7 @@ from .book import levels
 
 
 class Paper:
+    mode = "paper"
     venue = "kalshi"
     policy = "ioc-depth-v1"
 
@@ -62,7 +63,7 @@ class Paper:
             update_consumed(store, ticker, book, now)
             consumed = {decimal(r[0]): decimal(r[1]) for r in store.db.execute(
                 "SELECT price,quantity FROM consumed WHERE portfolio=? AND market=? AND side=?",
-                (broker.portfolio, ticker, source_side))}
+                (broker.pool_id, ticker, source_side))}
             fills, left = [], requested
             for native_price, depth in book[source_side]:
                 yes_price = 1 - native_price if source_side == "no" else native_price
@@ -99,7 +100,7 @@ class Paper:
                 closed = min(quantity, held)
                 opening_price = average if order["side"] == "bid" else 1 - average
                 cash_change = closed * (1 - opening_price) - (quantity - closed) * opening_price - fee
-                other_reservations = store.reserved(broker.portfolio) - decimal(broker._order(identifier)["reserved"])
+                other_reservations = store.reserved(broker.pool_id) - decimal(broker._order(identifier)["reserved"])
                 if state.cash + cash_change < other_reservations:
                     broker.finish(identifier, "rejected")
                     return {"client_order_id": identifier, "status": "rejected", "filled": "0"}
@@ -112,7 +113,7 @@ class Paper:
                 for native_price, _, qty in fills:
                     current = consumed.get(native_price, Decimal(0)) + qty
                     store.db.execute("INSERT OR REPLACE INTO consumed VALUES(?,?,?,?,?,NULL)",
-                                     (broker.portfolio, ticker, source_side, str(native_price), str(current)))
+                                     (broker.pool_id, ticker, source_side, str(native_price), str(current)))
             broker.finish(identifier, "filled" if quantity == requested else "canceled")
             return {"client_order_id": identifier, "status": "filled" if quantity == requested else "canceled",
                     "filled": str(quantity), "fee": str(fee), "evidence": evidence}

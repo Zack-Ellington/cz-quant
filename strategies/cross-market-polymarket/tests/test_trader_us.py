@@ -64,7 +64,8 @@ def test_a_us_moneyline_names_each_team_by_side():
 @pytest.fixture
 def runs(tmp_path, monkeypatch):
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_PORTFOLIO", "pm")
+    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "pm:kalshi")
+    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm:polymarket_us")
     return tmp_path
 
 
@@ -74,20 +75,24 @@ def build(cfg, us, kalshi=None, kalshi_live=None):
 
 
 def test_paper_on_polymarket_us_buys_each_team_where_it_is_cheaper(runs):
-    Store(runs).create("pm", "1000")
-    engine = build(Config(venue="polymarket_us", kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0),
+    store = Store(runs)
+    store.create_pool("pm:kalshi", "kalshi", "600")
+    store.create_pool("pm:polymarket_us", "polymarket_us", "400")
+    engine = build(Config(venue="polymarket_us", kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None),
                    FakeUSVenue())
     assert engine.kalshi_broker.venue == "kalshi" and engine.poly_broker.venue == "polymarket_us"
     engine.step()
-    held = {(lot["market"], lot["side"]): lot["quantity"] for lot in Broker(engine.store, "pm").state().lots.values()}
+    held = {(lot["market"], lot["side"]): lot["quantity"] for broker in engine.brokers.values() for lot in broker.state().lots.values()}
     assert held == {(f"{EVENT}-BOS", "yes"): 100, (TICKER, "no"): 100}  # Celtics on Kalshi, Kings on Polymarket US
-    fill = [e["data"] for e in engine.store.events(kinds=("transaction",)) if e["data"].get("venue") == "polymarket_us"]
+    fill = [e["data"] for e in engine.store.events(kinds=("transaction",)) if e["data"].get("venue") == "polymarket_us" and e["data"].get("reason") == "fill"]
     assert fill and D(fill[0]["fee"]) == D("2.24")  # 0.095 x 100 x 0.62 x 0.38, to the cent
 
 
 def test_a_theta_override_prices_with_it(runs):
-    Store(runs).create("pm", "1000")
-    engine = build(Config(venue="polymarket_us", pmus_theta=0.0695, max_event_frac=1.0), FakeUSVenue())
+    store = Store(runs)
+    store.create_pool("pm:kalshi", "kalshi", "600")
+    store.create_pool("pm:polymarket_us", "polymarket_us", "400")
+    engine = build(Config(venue="polymarket_us", pmus_theta=0.0695, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeUSVenue())
     engine.discover()
     basket = engine.scan()[0][0]
     us_leg = [leg for leg in basket.legs if leg["venue"] == "polymarket_us"][0]
@@ -133,14 +138,16 @@ def live_cfg(**kw):
 
 
 def test_live_needs_a_live_portfolio(runs):
-    Store(runs).create("pm", "1000")
-    with pytest.raises(ValueError, match="not a live portfolio"):
+    store = Store(runs)
+    store.create_pool("pm:kalshi", "kalshi", "600")
+    store.create_pool("pm:polymarket_us", "polymarket_us", "400")
+    with pytest.raises(ValueError, match="must be live|same mode"):
         build(live_cfg(dry_run=True), MappingUS(authenticated=True, dry_run=True), kalshi_live=LiveKalshi())
 
 
 def test_a_paper_run_refuses_a_live_portfolio(runs):
     map_live_cross(Store(runs), LiveKalshi(), MappingUS(authenticated=True), "pm", subaccount=3)
-    with pytest.raises(ValueError, match="pass --live"):
+    with pytest.raises(ValueError, match="must be paper|same mode"):
         build(Config(venue="polymarket_us"), FakeUSVenue())
 
 
@@ -153,7 +160,7 @@ def test_live_dry_run_sizes_within_the_caps_and_sends_nothing(runs):
     assert record["context"]["sets"] <= 20 and D(record["context"]["intended_legs"][0]["vwap"]) * 20 <= 25
     assert [o["status"] for o in record["outcomes"]] == ["dry_run"]  # zero filled: the next leg isn't sent
     assert kalshi.sent == [] and not [s for s in us.sent if s[1] == "/v1/orders"]
-    assert engine.store.reserved("pm") == 0 and not engine.halted
+    assert sum(engine.store.reserved(b.pool_id) for b in engine.brokers.values()) == 0 and not engine.halted
 
 
 def test_live_waits_for_its_monitors_and_halts_on_a_discrepancy(runs):
@@ -163,7 +170,7 @@ def test_live_waits_for_its_monitors_and_halts_on_a_discrepancy(runs):
     assert engine.live_block() == "no_account_monitor"
     store.append("health", {"component": "account", "status": "healthy", "discrepancies": []})
     store.append("health", {"component": "polymarket_us", "status": "degraded", "discrepancies": [
-        {"portfolio": "pm", "kind": "cash_mismatch"}]})
+        {"portfolio": "pm:polymarket_us", "kind": "cash_mismatch"}]})
     assert engine.live_block() == "halted" and "cash_mismatch" in (engine.halted or "")
 
 
@@ -171,6 +178,6 @@ def test_live_halts_on_an_order_with_an_unknown_outcome(runs):
     store = Store(runs)
     map_live_cross(store, LiveKalshi(), MappingUS(authenticated=True), "pm", subaccount=3)
     engine = build(live_cfg(dry_run=True), MappingUS(authenticated=True, dry_run=True), kalshi_live=LiveKalshi())
-    store.db.execute("INSERT INTO orders(id,portfolio_id,request,context,status,reserved) VALUES('o','pm',?,?,'unknown','1')",
+    store.db.execute("INSERT INTO orders(id,portfolio_id,request,context,status,reserved) VALUES('o','pm:polymarket_us',?,?,'unknown','1')",
                      ('{"ticker": "%s"}' % TICKER, "{}"))
     assert engine.live_block() == "halted"

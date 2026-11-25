@@ -21,7 +21,7 @@ uv run czquant monitor account --once
 
 The command logs a status containing mapped, unattributed, and quarantined
 fill counts plus reconciliation discrepancies. It retains account snapshots
-and evidence even when no live portfolio is mapped. Successful public paper
+and evidence even when no live cash pool is mapped. Successful public paper
 collection does not establish that account authentication works.
 
 Run continuously under a separate process supervisor:
@@ -39,7 +39,7 @@ counts agree. Restart it with the same database.
 
 ## Reconciliation and recovery
 
-Kalshi portfolios can share an account/subaccount through explicit mappings
+Kalshi cash pools can share an account/subaccount through explicit mappings
 and allocations. The collector compares their aggregate cash and inventory
 with the account. Cash discrepancies apply to all its allocations; position
 discrepancies identify the holders of the affected market. The collector
@@ -51,7 +51,7 @@ raw venue evidence remains available for audit. See the
 An invalid or conflicting fill is quarantined rather than silently accepted.
 Unmatched fills are retained as unattributed evidence. Unknown collateral,
 manual trading, or other unsupported account effects remain discrepancies.
-Resolve their source before treating the portfolio as fully reconciled.
+Resolve their source before treating the cash pool as fully reconciled.
 Do not insert a balancing profit or delete the original facts.
 
 If an order acknowledgement was lost, the collector can recover its venue
@@ -92,7 +92,7 @@ Run its component alongside the Kalshi collector when both venues are mapped:
 uv run czquant monitor polymarket-us --interval 60
 ```
 
-It needs US credentials when a live portfolio is mapped. Without live mappings,
+It needs US credentials when a live cash pool is mapped. Without live mappings,
 it can use public data to mark and settle paper positions. It records held-market
 books for live valuation as well as public outcomes.
 
@@ -110,5 +110,5 @@ If those observations disagree, the lots remain and reconciliation reports
 the difference. Public paper settlement does not need this account evidence.
 
 The US component emits polymarket_us health. Report completeness for a
-portfolio mapped to both venues requires fresh healthy evidence from both
+reporting portfolio containing pools at both venues requires fresh healthy evidence from both
 account components, independently of a strategy's chosen halt policy.

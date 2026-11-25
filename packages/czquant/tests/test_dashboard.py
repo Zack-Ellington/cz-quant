@@ -25,6 +25,8 @@ def ledger_fixture(tmp_path):
     store = Store(tmp_path)
     store.create("sum-low", "1000")
     store.create("cross", "500")
+    # Historical pooled-capital fixture remains readable, but cannot execute new trades.
+    store.db.execute("DELETE FROM cash_pools WHERE id='cross'")
     store.append("run", {"status": "started", "strategy": "kalshi_sum_check", "revision": "r", "config": {}}, "sum-low")
     store.append("run", {"status": "started", "strategy": "cross-market-polymarket", "revision": "r", "config": {}}, "cross")
     # sum-low: a lot on K1 bought at 0.40, then 10 of 20 sold at 0.50: realized +1 before fees.
@@ -200,3 +202,18 @@ def test_a_correction_or_a_new_step_discards_the_saved_replay(tmp_path):
     assert Ledger(store, step=60)._load() is None
     (tmp_path / "dashboard_replay.json").write_text("{not json")
     assert Ledger(store, step=60)._load() is None
+
+
+def test_new_reporting_group_rebuilds_history_and_never_exposes_spendable_total(tmp_path):
+    store = Store(tmp_path)
+    store.create_pool('k', 'kalshi', '600')
+    store.create_pool('p', 'polymarket_us', '400')
+    ledger = Ledger(store, step=1)
+    ledger.backfill()
+    store.create_portfolio('combined', ['k', 'p'])
+    update = ledger.tick()
+    assert update['type'] == 'snapshot' and 'combined' in update['series']
+    combined = next(row for row in update['portfolios'] if row['id'] == 'combined')
+    assert combined['kind'] == 'portfolio' and combined['pools'] == ['k', 'p']
+    assert combined['now']['equity'] == 1000 and combined['now']['available'] is None
+    assert all(p['now']['available'] is not None for p in update['portfolios'] if p['kind'] == 'pool')

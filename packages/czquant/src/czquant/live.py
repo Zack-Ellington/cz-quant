@@ -21,6 +21,7 @@ KALSHI_TERMINAL = {"executed": "filled", "canceled": "canceled"}
 
 
 class KalshiLive:
+    mode = "live"
     venue = "kalshi"
     policy = "kalshi-live-v1"
     takes_broker = True

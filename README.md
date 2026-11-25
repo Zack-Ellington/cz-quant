@@ -138,10 +138,12 @@ market and account evidence. Strategies record executions through brokers
 and can attach diagnostics; they do not supply reporting implementations.
 See [reporting](docs/services/reporting.md) for commands and portfolio lifetime.
 
-One portfolio can hold both venues of a cross-market experiment. Its two
-brokers share the portfolio identity while keeping execution venue-specific.
-Reusing that portfolio preserves cash, positions, and losses across runs;
-reports compare portfolios rather than treating restarts as fresh experiments.
+A cross-market experiment uses two venue cash pools and two brokers in both
+paper and live mode. A reporting portfolio groups those pools without merging
+their spending authority. Reusing a pool preserves its cash, positions, and
+losses across runs. Paper funding can be arbitrarily large but remains bound
+to its venue. Reports show pool results and portfolio totals; historical pooled
+records remain readable with a deprecation label.
 
 ## Create a new strategy
 

@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 import uuid
+import warnings
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -85,6 +86,10 @@ class Store:
                 request TEXT NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL,
                 reserved TEXT NOT NULL, filled TEXT NOT NULL DEFAULT '0', venue_id TEXT);
             CREATE TABLE IF NOT EXISTS checkpoints (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS cash_pools (
+                id TEXT PRIMARY KEY REFERENCES portfolios(id), venue TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS reporting_portfolios (
+                id TEXT PRIMARY KEY, created_at TEXT NOT NULL, pools TEXT NOT NULL, label TEXT NOT NULL);
         """)
 
     @contextmanager
@@ -106,6 +111,13 @@ class Store:
     def append(self, kind: str, data: dict[str, Any], portfolio: str | None = None,
                run: str | None = None, source: str | None = None,
                at: str | None = None) -> str:
+        pool = self.db.execute('SELECT venue FROM cash_pools WHERE id=?', (portfolio,)).fetchone()
+        if pool and kind == 'transaction':
+            from .accounting import venue_of
+            data = dict(data)
+            venue = data.setdefault('venue', pool['venue'])
+            if venue != pool['venue'] or any(venue_of(leg['market']) != venue for leg in data.get('legs', [])):
+                raise ValueError('economic transaction belongs to a different cash-pool venue')
         payload = encode(data)  # Validate before insertion, even on duplicate delivery.
         if source:
             prior = self.db.execute("SELECT record_id,data,type,portfolio_id FROM events WHERE source_key=?", (source,)).fetchone()
@@ -119,16 +131,53 @@ class Store:
         return identifier
 
     def create(self, identifier: str, cash: str = "1000", mode: str = "paper", **metadata: Any) -> None:
+        """Deprecated single-venue creation spelling; use create_pool with an explicit venue."""
+        warnings.warn('Store.create is deprecated; use create_pool(id, venue, cash)', DeprecationWarning, stacklevel=2)
+        venues = metadata.pop('venues', None)
+        if venues and len(venues) != 1:
+            raise ValueError('create a separate cash pool for each venue')
+        venue = metadata.pop('venue', None) or (venues[0] if venues else 'kalshi')
+        self.create_pool(identifier, venue, cash, mode, **metadata)
+
+    def create_pool(self, identifier: str, venue: str, cash: str = "1000", mode: str = "paper", **metadata: Any) -> None:
+        """Create one persistent venue allocation. Paper funding can be arbitrarily large."""
+        if not identifier or not venue or metadata.get('venues'):
+            raise ValueError('a cash pool needs an ID and exactly one venue')
         if mode not in ("paper", "live") or decimal(cash) < 0:
-            raise ValueError("invalid portfolio mode or initial cash")
+            raise ValueError("invalid cash-pool mode or initial cash")
         with self.transaction():
-            if self.db.execute("SELECT 1 FROM portfolios WHERE id=?", (identifier,)).fetchone():
-                raise ValueError(f"portfolio already exists: {identifier}; reopen it instead")
+            if self.db.execute("SELECT 1 FROM portfolios WHERE id=?", (identifier,)).fetchone() or self.db.execute(
+                    'SELECT 1 FROM reporting_portfolios WHERE id=?', (identifier,)).fetchone():
+                raise ValueError(f"cash pool or portfolio already exists: {identifier}; reopen it instead")
             self.db.execute("INSERT INTO portfolios VALUES(?,?,?,?)", (identifier, mode, utc(), encode(metadata)))
+            self.db.execute('INSERT INTO cash_pools VALUES(?,?)', (identifier, venue))
             if mode == "paper":
                 self.append("transaction", {"reason": "funding", "cash_delta": str(decimal(cash)),
                             "external_delta": str(decimal(cash)), "fee": "0", "legs": []}, identifier,
                             source=f"initial-funding:{identifier}")
+
+    def pools(self, venue: str | None = None) -> list[dict[str, Any]]:
+        """Executable cash pools; old aggregate portfolios remain report-only."""
+        venues = dict(self.db.execute('SELECT id,venue FROM cash_pools'))
+        return [{**p, 'venue': venues[p['id']]} for p in self.portfolios()
+                if p['id'] in venues and (venue is None or venues[p['id']] == venue)]
+
+    def create_portfolio(self, identifier: str, pools: list[str], label: str = '') -> None:
+        """A flat, immutable reporting selection. It owns no cash or orders."""
+        with self.transaction():
+            known = {p['id']: p for p in self.pools()}
+            if not pools or len(set(pools)) != len(pools) or not set(pools) <= known.keys():
+                raise ValueError('select distinct, existing cash pools')
+            if len({known[p]['mode'] for p in pools}) != 1:
+                raise ValueError('a reporting portfolio cannot mix paper and live pools')
+            if self.db.execute('SELECT 1 FROM portfolios WHERE id=?', (identifier,)).fetchone():
+                raise ValueError('portfolio ID conflicts with a cash pool or legacy portfolio')
+            self.db.execute('INSERT INTO reporting_portfolios VALUES(?,?,?,?)',
+                            (identifier, utc(), encode(pools), label))
+
+    def reporting_portfolios(self) -> list[dict[str, Any]]:
+        return [{**dict(r), 'pools': json.loads(r['pools'])}
+                for r in self.db.execute('SELECT * FROM reporting_portfolios ORDER BY id')]
 
     def portfolios(self) -> list[dict[str, Any]]:
         return [{**dict(r), "metadata": json.loads(r["metadata"])} for r in self.db.execute("SELECT * FROM portfolios ORDER BY id")]

@@ -33,13 +33,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .accounting import State, active_events, portfolio_state
-from .report import timestamp, value
+from .accounting import State, active_events, combine_states, portfolio_state
+from .report import reporting_units, timestamp, value
 from .store import Store, encode
 
 log = logging.getLogger(__name__)
 MAX_POINTS = 3000
-REPLAY_VERSION = 1
+REPLAY_VERSION = 2
 ACTIVITY = ("heartbeat", "scan_complete", "halt", "halt_cleared", "basket_settled", "error")
 
 
@@ -68,6 +68,7 @@ def measure(state: State, marks: dict[str, dict[str, Any]], at: datetime) -> dic
 class Ledger:
     def __init__(self, store: Store, step: float = 300.0):
         self.store, self.step = store, step
+        self.units = reporting_units(store)
         self.marks: dict[str, dict[str, Any]] = {}
         self.sequence = 0  # newest event read for marks, runs, health and activity
         self.series: dict[str, list[dict[str, Any]]] = {}
@@ -123,7 +124,8 @@ class Ledger:
             saved = json.loads(self.path.read_text())
         except (OSError, ValueError):
             return None
-        if saved.get("version") != REPLAY_VERSION or saved.get("step") != self.step:
+        if (saved.get("version") != REPLAY_VERSION or saved.get("step") != self.step
+                or saved.get("units") != reporting_units(self.store)):
             return None
         if self.store.events(kinds=("correction",), after_sequence=saved["sequence"]):
             return None  # a correction can rewrite history already on the grid
@@ -131,7 +133,7 @@ class Ledger:
 
     def save(self) -> None:
         """Write the replay atomically; the next start resumes from it."""
-        saved = {"version": REPLAY_VERSION, "step": self.step, "grid_step": self.grid_step,
+        saved = {"version": REPLAY_VERSION, "units": reporting_units(self.store), "step": self.step, "grid_step": self.grid_step,
                  "at": self.replayed_through, "sequence": self.market_sequence,
                  "marks": self.marks_at_grid, "series": self.series}
         tmp = self.path.with_suffix(".tmp")
@@ -144,7 +146,8 @@ class Ledger:
         No more than MAX_POINTS per portfolio: a long history gets a wider grid, and
         a resumed series that outgrows it is thinned to every other point.
         """
-        portfolios = self.store.portfolios()
+        portfolios = reporting_units(self.store)
+        self.units = portfolios
         now = datetime.now(timezone.utc)
         if not portfolios:
             self._read_new()
@@ -161,11 +164,12 @@ class Ledger:
         else:
             step = timedelta(seconds=max(self.step, (now - first).total_seconds() / MAX_POINTS))
             self.series, start, sequence = {}, first, 0
+            self.marks = {}
         # Transactions are few and always replayed in full; marks only since the save.
-        economic = active_events(self.store.events(kinds=("transaction", "correction"), until=now.isoformat()))
+        economic = active_events(self.store.events(kinds=("transaction", "correction", "order", "observation"), until=now.isoformat()))
         market = self.store.events(kinds=("market",), until=now.isoformat(), after_sequence=sequence)
         events = sorted(economic + market, key=lambda e: (e["effective_at"], e["sequence"]))
-        states = {p["id"]: State() for p in portfolios}
+        states = {p["id"]: State() for p in self.store.portfolios()}
         created = {p["id"]: timestamp(p["created_at"]) for p in portfolios}
         cursor, at = 0, start
         while True:
@@ -178,8 +182,10 @@ class Ledger:
                 elif event["portfolio_id"] in states:
                     states[event["portfolio_id"]].apply(event)
                 cursor += 1
-            for pid, state in states.items():
+            for unit in portfolios:
+                pid = unit["id"]
                 if created[pid] <= at:
+                    state = combine_states([states[pool] for pool in unit["pools"]])
                     self.series.setdefault(pid, []).append(measure(state, self.marks, at))
             if at >= now:
                 break
@@ -196,28 +202,42 @@ class Ledger:
 
     def tick(self) -> dict[str, Any]:
         """The current measure of every portfolio; a new grid point when one is due."""
+        units = reporting_units(self.store)
+        changed = units != self.units
+        new_ids = {u['id'] for u in units} - {u['id'] for u in self.units}
+        if changed:
+            self.backfill(resume=False)
         self._read_new()
         now = datetime.now(timezone.utc)
         rows, appended = [], {}
-        for p in self.store.portfolios():
+        for p in units:
             pid = p["id"]
-            point = measure(portfolio_state(self.store, pid), self.marks, now)
+            state = combine_states([portfolio_state(self.store, pool) for pool in p["pools"]])
+            point = measure(state, self.marks, now)
+            reserved = sum((self.store.reserved(pool) for pool in p["pools"]), Decimal(0))
+            point.update(reserved=reserved, available=state.cash - reserved if p["kind"] == "pool" else None)
             history = self.series.setdefault(pid, [])
             if not history or (now - timestamp(history[-1]["t"])).total_seconds() >= self.step:
                 history.append(point)
                 appended[pid] = point
-            rows.append({"id": pid, "strategy": self.strategy.get(pid, "not started"), "mode": p["mode"],
-                         "label": p["metadata"].get("label") or "", "created_at": p["created_at"], "now": point,
+            if pid in new_ids:
+                appended[pid] = point
+            activity = max((self.activity.get(pool, {}) for pool in p['pools']),
+                           key=lambda item: item.get('last', ''), default={})
+            rows.append({"id": pid, "strategy": ", ".join(sorted({self.strategy[pool] for pool in p["pools"] if pool in self.strategy})) or "not started", "mode": p["mode"],
+                         "label": p["metadata"].get("label") or "", "kind": p["kind"], "pools": p["pools"],
+                         "venue": p["venue"], "deprecated": p["deprecated"], "created_at": p["created_at"], "now": point,
                          "midpoint_coverage": _share(history, "equity"),
                          "range_coverage": _share(history, "net_pnl_lower"),
-                         "activity": self.activity.get(pid, {}),
-                         "halted": sorted(self.halts.get(pid, {}).values())})
+                         "activity": activity,
+                         "halted": sorted({reason for pool in p["pools"] for reason in self.halts.get(pool, {}).values()})})
         if appended:  # what a restart resumes from: this point, with the marks read so far
             self.replayed_through, self.market_sequence = now.isoformat(), self.sequence
             self.marks_at_grid = dict(self.marks)
         self.latest = {"generated_at": now.isoformat(timespec="seconds"), "step": self.step, "portfolios": rows,
                        "health": self.health}
-        return {"type": "tick", **self.latest, "append": appended}
+        return {"type": "snapshot" if changed else "tick", **self.latest, "append": appended,
+                **({'series': self.series} if changed else {})}
 
     def snapshot(self) -> dict[str, Any]:
         if not self.latest:
@@ -306,8 +326,9 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th
 <main>
 <section class="panel"><div class="cards" id="health"></div></section>
 <section class="panel scroll"><table id="table"><thead><tr>
-<th>Strategy</th><th>Portfolio</th><th>Realized</th><th>Unrealized</th><th>Unrealized (marked)</th><th>Unmarked cost</th>
+<th>Strategy</th><th>ID</th><th>Kind / venue</th><th>Mode</th><th>Cash</th><th>Reserved</th><th>Available</th><th>Equity</th><th>Realized</th><th>Unrealized</th><th>Unrealized (marked)</th><th>Unmarked cost</th>
 <th>Net P&amp;L</th><th>Net P&amp;L range</th><th>Fees</th><th>Fills</th><th>Settled</th><th>Open</th><th>Midpoint cov.</th><th>Last activity</th></tr></thead><tbody></tbody></table>
+<p class="muted">Portfolio totals include their pool rows; do not add these rows together. Available cash is shown only for individual venue pools. Legacy pooled-capital portfolios are deprecated and report-only.</p>
 <p class="muted">Valuation follows the shared report: 120-second marks, two-sided midpoints or one-sided midpoints for quote ranges at most 2 cents wide.
 Unrealized is shown only when every open lot has a midpoint; "marked" covers the lots that do, and unmarked cost is the rest. Ranges are quote envelopes, not liquidation values.</p></section>
 <section class="charts">
@@ -338,9 +359,9 @@ function draw(){if(!state)return;if(!window.Plotly){['realized','unrealized','ne
 function render(){const ps=state.portfolios;
  $('table').tBodies[0].innerHTML=ps.map(p=>{const n=p.now;const range=num(n.net_pnl_lower)===null?'<span class="muted">stale or unmarked</span>':`${money(n.net_pnl_lower)} to ${money(n.net_pnl_upper)}`;
   const halt=p.halted.length?` <span class="neg" title="${p.halted.join('; ')}">halted</span>`:'';
-  return`<tr><td>${p.strategy}${halt}</td><td>${p.id}</td><td>${money(n.realized)}</td><td>${money(n.unrealized)}</td><td>${money(n.unrealized_marked)}</td>
+  return`<tr><td>${p.strategy}${halt}</td><td>${p.id}</td><td>${p.deprecated?"legacy (deprecated)":p.kind}${p.venue?" / "+p.venue:""}</td><td>${p.mode}</td><td>${money(n.cash)}</td><td>${money(n.reserved)}</td><td>${money(n.available)}</td><td>${money(n.equity)}</td><td>${money(n.realized)}</td><td>${money(n.unrealized)}</td><td>${money(n.unrealized_marked)}</td>
   <td>${num(n.unmarked_cost)?money(n.unmarked_cost):'<span class="muted">$0.00</span>'}</td><td>${money(n.net_pnl)}</td><td>${range}</td><td>${money(n.fees)}</td>
-  <td>${n.fills}</td><td>${n.settlements}</td><td>${n.open_lots}</td><td>${pct(p.midpoint_coverage)}</td><td>${ago(p.activity.last)}</td></tr>`}).join('')||'<tr><td colspan="14" class="muted">No portfolios yet. Create one with czquant portfolio.</td></tr>';
+  <td>${n.fills}</td><td>${n.settlements}</td><td>${n.open_lots}</td><td>${pct(p.midpoint_coverage)}</td><td>${ago(p.activity.last)}</td></tr>`}).join('')||'<tr><td colspan="20" class="muted">No cash pools yet. Create one with czquant pool.</td></tr>';
  const cards=['market','account','polymarket','polymarket_us'].map(c=>{const h=state.health[c];if(!h)return`<div class="card"><b>${c} monitor</b><span class="muted">not running</span></div>`;
   const age=(Date.now()-new Date(h.at))/1000;const st=age>300?'stale':h.status;
   return`<div class="card"><b>${c} monitor</b><span><i class="dot ${st}"></i>${st}, ${ago(h.at)}</span></div>`});

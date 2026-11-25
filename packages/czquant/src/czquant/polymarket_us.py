@@ -331,6 +331,7 @@ class PolymarketUSLive:
     execution reports (source `pmus-exec:<execution id>`), so the ledger is current
     when the trader sizes its next leg. Called by Broker.submit with the broker."""
 
+    mode = "live"
     venue = "polymarket_us"
     policy = "polymarket-us-live-v1"
     takes_broker = True

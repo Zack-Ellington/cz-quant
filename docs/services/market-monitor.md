@@ -59,14 +59,14 @@ process supervisor can restart it. A successful command exit alone does not
 prove every market was collected; inspect errors and reference coverage.
 
 The Kalshi collector discovers both paper and live holdings, outstanding
-orders, and portfolio watchlists. It continues marking positions after live
+orders, and cash pool watchlists. It continues marking positions after live
 orders finish, but public outcomes settle only paper lots. International
 Polymarket collection covers its supported paper inventory.
 The Polymarket US component marks held paper and live markets; it combines
 public references with authenticated recovery when a live account is mapped.
 None of these discovery paths guarantees uninterrupted reference coverage.
 
-Paper watchlists can be supplied when creating a portfolio with Store.create
+Paper watchlists can be supplied when creating a cash pool with Store.create_pool
 and its watch metadata. Held positions do not require strategy-specific
 registration. A missing final payout remains an error rather than an invented
 settlement. Consumed paper liquidity is updated as book levels disappear.
@@ -75,7 +75,7 @@ settlement. Consumed paper liquidity is updated as book levels disappear.
 
 Supervise each collector independently and send its stdout/stderr to a log
 under STRATEGY_RUNS_DIR. Use absolute environment and key paths. Restart with
-the same state directory; never recreate portfolios to recover a collector.
+the same state directory; never recreate cash pools to recover a collector.
 Keep collectors running while positions need marks or settlement evidence.
 An outage leaves a historical gap even after new observations resume.
 

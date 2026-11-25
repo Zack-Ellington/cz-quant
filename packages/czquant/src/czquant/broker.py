@@ -27,21 +27,28 @@ def scope(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 class Broker:
-    def __init__(self, store: Store, portfolio: str, adapter: Any = None,
+    def __init__(self, store: Store, pool_id: str, adapter: Any = None,
                  run_id: str | None = None, *, venue: str | None = None):
-        self.store, self.portfolio, self.adapter = store, portfolio, adapter
-        self.venue = venue or getattr(adapter, "venue", "kalshi")
-        if getattr(adapter, "venue", self.venue) != self.venue:
-            raise ValueError("execution adapter belongs to a different venue")
+        self.store, self.pool_id, self.adapter = store, pool_id, adapter
+        pool = next((p for p in store.pools() if p["id"] == pool_id), None)
+        if pool is None:
+            raise ValueError("select an explicit venue cash pool; legacy portfolios are report-only")
+        self.venue = pool["venue"]
+        if (venue is not None and venue != self.venue) or getattr(adapter, "venue", self.venue) != self.venue:
+            raise ValueError("execution adapter belongs to a different cash-pool venue")
         self.run_id = run_id or uuid.uuid4().hex
-        rows = [p for p in store.portfolios() if p["id"] == portfolio]
-        if not rows:
-            raise ValueError("create the portfolio explicitly before opening its broker")
-        self.mode, self.metadata = rows[0]["mode"], rows[0]["metadata"]
+        self.mode, self.metadata = pool["mode"], pool["metadata"]
+        if getattr(adapter, "mode", self.mode) != self.mode:
+            raise ValueError('execution adapter and cash pool must use the same mode')
+
+    @property
+    def portfolio(self) -> str:
+        """Deprecated ownership spelling for older single-venue callers."""
+        return self.pool_id
 
     def state(self) -> State:
-        """Aggregate state of the selected portfolio, including its other venues."""
-        return portfolio_state(self.store, self.portfolio)
+        """Only this cash pool's cash and holdings, in paper and live mode."""
+        return portfolio_state(self.store, self.pool_id)
 
     def _check_venue(self, ticker: str) -> None:
         if venue_of(ticker) != self.venue:
@@ -54,28 +61,42 @@ class Broker:
         closing_side = "no" if order["side"] == "bid" else "yes"
         held = sum((lot["quantity"] for lot in self.state().lots.values()
                     if lot["market"] == order["ticker"] and lot["side"] == closing_side), Decimal(0))
+        for row in self.store.db.execute(
+                "SELECT id,request,filled FROM orders WHERE portfolio_id=? AND status IN ('pending','unknown','acknowledged')",
+                (self.pool_id,)):
+            other = json.loads(row['request'])
+            if (row['id'] != order.get('client_order_id') and other['ticker'] == order['ticker']
+                    and other['side'] == order['side']):
+                held -= max(Decimal(0), decimal(other['count']) - decimal(row['filled']))
+        held = max(Decimal(0), held)
+        if order.get('reduce_only') and quantity > held:
+            raise ValueError('reduce-only quantity exceeds unreserved holdings in this cash pool')
         opening = max(Decimal(0), quantity - held)
-        cost = opening * (price if order["side"] == "bid" else 1 - price)
+        opening_price = price if order['side'] == 'bid' else 1 - price
+        cost = opening * opening_price
         # Paper's exact fee is checked before execution. Reserve a conservative default fee.
         allowance = FEE_ALLOWANCE.get(venue_of(order["ticker"]), FEE_ALLOWANCE["kalshi"])
-        return cost + (quantity * allowance).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+        fees = (quantity * allowance).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+        closing_proceeds = min(quantity, held) * (1 - opening_price)
+        return max(Decimal(0), cost + fees - closing_proceeds)
 
     @property
     def available(self) -> Decimal:
-        """Free cash in the paper pool, or this venue's live allocation."""
-        if self.mode == "paper":
-            return self.state().cash - self.store.reserved(self.portfolio)
-        reserved = sum((decimal(r["reserved"]) for r in self.store.db.execute(
-            "SELECT request,reserved FROM orders WHERE portfolio_id=?", (self.portfolio,))
-            if venue_of(json.loads(r["request"])["ticker"]) == self.venue), Decimal(0))
-        return self.state().venue_cash.get(self.venue, Decimal(0)) - reserved
+        """Unreserved cash owned by this venue allocation, in either mode."""
+        return self.state().cash - self.store.reserved(self.pool_id)
+
+    @property
+    def unresolved_orders(self) -> int:
+        return self.store.db.execute(
+            "SELECT COUNT(*) FROM orders WHERE portfolio_id=? AND status IN ('unknown','pending')",
+            (self.pool_id,)).fetchone()[0]
 
     def observe(self, kind: str, data: dict[str, Any]) -> str:
-        return self.store.append("observation", {"kind": kind, **data}, self.portfolio, self.run_id)
+        return self.store.append("observation", {"kind": kind, **data}, self.pool_id, self.run_id)
 
     def start(self, strategy: str, revision: str, config: dict[str, Any]) -> str:
         return self.store.append("run", {"status": "started", "strategy": strategy,
-            "revision": revision, "config": config}, self.portfolio, self.run_id)
+            "revision": revision, "config": config}, self.pool_id, self.run_id)
 
     def submit(self, order: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.adapter is None:
@@ -88,10 +109,8 @@ class Broker:
         if quantity <= 0 or not 0 <= price <= 1:
             raise ValueError("invalid quantity or price")
         if self.metadata.get("retired_at"):
-            raise ValueError(f"portfolio {self.portfolio} is retired")
+            raise ValueError(f"cash pool {self.pool_id} is retired")
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
-        if self.mode == "live" and self.venue not in (self.metadata.get("venues") or ["kalshi"]):
-            raise ValueError(f"portfolio {self.portfolio} has no {venue_of(order['ticker'])} account")
         if self.mode == "live" and venue_of(order["ticker"]) == "kalshi":
             subaccount = self.metadata.get("subaccount")
             if subaccount is None or order.get("subaccount", subaccount) != subaccount:
@@ -100,21 +119,21 @@ class Broker:
             order.update(scope(self.metadata))
             exchange = self.metadata.get("exchange_index", 0)
             if order.get("exchange_index", exchange) != exchange:
-                raise ValueError("cannot change portfolio exchange")
+                raise ValueError("cannot change cash-pool exchange")
             order["exchange_index"] = exchange
         with self.store.transaction():
             prior = self.store.db.execute("SELECT * FROM orders WHERE id=?", (identifier,)).fetchone()
             if prior:
-                if prior["portfolio_id"] != self.portfolio or prior["request"] != encode(order) or prior["context"] != encode(context):
+                if prior["portfolio_id"] != self.pool_id or prior["request"] != encode(order) or prior["context"] != encode(context):
                     raise ValueError("client order ID reused for a different request")
                 return dict(prior)  # Never resubmit an uncertain write implicitly.
             reserve = self._reservation(order)
-            if self.mode == "paper" and reserve > self.available:
+            if reserve > self.available:
                 self.observe("order_rejected", {"reason": "insufficient_cash", "order": order, "context": context})
                 return {"client_order_id": identifier, "status": "rejected", "filled": "0"}
             self.store.db.execute("INSERT INTO orders(id,portfolio_id,run_id,request,context,status,reserved) VALUES(?,?,?,?,?,?,?)",
-                                  (identifier, self.portfolio, self.run_id, encode(order), encode(context), "pending", str(reserve)))
-            self.store.append("order", {"status": "intent", "order": order, "context": context}, self.portfolio, self.run_id)
+                                  (identifier, self.pool_id, self.run_id, encode(order), encode(context), "pending", str(reserve)))
+            self.store.append("order", {"status": "intent", "order": order, "context": context, "reserved": str(reserve)}, self.pool_id, self.run_id)
         try:
             if self.mode == "paper":
                 return self.adapter.create_order(order, self)
@@ -137,15 +156,15 @@ class Broker:
             self.store.db.execute("UPDATE orders SET venue_id=?,status='acknowledged' WHERE id=?",
                                   (response.get("order", response).get("order_id"), identifier))
             self.store.append("order", {"status": "acknowledged", "client_order_id": identifier,
-                "response": response}, self.portfolio, self.run_id)
+                "response": response}, self.pool_id, self.run_id)
         return response
 
     def finish(self, identifier: str, status: str, release: bool = True) -> None:
         with self.store.transaction():
             self._order(identifier)
             self.store.db.execute("UPDATE orders SET status=?,reserved=CASE WHEN ? THEN '0' ELSE reserved END WHERE id=? AND portfolio_id=?",
-                                  (status, release, identifier, self.portfolio))
-            self.store.append("order", {"client_order_id": identifier, "status": status}, self.portfolio, self.run_id)
+                                  (status, release, identifier, self.pool_id))
+            self.store.append("order", {"client_order_id": identifier, "status": status, "release": release}, self.pool_id, self.run_id)
 
     def cancel(self, identifier: str) -> dict[str, Any]:
         row = self._order(identifier)
@@ -173,7 +192,7 @@ class Broker:
         if self.venue != "kalshi" or not callable(getattr(self.adapter, "amend_order", None)):
             raise NotImplementedError(f"{self.venue} adapter does not support amend")
         if changes.get("subaccount", self.metadata["subaccount"]) != self.metadata["subaccount"]:
-            raise ValueError("cannot change portfolio ownership")
+            raise ValueError("cannot change cash-pool ownership")
         if any(k in changes for k in ("ticker", "side", "client_order_id")):
             raise ValueError("amend can change count and price only; submit a new order instead")
         request = {**{k: v for k, v in changes.items() if k != "subaccount"}, **scope(self.metadata)}
@@ -186,10 +205,12 @@ class Broker:
             quantity, price = decimal(amended["count"]), decimal(amended["price"])
             if quantity <= 0 or not 0 <= price <= 1 or quantity < decimal(row["filled"]):
                 raise ValueError("invalid amended quantity or price")
-            # Like submit, live cash sufficiency is the exchange's call; the ledger only
-            # keeps the reservation honest so `available` never overstates free cash.
-            old, new = decimal(row["reserved"]), self._reservation(amended)
+            remaining = quantity - decimal(row['filled'])
+            old = decimal(row['reserved'])
+            new = self._reservation({**amended, 'count': str(remaining)}) if remaining else Decimal(0)
             held = max(old, new)
+            if held - old > self.available:
+                raise ValueError("insufficient cash in this pool for amendment")
             self.store.db.execute("UPDATE orders SET reserved=? WHERE id=?", (str(held), identifier))
             self.observe("amend_intent", {"client_order_id": identifier, "changes": request,
                                           "reserved_before": str(old), "reserved_during": str(held)})
@@ -208,9 +229,9 @@ class Broker:
                              "wait for the account monitor to recover it")
 
     def _order(self, identifier: str) -> dict[str, Any]:
-        row = self.store.db.execute("SELECT * FROM orders WHERE id=? AND portfolio_id=?", (identifier, self.portfolio)).fetchone()
+        row = self.store.db.execute("SELECT * FROM orders WHERE id=? AND portfolio_id=?", (identifier, self.pool_id)).fetchone()
         if not row:
-            raise ValueError("order does not belong to this portfolio")
+            raise ValueError("order does not belong to this cash pool")
         self._check_venue(json.loads(row["request"])["ticker"])
         return dict(row)
 
@@ -245,8 +266,8 @@ class Broker:
                     "cash_delta": str(cash), "fee": str(allocated_fee),
                     "order_id": identifier, "context": context, "evidence": evidence,
                     "legs": [{"market": order["ticker"], "side": side, "quantity_delta": str(delta), "price": str(contract_price)}]},
-                    self.portfolio, self.run_id, source + ":" + side, at)
-            self.store.append("execution", receipt, self.portfolio, self.run_id, source + ":receipt", at)
+                    self.pool_id, self.run_id, source + ":" + side, at)
+            self.store.append("execution", receipt, self.pool_id, self.run_id, source + ":receipt", at)
             total = decimal(row["filled"]) + qty
             self.store.db.execute("UPDATE orders SET filled=? WHERE id=?", (str(total), identifier))
 
@@ -256,6 +277,9 @@ class Broker:
         with self.store.transaction():
             lot = self.state().lots.get(lot_id)
             if lot is None:
+                owner = self.store.db.execute('SELECT portfolio_id FROM events WHERE record_id=?', (lot_id,)).fetchone()
+                if owner and owner['portfolio_id'] != self.pool_id:
+                    raise ValueError('lot belongs to a different cash pool')
                 return
             self._check_venue(lot["market"])
             value = decimal(yes_value)
@@ -265,16 +289,16 @@ class Broker:
             self.store.append("transaction", {"reason": "settlement", "cash_delta": str(lot["quantity"] * price), "fee": "0",
                 "context": lot["context"], "evidence": evidence,
                 "legs": [{"market": lot["market"], "side": lot["side"], "quantity_delta": str(-lot["quantity"]),
-                          "price": str(price), "lot_id": lot_id}]}, self.portfolio, self.run_id,
-                f"paper-settlement:{self.portfolio}:{lot_id}")
+                          "price": str(price), "lot_id": lot_id}]}, self.pool_id, self.run_id,
+                f"paper-settlement:{self.pool_id}:{lot_id}")
 
     def correct(self, targets: list[str], reason: str) -> str:
         if not reason:
             raise ValueError("correction reason required")
         with self.store.transaction():
-            known = {e["record_id"]: e for e in self.store.events(self.portfolio, kinds=("transaction", "correction"))}
+            known = {e["record_id"]: e for e in self.store.events(self.pool_id, kinds=("transaction", "correction"))}
             if not targets or not set(targets) <= known.keys():
-                raise ValueError("correction targets must belong to this portfolio")
+                raise ValueError("correction targets must belong to this cash pool")
             if any(known[t]["type"] != "transaction" for t in targets):
                 raise ValueError("corrections target economic transactions")
             for target in targets:
@@ -283,7 +307,7 @@ class Broker:
                 venue = venue_of(legs[0]["market"]) if legs else data.get("venue", "kalshi")
                 if venue != self.venue:
                     raise ValueError("correction targets must belong to this venue")
-            identifier = self.store.append("correction", {"targets": targets, "reason": reason}, self.portfolio, self.run_id,
+            identifier = self.store.append("correction", {"targets": targets, "reason": reason}, self.pool_id, self.run_id,
                                            at=min(known[t]["effective_at"] for t in targets))
             # A corrected fill no longer counts toward its order, so the genuine fill can
             # still be booked and the order's overfill check stays accurate.

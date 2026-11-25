@@ -136,11 +136,11 @@ def test_retiring_on_a_shared_account_hands_its_cash_to_a_sharer(tmp_path):
 
 def test_remapping_moves_an_empty_portfolio_to_another_account(tmp_path):
     store, api = Store(tmp_path), Kalshi(cents=0)
-    store.create("x", mode="live", subaccount=1, exchange_index=0, venues=["kalshi", "polymarket_us"])
+    store.create_pool("x", "kalshi", mode="live", subaccount=1, exchange_index=0)
     api.cents = 20000
     remap_kalshi(store, api, "x", 0)
     [p] = store.portfolios()
-    assert p["metadata"]["subaccount"] == 0 and p["metadata"]["venues"] == ["kalshi", "polymarket_us"]
+    assert p["metadata"]["subaccount"] == 0
     assert Broker(store, "x").state().venue_cash["kalshi"] == 200
     buy(store, "x")
     with pytest.raises(ValueError, match="Kalshi positions"):

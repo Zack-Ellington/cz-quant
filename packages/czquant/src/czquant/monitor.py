@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 
 def market_pass(store: Store, api: Any) -> dict[str, Any]:
-    portfolios = store.portfolios()
+    portfolios = store.pools("kalshi")
     paper = {p["id"] for p in portfolios if p["mode"] == "paper"}
     states = {p["id"]: replay(store.events(p["id"], kinds=("transaction", "correction"))) for p in portfolios}
     tickers = {lot["market"] for state in states.values() for lot in state.lots.values()}
@@ -100,7 +100,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
         epoch = datetime.fromisoformat(cutoff.replace("Z", "+00:00")).timestamp() if isinstance(cutoff, str) else float(cutoff)
         if since < epoch:
             fills += list(api.pages("/historical/fills", "fills", min_ts=since, limit=1000))
-    live = active_live(store)
+    live = [p for p in active_live(store) if p["venue"] == "kalshi"]
     # Portfolios sharing one Kalshi account are reconciled against it together.
     groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
     for p in live:
@@ -242,7 +242,7 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
 def polymarket_pass(store: Store, client: Polymarket) -> dict[str, Any]:
     """Mark every Polymarket token a paper portfolio holds or watches, and settle the
     lots of any whose result is final. Public reads only: no credentials."""
-    portfolios = [p for p in store.portfolios() if p["mode"] == "paper"]
+    portfolios = [p for p in store.pools("polymarket") if p["mode"] == "paper"]
     tickers = {lot["market"] for p in portfolios
                for lot in replay(store.events(p["id"], kinds=("transaction", "correction"))).lots.values()}
     for row in store.db.execute("SELECT request FROM orders WHERE status IN ('pending','unknown','acknowledged')"):
@@ -440,7 +440,7 @@ def _settle_paper(store: Store, client: PolymarketUS) -> int:
     """Mark the Polymarket US markets paper portfolios hold, and settle their lots once
     a market's settlement is final. Public reads only."""
     settled = 0
-    for p in store.portfolios():
+    for p in store.pools("polymarket_us"):
         if p["mode"] != "paper":
             continue
         broker = Broker(store, p["id"], run_id="polymarket-us-monitor", venue="polymarket_us")
@@ -476,7 +476,7 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
        a discrepancy (never booked as profit), and the trader halts on one.
     """
     discrepancies: list[dict[str, Any]] = []
-    mapped = [p for p in active_live(store) if "polymarket_us" in (p["metadata"].get("venues") or [])]
+    mapped = [p for p in active_live(store) if p["venue"] == "polymarket_us"]
     if mapped and not client.authenticated:
         raise ValueError("a live portfolio is mapped to Polymarket US: the monitor needs its credentials")
     settled, recovered = _settle_paper(store, client), 0

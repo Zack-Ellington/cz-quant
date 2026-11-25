@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from czquant import Broker, Store
-from czquant.accounting import active_events, venue_of
+from czquant.accounting import active_events, combine_states, venue_of
 from czquant.kalshi import Kalshi
 from czquant.live import KalshiLive
 from czquant.paper import Paper
@@ -54,7 +54,7 @@ class Config:
     max_event_frac: float = 0.10
     max_total_frac: float = 1.00
     max_open_events: int = 20
-    max_sets: int = 500
+    max_sets: int = 20
     risk_free: float = 0.05
     min_net: float = 0.25
     min_edge: float = 0.01  # per $1 set: margin for rule and settlement risk between venues
@@ -68,11 +68,11 @@ class Config:
     duration_minutes: float | None = None
     markets: bool = True  # also scan the reviewed non-sports pairs in markets.json
     venue: str = "polymarket"  # polymarket (international, paper) or polymarket_us
-    live: bool = False  # real orders: needs a live portfolio mapped with map-live-cross
+    live: bool = False  # real orders: needs two mapped live venue cash pools
     dry_run: bool = False  # live, but build and sign orders without sending them
     pmus_theta: float | None = None  # Polymarket US taker coefficient; None: each market's own
-    max_basket_dollars: float | None = None  # hard cap on one basket's capital
-    max_total_dollars: float | None = None  # hard cap on capital at risk across open trades
+    max_basket_dollars: float | None = 25.0  # hard cap on one basket's capital
+    max_total_dollars: float | None = 100.0  # hard cap on capital at risk across open trades
     monitor_max_age: float = 300.0  # live: seconds a monitor's last health check stays valid
 
 
@@ -92,12 +92,13 @@ class Engine:
                  us: PolymarketUS | None = None, kalshi_live: Any = None):
         self.cfg = cfg
         self.theta_override = None if cfg.pmus_theta is None else Decimal(str(cfg.pmus_theta))
-        portfolio = os.environ.get("CZQUANT_PORTFOLIO")
-        if not portfolio:
-            raise ValueError("Set CZQUANT_PORTFOLIO to an explicitly created paper portfolio")
+        kalshi_pool = os.environ.get("CZQUANT_KALSHI_POOL")
+        poly_pool = os.environ.get("CZQUANT_POLYMARKET_POOL")
+        if not kalshi_pool or not poly_pool:
+            raise ValueError("Set CZQUANT_KALSHI_POOL and CZQUANT_POLYMARKET_POOL to existing venue cash pools")
         self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
         self.store = Store()
-        self.diagnostics = os.path.join(str(self.store.root), "diagnostics", portfolio)
+        self.diagnostics = os.path.join(str(self.store.root), "diagnostics", STRATEGY, kalshi_pool, poly_pool)
         self.kalshi = kalshi or Kalshi(authenticated=False)
         self.us = cfg.venue == "polymarket_us"
         if cfg.live and not self.us:
@@ -112,17 +113,14 @@ class Engine:
             poly_adapter = PolymarketPaper(self.poly, latency=cfg.polymarket_latency)
         kalshi_adapter = (KalshiLive(kalshi_live or Kalshi(authenticated=True), dry_run=cfg.dry_run)
                           if cfg.live else Paper(self.kalshi, latency=cfg.kalshi_latency))
-        self.kalshi_broker = Broker(self.store, portfolio, kalshi_adapter, self.run_id)
-        self.poly_broker = Broker(self.store, portfolio, poly_adapter, self.run_id)
+        self.kalshi_broker = Broker(self.store, kalshi_pool, kalshi_adapter, self.run_id)
+        self.poly_broker = Broker(self.store, poly_pool, poly_adapter, self.run_id)
         self.brokers = {broker.venue: broker for broker in (self.kalshi_broker, self.poly_broker)}
-        if cfg.live:
-            if self.kalshi_broker.mode != "live" or not {"kalshi", "polymarket_us"}.issubset(self.kalshi_broker.metadata.get("venues", [])):
-                raise ValueError(f"{portfolio} is not a live portfolio mapped to Kalshi and Polymarket US "
-                                 "(uv run czquant map-live-cross)")
-            if not self.poly.authenticated:
-                raise ValueError("live trading needs POLYMARKET_US_KEY_ID and POLYMARKET_US_SECRET_KEY_PATH")
-        elif self.kalshi_broker.mode != "paper":
-            raise ValueError(f"{portfolio} is a live portfolio: pass --live (and --dry-run first)")
+        expected_mode = "live" if cfg.live else "paper"
+        if any(b.mode != expected_mode for b in self.brokers.values()):
+            raise ValueError(f"both cash pools must be {expected_mode}")
+        if cfg.live and not self.poly.authenticated:
+            raise ValueError("live trading needs POLYMARKET_US_KEY_ID and POLYMARKET_US_SECRET_KEY_PATH")
         self.leagues = leagues if leagues is not None else load_leagues(cfg.leagues)
         self.pairs = pairs if pairs is not None else load_pairs(PAIRS_US if self.us else PAIRS)
         # Non-sports pairs name international Polymarket markets: scanned on that venue only.
@@ -130,10 +128,12 @@ class Engine:
         self.reload_markets = listings is None and markets_on  # re-read markets.json at each discovery
         self.listings = listings if listings is not None else (load_markets() if markets_on else [])
         revision = revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
-        self.kalshi_broker.start(STRATEGY, revision, {**asdict(self.cfg), "leagues": self.leagues,
+        run_config = {**asdict(self.cfg), "pools": [kalshi_pool, poly_pool], "leagues": self.leagues,
                                                "pairs": {"pinned": sorted(self.pairs["pairs"]),
                                                          "blocked": sorted(self.pairs["blocked"])},
-                                               "markets": [asdict(x) for x in self.listings]})
+                                               "markets": [asdict(x) for x in self.listings]}
+        for broker in self.brokers.values():
+            broker.start(STRATEGY, revision, run_config)
         self.games: dict[str, list[KalshiGame]] = {}
         self.polys: dict[str, list[PolyGame]] = {}
         self.fees: dict[str, Decimal | None] = {}
@@ -152,8 +152,8 @@ class Engine:
 
     def resume(self) -> None:
         """Recover actual holdings and the halt state from the shared store."""
-        state = self.kalshi_broker.state()
-        self.cash = state.cash - self.store.reserved(self.kalshi_broker.portfolio)
+        state = combine_states([b.state() for b in self.brokers.values()])
+        self.cash = state.cash - sum((self.store.reserved(b.pool_id) for b in self.brokers.values()), Decimal(0))
         self.bankroll = state.contributed
         self.positions = {}
         for lot in state.lots.values():
@@ -161,8 +161,10 @@ class Engine:
             if context.get("trade_id"):
                 position = self.positions.setdefault(context["trade_id"], {**context, "capital": Decimal(0)})
                 position["capital"] += lot["cost"]
-        events = active_events(self.store.events(self.kalshi_broker.portfolio, kinds=("transaction", "observation", "correction"),
-                                                 observations=("halt", "halt_cleared", "basket_settled")))
+        events = active_events(sorted(
+            [e for b in self.brokers.values() for e in self.store.events(b.pool_id,
+             kinds=("transaction", "observation", "correction"), observations=("halt", "halt_cleared", "basket_settled"))],
+            key=lambda e: (e["effective_at"], e["sequence"])))
         observations = [e for e in events if e["type"] == "observation"]
         cleared = {e["data"]["halt_id"] for e in observations if e["data"].get("kind") == "halt_cleared"}
         reported = {e["data"]["trade_id"] for e in observations if e["data"].get("kind") == "basket_settled"}
@@ -214,15 +216,13 @@ class Engine:
         if self.cfg.max_total_dollars is not None:
             # Open reservations count too: live Kalshi fills reach the ledger only with the monitor.
             cap = min(cap, Decimal(str(self.cfg.max_total_dollars)) - self.exposure()
-                      - self.store.reserved(self.kalshi_broker.portfolio))
+                      - sum((self.store.reserved(b.pool_id) for b in self.brokers.values()), Decimal(0)))
         if self.cfg.max_basket_dollars is not None:
             cap = min(cap, Decimal(str(self.cfg.max_basket_dollars)))
         return cap
 
     def venue_shortfall(self, basket: Basket) -> str | None:
-        """Live: the first venue whose free cash can't pay its legs (cost plus fee)."""
-        if not self.cfg.live:
-            return None
+        """The first pool whose free cash cannot pay its legs, in paper or live mode."""
         need: dict[str, Decimal] = {}
         for leg in basket.legs:
             venue = venue_of(leg["ticker"])
@@ -232,15 +232,11 @@ class Engine:
     def live_block(self) -> str | None:
         """Live: a reason not to trade now. Unresolved orders and monitor discrepancies
         halt; a missing or stale monitor check only pauses."""
-        if not self.cfg.live:
-            return None
-        unresolved = self.store.db.execute(
-            "SELECT COUNT(*) FROM orders WHERE portfolio_id=? AND status IN ('unknown','pending')",
-            (self.kalshi_broker.portfolio,)).fetchone()[0]
+        unresolved = sum(b.unresolved_orders for b in self.brokers.values())
         if unresolved:
             self.halt(f"{unresolved} order(s) with unknown outcome; check both venues, then clear the halt")
             return "halted"
-        if self.cfg.dry_run:
+        if not self.cfg.live or self.cfg.dry_run:
             return None
         now = datetime.now(timezone.utc)
         for component in ("account", "polymarket_us"):
@@ -251,7 +247,7 @@ class Engine:
             age = (now - datetime.fromisoformat(last["effective_at"])).total_seconds()
             if age > self.cfg.monitor_max_age or last["data"].get("status") == "failed":
                 return f"stale_{component}_monitor"
-            mine = [d for d in last["data"].get("discrepancies") or [] if d.get("portfolio") == self.kalshi_broker.portfolio]
+            mine = [d for d in last["data"].get("discrepancies") or [] if d.get("portfolio") in {b.pool_id for b in self.brokers.values()}]
             if mine:
                 self.halt(f"{component} monitor reports {mine[0].get('kind')}: reconcile before trading")
                 return "halted"
@@ -695,7 +691,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-event-frac", type=float, default=d.max_event_frac, help="cap per game, share of bankroll (0.10)")
     p.add_argument("--max-total-frac", type=float, default=d.max_total_frac)
     p.add_argument("--max-open-events", type=int, default=d.max_open_events)
-    p.add_argument("--max-sets", type=int, default=d.max_sets, help="contract sets ($1 payouts) per basket (500)")
+    p.add_argument("--max-sets", type=int, default=d.max_sets, help="contract sets ($1 payouts) per basket (20)")
     p.add_argument("--risk-free", type=float, default=d.risk_free, help="hurdle APR, compounded to payout (0.05)")
     p.add_argument("--min-net", type=float, default=d.min_net, help="minimum profit after fees per basket, $ (0.25)")
     p.add_argument("--min-edge", type=float, default=d.min_edge, help="minimum profit per $1 set (0.01)")
@@ -716,20 +712,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--pmus-theta", type=float, default=None,
                    help="Polymarket US taker coefficient for pricing and paper fees (default: each market's feeCoefficient, 0.095 at tier 1)")
     p.add_argument("--live", action="store_true",
-                   help="send real orders to Kalshi and Polymarket US (a live portfolio from map-live-cross)")
+                   help="send real orders through the two selected live venue cash pools")
     p.add_argument("--dry-run", action="store_true", help="with --live: build and sign every order, send none")
-    p.add_argument("--max-basket-dollars", type=float, default=None, help="cap on one basket's capital, $ (live default 25)")
-    p.add_argument("--max-total-dollars", type=float, default=None, help="cap on capital at risk, $ (live default 100)")
+    p.add_argument("--max-basket-dollars", type=float, default=d.max_basket_dollars, help="cap on one basket's capital, $ (25 in either mode)")
+    p.add_argument("--max-total-dollars", type=float, default=d.max_total_dollars, help="cap on capital at risk, $ (100 in either mode)")
     p.add_argument("--once", action="store_true", help="one scan, then stop")
     a = p.parse_args(argv)
     if a.dry_run and not a.live:
         p.error("--dry-run goes with --live (paper runs never send orders anyway)")
-    if a.live:
-        # Small by default: the first live runs measure fills and fees, not profit.
-        a.max_basket_dollars = 25.0 if a.max_basket_dollars is None else a.max_basket_dollars
-        a.max_total_dollars = 100.0 if a.max_total_dollars is None else a.max_total_dollars
-        if "--max-sets" not in (argv if argv is not None else __import__("sys").argv):
-            a.max_sets = 20
     if not os.environ.get("STRATEGY_RUNS_DIR"):
         # Without it the store falls back to ./runs, which the monitors and dashboard never read.
         p.error("STRATEGY_RUNS_DIR is not set; load .env first (set -a; source .env; set +a)")
@@ -749,7 +739,7 @@ def main(argv: list[str] | None = None) -> None:
                         handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(run_dir, "run.log"))])
     if cfg.live:
         log.warning("LIVE%s: portfolio %s, caps $%s per basket, $%s total, %d sets; Kalshi $%s and Polymarket US $%s free",
-                    " DRY RUN (nothing sent)" if cfg.dry_run else "", engine.kalshi_broker.portfolio, cfg.max_basket_dollars,
+                    " DRY RUN (nothing sent)" if cfg.dry_run else "", list(b.pool_id for b in engine.brokers.values()), cfg.max_basket_dollars,
                     cfg.max_total_dollars, cfg.max_sets, engine.kalshi_broker.available,
                     engine.poly_broker.available)
     try:

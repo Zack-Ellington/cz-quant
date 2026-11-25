@@ -95,15 +95,18 @@ class FakePoly(Polymarket):
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_PORTFOLIO", "pm")
-    Store(tmp_path).create("pm", "1000")
-    return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0), FakeKalshi(), FakePoly(),
+    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "k")
+    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm")
+    store = Store(tmp_path)
+    store.create_pool("k", "kalshi", "600")
+    store.create_pool("pm", "polymarket", "400")
+    return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeKalshi(), FakePoly(),
                   {}, {"pairs": {}, "blocked": set()}, "test", listings=[LISTING])
 
 
 def test_a_reviewed_pair_buys_kalshi_no_against_polymarket_yes(engine):
     engine.step()  # Kalshi NO 0.42 + Polymarket Yes 0.50 = 0.92 a set
-    held = {(lot["market"], lot["side"]): lot["quantity"] for lot in Broker(engine.store, "pm").state().lots.values()}
+    held = {(lot["market"], lot["side"]): lot["quantity"] for broker in engine.brokers.values() for lot in broker.state().lots.values()}
     assert held == {("KXFED-26DEC-CUT", "no"): 100, ("PM:tok-yes", "yes"): 100}
     record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
     assert record["context"]["match"]["method"] == "reviewed"
@@ -112,7 +115,7 @@ def test_a_reviewed_pair_buys_kalshi_no_against_polymarket_yes(engine):
 def test_no_basket_when_the_venues_agree(engine):
     engine.poly.asks = {"tok-yes": "0.60", "tok-no": "0.41"}  # 0.42 + 0.60 and 0.62 + 0.41: both over $1
     engine.step()
-    assert not Broker(engine.store, "pm").state().lots
+    assert not any(b.state().lots for b in engine.brokers.values())
 
 
 def test_finder_requires_the_same_numbers():
@@ -199,8 +202,11 @@ def test_discovery_rereads_markets_json(tmp_path, monkeypatch):
     monkeypatch.setattr(markets, "MARKETS", str(path))
     monkeypatch.setattr(markets.load_markets, "__defaults__", (str(path), None))
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_PORTFOLIO", "pm")
-    Store(tmp_path).create("pm", "1000")
+    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "k")
+    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm")
+    store = Store(tmp_path)
+    store.create_pool("k", "kalshi", "600")
+    store.create_pool("pm", "polymarket", "400")
     e = Engine(Config(kalshi_latency=0, polymarket_latency=0), FakeKalshi(), FakePoly(), {},
                {"pairs": {}, "blocked": set()}, "test")
     e.discover()
