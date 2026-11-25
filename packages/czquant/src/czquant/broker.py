@@ -38,8 +38,6 @@ class Broker:
             raise ValueError("execution adapter belongs to a different cash-pool venue")
         self.run_id = run_id or uuid.uuid4().hex
         self.mode, self.metadata = pool["mode"], pool["metadata"]
-        if getattr(adapter, "mode", self.mode) != self.mode:
-            raise ValueError('execution adapter and cash pool must use the same mode')
 
     @property
     def portfolio(self) -> str:
@@ -58,17 +56,26 @@ class Broker:
         """Cash to hold for an order: the cost of the contracts it opens (net of any
         opposite position it closes) plus a conservative fee allowance."""
         quantity, price = decimal(order["count"]), decimal(order["price"])
-        closing_side = "no" if order["side"] == "bid" else "yes"
-        held = sum((lot["quantity"] for lot in self.state().lots.values()
-                    if lot["market"] == order["ticker"] and lot["side"] == closing_side), Decimal(0))
-        for row in self.store.db.execute(
-                "SELECT id,request,filled FROM orders WHERE portfolio_id=? AND status IN ('pending','unknown','acknowledged')",
-                (self.pool_id,)):
+        # Confirmed executions establish inventory ownership before the account
+        # monitor books exact cash and fees. They never create spendable cash.
+        acknowledgements = {e['data']['client_order_id']: e['data']
+                            for e in self.store.events(self.pool_id, kinds=('order',))
+                            if e['data'].get('status') == 'acknowledged'}
+        net = sum((lot['quantity'] * (1 if lot['side'] == 'yes' else -1)
+                   for lot in self.state().lots.values() if lot['market'] == order['ticker']), Decimal(0))
+        pending_closes = Decimal(0)
+        for row in self.store.db.execute('SELECT * FROM orders WHERE portfolio_id=?', (self.pool_id,)):
             other = json.loads(row['request'])
-            if (row['id'] != order.get('client_order_id') and other['ticker'] == order['ticker']
-                    and other['side'] == order['side']):
-                held -= max(Decimal(0), decimal(other['count']) - decimal(row['filled']))
-        held = max(Decimal(0), held)
+            if other['ticker'] != order['ticker']:
+                continue
+            ack = acknowledgements.get(row['id'], {})
+            confirmed = decimal(ack.get('confirmed_filled', '0'))
+            booked = decimal(row['filled'])
+            net += max(Decimal(0), confirmed - booked) * (1 if other['side'] == 'bid' else -1)
+            if (row['id'] != order.get('client_order_id') and other['side'] == order['side']
+                    and row['status'] in ('pending', 'unknown', 'acknowledged') and not ack.get('terminal')):
+                pending_closes += max(Decimal(0), decimal(other['count']) - max(booked, confirmed))
+        held = max(Decimal(0), (net if order['side'] == 'ask' else -net) - pending_closes)
         if order.get('reduce_only') and quantity > held:
             raise ValueError('reduce-only quantity exceeds unreserved holdings in this cash pool')
         opening = max(Decimal(0), quantity - held)
@@ -101,6 +108,8 @@ class Broker:
     def submit(self, order: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.adapter is None:
             raise ValueError("execution adapter required")
+        if getattr(self.adapter, "mode", self.mode) != self.mode:
+            raise ValueError("execution adapter and cash pool must use the same mode")
         order, context = dict(order), json.loads(encode(context or {}))
         self._check_venue(order["ticker"])
         if order["side"] not in ("bid", "ask"):
@@ -152,12 +161,27 @@ class Broker:
         except Exception:
             self.finish(identifier, "failed" if self.mode == "paper" else "unknown", release=self.mode == "paper")
             raise
-        with self.store.transaction():
-            self.store.db.execute("UPDATE orders SET venue_id=?,status='acknowledged' WHERE id=?",
-                                  (response.get("order", response).get("order_id"), identifier))
-            self.store.append("order", {"status": "acknowledged", "client_order_id": identifier,
-                "response": response}, self.pool_id, self.run_id)
+        body = response.get('order', response)
+        self.acknowledge(identifier, body.get('order_id'), response,
+                         body.get('fill_count_fp', body.get('fill_count')),
+                         body.get('status') in ('executed', 'canceled'))
         return response
+
+    def acknowledge(self, identifier: str, venue_id: str | None, response: dict[str, Any],
+                    confirmed_filled: Any = None, terminal: bool = False) -> None:
+        """Record confirmed inventory without guessing fill prices, fees or cash."""
+        with self.store.transaction():
+            row = self._order(identifier)
+            data = {'status': 'acknowledged', 'client_order_id': identifier, 'response': response,
+                    'terminal': terminal and confirmed_filled is not None}
+            if confirmed_filled is not None:
+                quantity = decimal(confirmed_filled)
+                if not quantity.is_finite() or not 0 <= quantity <= decimal(json.loads(row['request'])['count']):
+                    raise ValueError('invalid confirmed fill quantity')
+                data['confirmed_filled'] = str(quantity)
+            self.store.db.execute("UPDATE orders SET venue_id=?,status='acknowledged' WHERE id=?",
+                                  (venue_id, identifier))
+            self.store.append('order', data, self.pool_id, self.run_id)
 
     def finish(self, identifier: str, status: str, release: bool = True) -> None:
         with self.store.transaction():

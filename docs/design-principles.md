@@ -159,9 +159,9 @@ The strategy-facing operations are:
   execution evidence; they do not silently turn uncertainty into zero fills.
 - observe(kind, data): attach diagnostics without changing economic state.
 
-Infrastructure uses fill, finish, settle, and correct to ingest executions,
-complete order tracking, settle supported paper positions, and apply audited
-corrections. Strategies do not manufacture fills or settlement facts. Public
+Infrastructure uses acknowledge, fill, finish, settle, and correct to record
+venue confirmations, ingest executions, complete order tracking, settle
+supported paper positions, and apply audited corrections. Strategies do not manufacture fills or settlement facts. Public
 strategy integration must not require access to the broker's private order
 helpers or database tables.
 
@@ -250,9 +250,14 @@ export is not a replacement for those operational tables.
 
 The execution boundary owns run provenance, order intent, execution receipts,
 and the resulting economic transactions described above. Record intent before
-submission. Preserve partial fills as individual facts; an acknowledgement
-alone never creates inventory. Exits and repairs preserve the same ownership
-and evidence as entries.
+submission. Preserve partial fills as individual facts. Acceptance alone does
+not establish a fill. An acknowledgement with an explicit confirmed execution
+quantity can establish pool-owned inventory for an immediate close while
+account reconciliation is pending. Order records retain confirmed_filled and
+terminal with the raw response. This evidence does not create spendable cash,
+priced lots, fees, or profit. Exact execution receipts establish those accounting
+facts; booked quantities replace pending confirmations without double counting.
+Exits and repairs preserve the same ownership and evidence as entries.
 
 Optional context can hold intended baskets, model outputs, expected returns,
 or immutable artifact references. These observations never determine realized

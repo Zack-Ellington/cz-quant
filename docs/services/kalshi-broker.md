@@ -165,7 +165,10 @@ Use the [reporting guide](reporting.md#backup-and-restore) for database recovery
 
 For normalized IOC/FOK results, use KalshiLive(Kalshi(authenticated=True)).
 The adapter reports status and filled quantity from the response while the
-account monitor books authoritative fills. KalshiLive(..., dry_run=True) logs
+account monitor books authoritative fills. Explicit confirmed quantities are
+logged durably and can support an immediate close within the same pool before
+reconciliation. They do not release cash reservations or book estimated cash
+and fees. KalshiLive(..., dry_run=True) logs
 the built request and sends nothing. Unknown responses persist as unknown
 and keep their reservations. This adapter does not expose cancel or amend;
 the raw authenticated Kalshi transport above supports those operations.

@@ -41,11 +41,9 @@ class KalshiLive:
         response = self.api.create_order(order)
         body = response.get("order", response)
         venue_id = body.get("order_id")
-        with broker.store.transaction():
-            broker.store.db.execute("UPDATE orders SET venue_id=?, status='acknowledged' WHERE id=?",
-                                    (venue_id, identifier))
         raw_fill = body.get("fill_count_fp", body.get("fill_count"))
         status = KALSHI_TERMINAL.get(body.get("status", ""))
+        broker.acknowledge(identifier, venue_id, response, raw_fill, terminal=status is not None)
         if raw_fill is None or status is None:
             # An IOC that isn't terminal in its own reply is unexpected: report it, never guess.
             broker.finish(identifier, "unknown", release=False)

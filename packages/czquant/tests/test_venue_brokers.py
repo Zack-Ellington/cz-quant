@@ -280,3 +280,55 @@ def test_concurrent_shared_account_allocations_cannot_spend_the_same_cash(tmp_pa
     reopened = Store(tmp_path)
     assert Broker(reopened, 'a').available == 20
     assert sum(Broker(reopened, p).state().cash for p in ('a', 'b', 'c')) == 100
+
+
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_confirmed_live_inventory_can_close_before_monitor_books_fills(tmp_path, wrapped):
+    from czquant.live import KalshiLive
+
+    class Venue:
+        def create_order(self, request):
+            return {'order': {'order_id': 'venue-' + request['client_order_id'],
+                              'status': 'canceled', 'fill_count_fp': '1'}}
+
+    store = Store(tmp_path)
+    for identifier in ('a', 'b'):
+        pool(store, identifier, 'kalshi', '10', 'live')
+    adapter = KalshiLive(Venue()) if wrapped else Venue()
+    a, b = Broker(store, 'a', adapter), Broker(store, 'b', adapter)
+    a.submit({**order('M', 'open'), 'time_in_force': 'immediate_or_cancel'})
+    # The confirmed partial fill is durable, but is not a priced accounting fill.
+    assert not a.state().lots and a.state().cash == 10
+    store.close()
+    store = Store(tmp_path)
+    a, b = Broker(store, 'a', adapter), Broker(store, 'b', adapter)
+    close = {**order('M', 'close'), 'count': '1', 'side': 'ask', 'reduce_only': True,
+             'time_in_force': 'immediate_or_cancel'}
+    with pytest.raises(ValueError, match='unreserved holdings'):
+        b.submit(close)
+    a.submit(close)
+    with pytest.raises(ValueError, match='unreserved holdings'):
+        a.submit({**close, 'client_order_id': 'double-close'})
+    assert a.state().cash == 10  # confirmations never fabricate proceeds or fees
+    a.fill('open', '1', '0.5', '0.01', 'opening-fill', {})
+    a.finish('open', 'canceled')
+    # Booking the opening does not re-expose inventory already confirmed closed.
+    with pytest.raises(ValueError, match='unreserved holdings'):
+        a.submit({**close, 'client_order_id': 'double-close-after-booking'})
+    a.fill('close', '1', '0.5', '0.01', 'closing-fill', {})
+    a.finish('close', 'filled')
+    assert a.available == D('9.98') and not a.state().lots
+    assert b.available == 10 and not b.state().lots
+
+
+@pytest.mark.parametrize('mode', ['paper', 'live'])
+def test_execution_rejects_wrong_adapter_mode_before_any_intent(tmp_path, mode):
+    store = Store(tmp_path)
+    pool(store, 'p', 'kalshi', '10', mode)
+    adapter = Pending('kalshi')
+    adapter.mode = 'live' if mode == 'paper' else 'paper'
+    broker = Broker(store, 'p', adapter)
+    before = store.events()
+    with pytest.raises(ValueError, match='same mode'):
+        broker.submit(order('M', 'wrong-mode'))
+    assert store.events() == before and not adapter.sent
