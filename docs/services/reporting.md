@@ -24,7 +24,7 @@ uv run czquant report --since "$START" --until "$END" --output "$REPORT_DIR"
 
 The output contains metrics.csv, equity.csv, a standalone report.html,
 comparison.md, accounting.sqlite3, and manifest.json with the window,
-recorded-data cutoff, policies, health, and snapshot checksum. Retain a separate
+recorded-data cutoff, policies, health, source-module hashes, and snapshot checksum. Retain a separate
 output directory for each report or restatement. The cutoff does not liquidate
 positions or stop collectors.
 
@@ -56,12 +56,18 @@ executable liquidation values or guaranteed payouts. They do not model exit
 fees or available liquidation depth. Missing midpoints prevent complete-period
 point-return and drawdown ranking; realized results remain separately visible.
 
-The current renderer uses paper-specific labels, and its manifest's policy
-label does not fully identify the one-sided midpoint exception or report code
-revision. Retain the generating Git revision with the report and disclose that
-exception when sharing comparisons. Do not present current labels as evidence
-that live evaluation is complete. Live coverage is also limited by the
-[market collector's inventory discovery](market-monitor.md#coverage-and-verification).
+Metrics and comparison rows identify each portfolio's paper or live mode.
+The manifest identifies the one-sided midpoint rule and hashes the report,
+accounting, book, and store source modules. Retain the generating checkout and
+environment alongside those hashes to reproduce the implementation.
+
+A live comparison also requires a healthy account observation no older than
+120 seconds at its cutoff for every mapped venue. A Kalshi and Polymarket US
+portfolio therefore needs both account components. A missing or degraded
+component makes complete-period returns unavailable even when public marks
+are present. Per-component health coverage and
+[market-reference coverage](market-monitor.md#coverage-and-verification)
+remain separate measurements.
 
 ## Dashboard
 

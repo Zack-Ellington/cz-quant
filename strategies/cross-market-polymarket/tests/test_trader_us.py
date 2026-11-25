@@ -77,6 +77,7 @@ def test_paper_on_polymarket_us_buys_each_team_where_it_is_cheaper(runs):
     Store(runs).create("pm", "1000")
     engine = build(Config(venue="polymarket_us", kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0),
                    FakeUSVenue())
+    assert engine.kalshi_broker.venue == "kalshi" and engine.poly_broker.venue == "polymarket_us"
     engine.step()
     held = {(lot["market"], lot["side"]): lot["quantity"] for lot in Broker(engine.store, "pm").state().lots.values()}
     assert held == {(f"{EVENT}-BOS", "yes"): 100, (TICKER, "no"): 100}  # Celtics on Kalshi, Kings on Polymarket US

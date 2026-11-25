@@ -11,7 +11,7 @@ from czquant.draftkings import (Blocked, DraftKings, Nash, OddsApi, OutOfCredits
                                 parse_nash, parse_oddsapi, parse_ticker, payout)
 from czquant.monitor import market_pass, sportsbook_pass
 from czquant.paper import Paper
-from czquant.sportsbook import Route, SportsbookPaper, operator_settle
+from czquant.sportsbook import SportsbookPaper, operator_settle
 
 
 def iso(hours: float) -> str:
@@ -210,14 +210,14 @@ class Kalshi:
         return {"series": {"fee_type": "quadratic", "fee_multiplier": "1"}}
 
 
-def test_route_sends_each_leg_to_its_venue_and_shares_cash(tmp_path):
+def test_separate_brokers_share_paper_cash(tmp_path):
     store = Store(tmp_path)
     store.create("p", "1000")
-    adapter = Route(Paper(Kalshi(), latency=0), SportsbookPaper(DraftKings(Source([oddsapi_event()])), latency=0))
-    broker = Broker(store, "p", adapter)
+    broker = Broker(store, "p", Paper(Kalshi(), latency=0))
+    book_broker = Broker(store, "p", SportsbookPaper(DraftKings(Source([oddsapi_event()])), latency=0))
     kalshi = broker.submit({"ticker": "KXNBAGAME-26OCT27BKNBOS-BOS", "side": "bid", "count": "10", "price": "0.20",
                             "time_in_force": "immediate_or_cancel"}, {"trade_id": "t"})
-    sportsbook = back(broker, T_AWAY, 10, "0.3")
+    sportsbook = back(book_broker, T_AWAY, 10, "0.3")
     assert kalshi["status"] == "filled" and sportsbook["status"] == "filled"
     state = portfolio_state(store, "p")
     assert {lot["market"] for lot in state.lots.values()} == {"KXNBAGAME-26OCT27BKNBOS-BOS", T_AWAY}

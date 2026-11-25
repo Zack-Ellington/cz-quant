@@ -24,10 +24,33 @@ exchange instead. See [Live trading](#live-trading).
 | Price | Both venues' books for every paired game, walked to size with each venue's fee ([sum_check.py](sum_check.py)). The best basket must beat `--min-edge`, `--min-net` and the 5% risk-free hurdle. |
 | Execute | Highest APR first, within the capital limits. Each basket is re-checked on fresh books, then its legs go out one at a time as IOC orders, starting with the thinnest book. Each later leg asks for no more than the smallest fill so far. Contracts beyond the complete sets are sold back (reduce-only IOC) no lower than cost minus `--unwind-slippage`. |
 
-Settlement belongs to the monitors: `czquant monitor market` settles the Kalshi legs
-and `czquant monitor polymarket` settles the Polymarket tokens. A fully filled basket
-that settles at a loss halts new trades, also after a restart. A partial basket is
-recorded but doesn't halt, because it's a directional position.
+The strategy owns discovery, matching, pricing, order sequence, partial-fill
+handling, and halt policy. It reads venues directly and imports no sibling
+strategy. Each entry, exit, and unwind uses the broker for that leg's venue.
+Both brokers share one portfolio, run ID, and logging directory. Order context
+links the legs by trade_id without making their execution atomic.
+
+```mermaid
+flowchart LR
+    K[Kalshi market reader] --> S[This strategy]
+    P[Polymarket market reader] --> S
+    S --> KB[Kalshi broker]
+    S --> PB[Polymarket broker]
+    KB --> L[(Shared portfolio log)]
+    PB --> L
+    M[Independent monitors] --> L
+    L --> R[Reporting]
+```
+
+Paper brokers share the portfolio's hypothetical cash pool. Live brokers
+track each venue's cash and reservations separately. Restarting reconstructs
+holdings, losses, and standing halts from the shared log.
+
+Public monitors settle paper lots: market for Kalshi, polymarket-us for US
+markets, or polymarket for international tokens. Live settlements need
+account evidence. A fully filled basket that settles at a loss halts new
+trades, including after a restart. A partial basket's loss is recorded but
+does not by itself trigger that halt, because its exposure is directional.
 
 ### Pairing
 
@@ -279,7 +302,7 @@ Price with the rate actually charged on the fill, not the rebated one.
 
 ## Live trading
 
-Live trading uses one **live portfolio mapped to two accounts**: a Kalshi subaccount
+Live trading uses two brokers sharing one live portfolio mapped to two accounts: a Kalshi subaccount
 and the whole Polymarket US account (it has no subaccounts). The ledger keeps each
 venue's cash apart (`State.venue_cash`), and a basket trades only if each venue's own
 free cash pays its legs.
@@ -297,8 +320,9 @@ free cash pays its legs.
    uv run czquant map-live-cross cross-market-polymarket-live --subaccount 1
    ```
 
-   It opens the portfolio at each account's current cash. From then on, nothing else
-   should trade either account: the monitors flag anything they can't attribute.
+   It records each account's opening cash. Kalshi can also have explicitly mapped
+   sharers, as below. Polymarket US is currently mapped to only one active portfolio.
+   The monitors flag activity they cannot attribute.
 
    An account without subaccount access trades from the primary account instead:
    `--subaccount 0 --primary-account`. Running the command again on an existing live
@@ -318,9 +342,10 @@ free cash pays its legs.
    as profit. Then it releases the cash to the account; with `--to <id>`, it hands the
    cash to a portfolio sharing the account.
 
-3. Run both account monitors in their own shells:
+3. Run both account monitors and the independent Kalshi price collector:
 
    ```bash
+   uv run czquant monitor market           # Kalshi public marks for reporting
    uv run czquant monitor account          # Kalshi fills, settlements, cash
    uv run czquant monitor polymarket-us    # Polymarket US orders, deposits, settlements, cash
    ```
@@ -352,7 +377,9 @@ are booked from the order's synchronous execution reports.
 - a fully filled basket settles at a loss, or the `KILL` file exists.
 
 **It pauses** (no new trades, no halt) while a monitor hasn't reported in
-`monitor_max_age` (5 minutes). Dry runs skip that check.
+`monitor_max_age` (5 minutes). Dry runs skip that check. These monitor-health
+gates are this strategy's risk policy. The broker does not require a strategy
+to consume monitor outputs. See the [design principles](../../docs/design-principles.md).
 
 **Not yet verified against the live venue:** the docs don't show a short-side order
 or its execution report, so the first live trades should be watched. Neither do they

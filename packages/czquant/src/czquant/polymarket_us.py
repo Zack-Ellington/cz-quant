@@ -331,6 +331,7 @@ class PolymarketUSLive:
     execution reports (source `pmus-exec:<execution id>`), so the ledger is current
     when the trader sizes its next leg. Called by Broker.submit with the broker."""
 
+    venue = "polymarket_us"
     policy = "polymarket-us-live-v1"
     takes_broker = True
 
@@ -387,6 +388,7 @@ class PolymarketUSPaper(Paper):
     """IOC/FOK paper fills against a Polymarket US market's book at its taker fee, with
     the shared paper policy otherwise (see czquant.paper)."""
 
+    venue = "polymarket_us"
     policy = "polymarket-us-ioc-depth-v1"
 
     def __init__(self, client: PolymarketUS, latency: float = 0.5, theta: Decimal | None = None):

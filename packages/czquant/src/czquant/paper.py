@@ -14,6 +14,7 @@ from .book import levels
 
 
 class Paper:
+    venue = "kalshi"
     policy = "ioc-depth-v1"
 
     def __init__(self, client: Any, latency: float = 0.3):

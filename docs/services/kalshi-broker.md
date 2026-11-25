@@ -87,10 +87,11 @@ private operational records.
 
 ## Live portfolios
 
-The available mapping API assigns one flat account or numbered subaccount to
-one portfolio. Positions or resting orders prevent mapping; existing
-inventory needs an explicit opening ledger. Account sharing is permitted by
-the design contract but is not implemented by this mapping API.
+A new mapping assigns a flat account or numbered subaccount to a portfolio.
+Existing inventory needs an opening ledger. With --share-account, a portfolio
+can join an already mapped Kalshi account if its positions and orders reconcile
+with the existing allocations. Its opening cash is the account balance less
+cash already owned by those allocations.
 
 Map an existing, funded subaccount to a new portfolio:
 
@@ -105,10 +106,26 @@ alternative is:
 uv run czquant map-live example-live --subaccount 0 --primary-account
 ```
 
-Choose one mapping. Both record the observed opening balance without placing
-an order or transferring money. The primary-account mapping dedicates that
-account to the portfolio; unrelated trades or unsupported deposits can cause
-reconciliation differences. Reopening the broker retains the mapping.
+Choose one mapping. Both record opening cash without placing an order or
+transferring money. Shared portfolios retain separate ownership in the ledger;
+the account monitor reconciles their combined cash and positions. Unattributed
+trades or unsupported deposits cause reconciliation differences. Reopening
+the broker retains the mapping.
+
+To allocate recorded Kalshi cash between portfolios already sharing an account:
+
+```bash
+uv run czquant allocate --from example-live --to another-live --dollars 100
+```
+
+This changes ledger ownership without transferring money at the venue. It
+refuses an allocation larger than the source portfolio's unreserved cash.
+retire-live retires a reconciled portfolio with no remaining open positions
+or orders; --to names the sharing portfolio receiving its Kalshi cash.
+--book-difference explicitly records an unexplained Kalshi cash difference
+as an external adjustment. Such an adjustment is not trading profit.
+The map-live-cross command can also remap an existing portfolio's flat,
+reconciled Kalshi side to another account while retaining its history.
 
 Construct a live broker with the authenticated transport. This example only
 opens the broker and reads its local state; a subsequent submit sends a real
@@ -144,6 +161,13 @@ write is not an unfilled order; do not retry it under a new identity. Run the
 account monitor to recover evidence before interpreting available cash or
 positions. Missing venue IDs prevent cancellation and amendment until recovered.
 Use the [reporting guide](reporting.md#backup-and-restore) for database recovery.
+
+For normalized IOC/FOK results, use KalshiLive(Kalshi(authenticated=True)).
+The adapter reports status and filled quantity from the response while the
+account monitor books authoritative fills. KalshiLive(..., dry_run=True) logs
+the built request and sends nothing. Unknown responses persist as unknown
+and keep their reservations. This adapter does not expose cancel or amend;
+the raw authenticated Kalshi transport above supports those operations.
 
 The source is [broker.py](../../packages/czquant/src/czquant/broker.py),
 [kalshi.py](../../packages/czquant/src/czquant/kalshi.py),

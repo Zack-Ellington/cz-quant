@@ -48,12 +48,11 @@ from typing import Any
 from czquant import Broker, Store
 from czquant.accounting import active_events, venue_of
 from czquant.kalshi import Kalshi
-from czquant.live import KalshiLive, LiveRoute
+from czquant.live import KalshiLive
 from czquant.paper import Paper
 from czquant.polymarket import Polymarket, PolymarketPaper, kalshi_layout, normalize_market, ticker
 from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive, PolymarketUSPaper
 from czquant.polymarket_us import ticker as us_ticker
-from czquant.sportsbook import Route
 from czquant.store import decimal
 
 from markets import Listing, MarketPair, load_markets, resolve
@@ -130,25 +129,24 @@ class Engine:
             raise ValueError("live trading is on Polymarket US only (--venue polymarket-us)")
         if self.us:
             self.poly: Any = us or PolymarketUS.from_env(authenticated=cfg.live, dry_run=cfg.dry_run)
-            if cfg.live:
-                adapter: Any = LiveRoute(KalshiLive(kalshi_live or Kalshi(authenticated=True), dry_run=cfg.dry_run),
-                                         PolymarketUSLive(self.poly))
-            else:
-                adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
-                                polymarket_us=PolymarketUSPaper(self.poly, latency=cfg.polymarket_latency,
-                                                                theta=self.theta_override))
+            poly_adapter: Any = (PolymarketUSLive(self.poly) if cfg.live else
+                                 PolymarketUSPaper(self.poly, latency=cfg.polymarket_latency,
+                                                   theta=self.theta_override))
         else:
             self.poly = poly or Polymarket.from_env()
-            adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
-                            polymarket=PolymarketPaper(self.poly, latency=cfg.polymarket_latency))
-        self.broker = Broker(self.store, portfolio, adapter, self.run_id)
+            poly_adapter = PolymarketPaper(self.poly, latency=cfg.polymarket_latency)
+        kalshi_adapter = (KalshiLive(kalshi_live or Kalshi(authenticated=True), dry_run=cfg.dry_run)
+                          if cfg.live else Paper(self.kalshi, latency=cfg.kalshi_latency))
+        self.kalshi_broker = Broker(self.store, portfolio, kalshi_adapter, self.run_id)
+        self.poly_broker = Broker(self.store, portfolio, poly_adapter, self.run_id)
+        self.brokers = {broker.venue: broker for broker in (self.kalshi_broker, self.poly_broker)}
         if cfg.live:
-            if self.broker.mode != "live" or "polymarket_us" not in self.broker.venues:
+            if self.kalshi_broker.mode != "live" or not {"kalshi", "polymarket_us"}.issubset(self.kalshi_broker.metadata.get("venues", [])):
                 raise ValueError(f"{portfolio} is not a live portfolio mapped to Kalshi and Polymarket US "
                                  "(uv run czquant map-live-cross)")
             if not self.poly.authenticated:
                 raise ValueError("live trading needs POLYMARKET_US_KEY_ID and POLYMARKET_US_SECRET_KEY_PATH")
-        elif self.broker.mode != "paper":
+        elif self.kalshi_broker.mode != "paper":
             raise ValueError(f"{portfolio} is a live portfolio: pass --live (and --dry-run first)")
         self.leagues = leagues if leagues is not None else load_leagues(cfg.leagues)
         self.pairs = pairs if pairs is not None else load_pairs(PAIRS_US if self.us else PAIRS)
@@ -157,7 +155,7 @@ class Engine:
         self.reload_markets = listings is None and markets_on  # re-read markets.json at each discovery
         self.listings = listings if listings is not None else (load_markets() if markets_on else [])
         revision = revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
-        self.broker.start(STRATEGY, revision, {**asdict(self.cfg), "leagues": self.leagues,
+        self.kalshi_broker.start(STRATEGY, revision, {**asdict(self.cfg), "leagues": self.leagues,
                                                "pairs": {"pinned": sorted(self.pairs["pairs"]),
                                                          "blocked": sorted(self.pairs["blocked"])},
                                                "markets": [asdict(x) for x in self.listings]})
@@ -179,15 +177,16 @@ class Engine:
 
     def resume(self) -> None:
         """Recover actual holdings and the halt state from the shared store."""
-        state = self.broker.state()
-        self.cash, self.bankroll = self.broker.available, state.contributed
+        state = self.kalshi_broker.state()
+        self.cash = state.cash - self.store.reserved(self.kalshi_broker.portfolio)
+        self.bankroll = state.contributed
         self.positions = {}
         for lot in state.lots.values():
             context = lot["context"]
             if context.get("trade_id"):
                 position = self.positions.setdefault(context["trade_id"], {**context, "capital": Decimal(0)})
                 position["capital"] += lot["cost"]
-        events = active_events(self.store.events(self.broker.portfolio, kinds=("transaction", "observation", "correction"),
+        events = active_events(self.store.events(self.kalshi_broker.portfolio, kinds=("transaction", "observation", "correction"),
                                                  observations=("halt", "halt_cleared", "basket_settled")))
         observations = [e for e in events if e["type"] == "observation"]
         cleared = {e["data"]["halt_id"] for e in observations if e["data"].get("kind") == "halt_cleared"}
@@ -216,7 +215,7 @@ class Engine:
                         for leg in contexts[tid].get("intended_legs", [])}
             status = ("complete" if filled.get(tid) == intended else "partial") if intended else "unknown"
             if tid not in reported:
-                self.broker.observe("basket_settled", {"trade_id": tid, "net_pnl": str(pnl), "fill_status": status,
+                self.kalshi_broker.observe("basket_settled", {"trade_id": tid, "net_pnl": str(pnl), "fill_status": status,
                     "context": contexts[tid], "filled_legs": [{"ticker": t, "side": s, "quantity": str(q)}
                                                               for (t, s), q in filled.get(tid, {}).items()]})
             # Only a complete basket's loss contradicts the arbitrage; a partial one is directional.
@@ -226,7 +225,7 @@ class Engine:
     def halt(self, reason: str) -> None:
         if not self.halted:
             self.halted = reason
-            self.broker.observe("halt", {"reason": reason})
+            self.kalshi_broker.observe("halt", {"reason": reason})
             log.error("HALT: %s", reason)
 
     def exposure(self, event: str | None = None) -> Decimal:
@@ -240,7 +239,7 @@ class Engine:
         if self.cfg.max_total_dollars is not None:
             # Open reservations count too: live Kalshi fills reach the ledger only with the monitor.
             cap = min(cap, Decimal(str(self.cfg.max_total_dollars)) - self.exposure()
-                      - self.store.reserved(self.broker.portfolio))
+                      - self.store.reserved(self.kalshi_broker.portfolio))
         if self.cfg.max_basket_dollars is not None:
             cap = min(cap, Decimal(str(self.cfg.max_basket_dollars)))
         return cap
@@ -253,7 +252,7 @@ class Engine:
         for leg in basket.legs:
             venue = venue_of(leg["ticker"])
             need[venue] = need.get(venue, Decimal(0)) + decimal(leg["vwap"]) * leg["qty"] + decimal(leg["fee"])
-        return next((v for v, amount in need.items() if self.broker.available_at(v) < amount), None)
+        return next((v for v, amount in need.items() if self.brokers[v].available < amount), None)
 
     def live_block(self) -> str | None:
         """Live: a reason not to trade now. Unresolved orders and monitor discrepancies
@@ -262,7 +261,7 @@ class Engine:
             return None
         unresolved = self.store.db.execute(
             "SELECT COUNT(*) FROM orders WHERE portfolio_id=? AND status IN ('unknown','pending')",
-            (self.broker.portfolio,)).fetchone()[0]
+            (self.kalshi_broker.portfolio,)).fetchone()[0]
         if unresolved:
             self.halt(f"{unresolved} order(s) with unknown outcome; check both venues, then clear the halt")
             return "halted"
@@ -277,7 +276,7 @@ class Engine:
             age = (now - datetime.fromisoformat(last["effective_at"])).total_seconds()
             if age > self.cfg.monitor_max_age or last["data"].get("status") == "failed":
                 return f"stale_{component}_monitor"
-            mine = [d for d in last["data"].get("discrepancies") or [] if d.get("portfolio") == self.broker.portfolio]
+            mine = [d for d in last["data"].get("discrepancies") or [] if d.get("portfolio") == self.kalshi_broker.portfolio]
             if mine:
                 self.halt(f"{component} monitor reports {mine[0].get('kind')}: reconcile before trading")
                 return "halted"
@@ -293,7 +292,7 @@ class Engine:
     def reject(self, event: str, reason: str, **extra: Any) -> None:
         if not self._throttled(("reject", event, reason)):
             self.counters["rejects"] += 1
-            self.broker.observe("reject", {"event": event, "reason": reason, **extra})
+            self.kalshi_broker.observe("reject", {"event": event, "reason": reason, **extra})
 
     # -- data ----------------------------------------------------------------
 
@@ -327,7 +326,7 @@ class Engine:
                 us_games = self.discover_us()
             except Exception as exc:
                 log.exception("Polymarket US discovery failed")
-                self.broker.observe("error", {"where": "discover", "venue": "polymarket_us", "error": str(exc)[:300]})
+                self.kalshi_broker.observe("error", {"where": "discover", "venue": "polymarket_us", "error": str(exc)[:300]})
         for name, spec in self.leagues.items():
             try:
                 series = spec["kalshi_series"]
@@ -349,7 +348,7 @@ class Engine:
                 self.polys[name] = polys
             except Exception as exc:
                 log.exception("discovery failed for %s", name)
-                self.broker.observe("error", {"where": "discover", "league": name, "error": str(exc)[:300]})
+                self.kalshi_broker.observe("error", {"where": "discover", "league": name, "error": str(exc)[:300]})
         if self.reload_markets:
             self.reread_markets()
         if self.listings:
@@ -357,7 +356,7 @@ class Engine:
         else:
             self.market_pairs, self.market_counts = [], {}
         self._discovered = time.monotonic()
-        self.broker.observe("universe", {"markets": {"listed": len(self.listings), "paired": len(self.market_pairs),
+        self.kalshi_broker.observe("universe", {"markets": {"listed": len(self.listings), "paired": len(self.market_pairs),
                                                      "counts": self.market_counts},"kalshi_games": {k: len(v) for k, v in self.games.items()},
                                          "polymarket_games": {k: len(v) for k, v in self.polys.items()},
                                          "fee_multipliers": {k: None if v is None else str(v) for k, v in self.fees.items()}})
@@ -377,12 +376,12 @@ class Engine:
         try:
             listings = load_markets()
         except (ValueError, KeyError) as exc:
-            self.broker.observe("error", {"where": "markets.json", "error": str(exc)[:300]})
+            self.kalshi_broker.observe("error", {"where": "markets.json", "error": str(exc)[:300]})
             log.error("markets.json unreadable, keeping %d listings: %s", len(self.listings), exc)
             return
         if listings != self.listings:
             before, after = {x.kalshi for x in self.listings}, {x.kalshi for x in listings}
-            self.broker.observe("markets_reloaded", {"added": sorted(after - before), "removed": sorted(before - after),
+            self.kalshi_broker.observe("markets_reloaded", {"added": sorted(after - before), "removed": sorted(before - after),
                                                      "listed": len(listings)})
             log.info("markets.json: %d listed (+%d, -%d)", len(listings), len(after - before), len(before - after))
             self.listings = listings
@@ -403,7 +402,7 @@ class Engine:
                         pair, why = None, "unsupported_kalshi_fees"
             except Exception as exc:
                 pair, why = None, "lookup_failed"
-                self.broker.observe("error", {"where": "discover_markets", "listing": listing.kalshi,
+                self.kalshi_broker.observe("error", {"where": "discover_markets", "listing": listing.kalshi,
                                               "error": str(exc)[:300]})
             counts[why] = counts.get(why, 0) + 1
             if pair is not None:
@@ -502,7 +501,7 @@ class Engine:
             pbooks = self.poly_books([t for p in self.market_pairs for t in p.tokens.values()])
         except Exception as exc:
             log.exception("book read failed for markets")
-            self.broker.observe("error", {"where": "books", "league": "markets", "error": str(exc)[:300]})
+            self.kalshi_broker.observe("error", {"where": "books", "league": "markets", "error": str(exc)[:300]})
             return
         for pair in self.market_pairs:
             basket, why = self.evaluate_market(pair, kbooks, pbooks,
@@ -511,7 +510,7 @@ class Engine:
             if basket:
                 candidates.append((basket, pair, "markets"))
                 if not self._throttled(("opportunity", pair.key), 60):
-                    self.broker.observe("opportunity", {"league": "markets", "kalshi_event": pair.event,
+                    self.kalshi_broker.observe("opportunity", {"league": "markets", "kalshi_event": pair.event,
                                                         "kalshi_market": pair.key,
                                                         "polymarket_event": pair.listing.polymarket,
                                                         **basket.summary()})
@@ -544,7 +543,7 @@ class Engine:
                 pbooks = self.poly_books([t for p in paired for t in self.book_keys(p)])
             except Exception as exc:
                 log.exception("book read failed for %s", league)
-                self.broker.observe("error", {"where": "books", "league": league, "error": str(exc)[:300]})
+                self.kalshi_broker.observe("error", {"where": "books", "league": league, "error": str(exc)[:300]})
                 continue
             for pair in paired:
                 basket, why = self.evaluate(league, pair, kbooks, pbooks,
@@ -553,11 +552,11 @@ class Engine:
                 if basket:
                     candidates.append((basket, pair, league))
                     if not self._throttled(("opportunity", pair.game.event), 60):
-                        self.broker.observe("opportunity", {"league": league, "kalshi_event": pair.game.event,
+                        self.kalshi_broker.observe("opportunity", {"league": league, "kalshi_event": pair.game.event,
                                                             "polymarket_event": pair.poly.slug, **basket.summary()})
         self.scan_markets(counts, candidates)
         top = max((b for b, _, _ in candidates), key=lambda b: b.apr, default=None)
-        self.broker.observe("scan_complete", {"counts": counts, "candidates": len(candidates),
+        self.kalshi_broker.observe("scan_complete", {"counts": counts, "candidates": len(candidates),
                                               "best_apr": top.apr if top else None,
                                               "best_edge": str(top.edge) if top else None})
         return candidates
@@ -610,7 +609,7 @@ class Engine:
             for leg in legs:
                 if target < 1:
                     break
-                result = self.broker.submit({"ticker": leg["ticker"], **buy(leg), "count": str(int(target)),
+                result = self.brokers[venue_of(leg["ticker"])].submit({"ticker": leg["ticker"], **buy(leg), "count": str(int(target)),
                                              "time_in_force": "immediate_or_cancel",
                                              "self_trade_prevention_type": "taker_at_cross"}, context)
                 got = decimal(result.get("filled") or "0")
@@ -630,7 +629,7 @@ class Engine:
         except Exception as exc:
             failure = exc
             outcomes.append({"status": "error", "error": f"{type(exc).__name__}: {exc}"[:200]})
-        self.broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
+        self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
         self.resume()
         if failure is not None:
             raise failure
@@ -642,7 +641,7 @@ class Engine:
         """Sell back contracts beyond the complete sets, no lower than cost less the slippage."""
         floor = max(TICK, decimal(leg["vwap"]) - Decimal(str(self.cfg.unwind_slippage)))
         no = leg["contract"] == "NO"  # orders are on the YES book: selling NO is buying YES at 1 - price
-        result = self.broker.submit({"ticker": leg["ticker"], "side": "bid" if no else "ask",
+        result = self.brokers[venue_of(leg["ticker"])].submit({"ticker": leg["ticker"], "side": "bid" if no else "ask",
                                      "count": str(int(count)), "price": str(1 - floor if no else floor),
                                      "time_in_force": "immediate_or_cancel",
                                      "self_trade_prevention_type": "taker_at_cross", "reduce_only": True},
@@ -666,7 +665,7 @@ class Engine:
         pause = self.live_block()
         if pause:
             if not self._throttled(("live_block", pause), 60):
-                self.broker.observe("live_paused", {"reason": pause})
+                self.kalshi_broker.observe("live_paused", {"reason": pause})
                 log.warning("not trading: %s", pause)
             return
         for basket, pair, league in sorted(candidates, key=lambda c: c[0].apr, reverse=True):
@@ -685,7 +684,7 @@ class Engine:
             while True:
                 started = time.monotonic()
                 self.step()
-                self.broker.observe("heartbeat", {"cash": str(self.cash), "exposure": str(self.exposure()),
+                self.kalshi_broker.observe("heartbeat", {"cash": str(self.cash), "exposure": str(self.exposure()),
                                                   "open_trades": len(self.positions), "halted": self.halted,
                                                   "counters": dict(self.counters)})
                 if once or (deadline and time.monotonic() >= deadline):
@@ -693,7 +692,7 @@ class Engine:
                 wait = max(1.0, self.cfg.interval_seconds - (time.monotonic() - started))
                 time.sleep(min(wait, deadline - time.monotonic()) if deadline else wait)
         finally:
-            self.broker.observe("run_stop", {"cash": str(self.cash), "counters": dict(self.counters)})
+            self.kalshi_broker.observe("run_stop", {"cash": str(self.cash), "counters": dict(self.counters)})
 
 
 def event_of(pair: Pair | MarketPair) -> str:
@@ -775,9 +774,9 @@ def main(argv: list[str] | None = None) -> None:
                         handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(run_dir, "run.log"))])
     if cfg.live:
         log.warning("LIVE%s: portfolio %s, caps $%s per basket, $%s total, %d sets; Kalshi $%s and Polymarket US $%s free",
-                    " DRY RUN (nothing sent)" if cfg.dry_run else "", engine.broker.portfolio, cfg.max_basket_dollars,
-                    cfg.max_total_dollars, cfg.max_sets, engine.broker.available_at("kalshi"),
-                    engine.broker.available_at("polymarket_us"))
+                    " DRY RUN (nothing sent)" if cfg.dry_run else "", engine.kalshi_broker.portfolio, cfg.max_basket_dollars,
+                    cfg.max_total_dollars, cfg.max_sets, engine.kalshi_broker.available,
+                    engine.poly_broker.available)
     try:
         engine.run(once=a.once)
     except KeyboardInterrupt:

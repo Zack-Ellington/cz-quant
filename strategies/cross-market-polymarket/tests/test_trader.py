@@ -95,6 +95,8 @@ def engine_for(tmp_path, monkeypatch):
 def test_a_scan_pairs_prices_and_fills_a_cross_venue_basket(engine_for):
     engine = engine_for()
     engine.step()
+    assert engine.kalshi_broker.venue == "kalshi" and engine.poly_broker.venue == "polymarket"
+    assert engine.kalshi_broker.run_id == engine.poly_broker.run_id == engine.run_id
     state = Broker(engine.store, "pm").state()
     held = {lot["market"]: lot["quantity"] for lot in state.lots.values()}
     assert held == {f"{EVENT}-BOS": 100, "PM:tok-sac": 100}  # Boston on Kalshi, Sacramento on Polymarket
@@ -157,3 +159,14 @@ def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         trader.main(["--once"])
     assert "STRATEGY_RUNS_DIR" in capsys.readouterr().err
+
+
+def test_restart_recovers_both_venues_without_refunding(engine_for):
+    engine = engine_for()
+    engine.step()
+    cash, positions = engine.cash, engine.positions
+    restarted = engine_for()
+    assert restarted.cash == cash and restarted.positions == positions
+    assert restarted.kalshi_broker.available == restarted.poly_broker.available == cash
+    assert restarted.run_id != engine.run_id
+    assert len(restarted.kalshi_broker.state().lots) == 2

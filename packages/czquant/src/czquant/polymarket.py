@@ -225,6 +225,7 @@ class PolymarketPaper(Paper):
     sells a held token); the book is read through `Polymarket.book`.
     """
 
+    venue = "polymarket"
     policy = "polymarket-ioc-depth-v1"
 
     def __init__(self, client: Polymarket, latency: float = 0.5):

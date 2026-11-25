@@ -1,4 +1,4 @@
-"""Thin wrapper around Kalshi V2 orders plus durable context and accounting."""
+"""One venue's execution boundary, with durable ownership, context and accounting."""
 
 from __future__ import annotations
 
@@ -28,8 +28,11 @@ def scope(metadata: dict[str, Any]) -> dict[str, Any]:
 
 class Broker:
     def __init__(self, store: Store, portfolio: str, adapter: Any = None,
-                 run_id: str | None = None):
+                 run_id: str | None = None, *, venue: str | None = None):
         self.store, self.portfolio, self.adapter = store, portfolio, adapter
+        self.venue = venue or getattr(adapter, "venue", "kalshi")
+        if getattr(adapter, "venue", self.venue) != self.venue:
+            raise ValueError("execution adapter belongs to a different venue")
         self.run_id = run_id or uuid.uuid4().hex
         rows = [p for p in store.portfolios() if p["id"] == portfolio]
         if not rows:
@@ -37,7 +40,12 @@ class Broker:
         self.mode, self.metadata = rows[0]["mode"], rows[0]["metadata"]
 
     def state(self) -> State:
+        """Aggregate state of the selected portfolio, including its other venues."""
         return portfolio_state(self.store, self.portfolio)
+
+    def _check_venue(self, ticker: str) -> None:
+        if venue_of(ticker) != self.venue:
+            raise ValueError(f"{self.venue} broker cannot execute or modify {ticker}")
 
     def _reservation(self, order: dict[str, Any]) -> Decimal:
         """Cash to hold for an order: the cost of the contracts it opens (net of any
@@ -54,20 +62,13 @@ class Broker:
 
     @property
     def available(self) -> Decimal:
-        return self.state().cash - self.store.reserved(self.portfolio)
-
-    @property
-    def venues(self) -> list[str]:
-        """The accounts a live portfolio trades: Kalshi alone unless mapped with more."""
-        return list(self.metadata.get("venues") or ["kalshi"])
-
-    def available_at(self, venue: str) -> Decimal:
-        """Cash free at one venue: its own cash in the ledger less its open reservations.
-        Cash at one venue can't pay for a leg at the other."""
+        """Free cash in the paper pool, or this venue's live allocation."""
+        if self.mode == "paper":
+            return self.state().cash - self.store.reserved(self.portfolio)
         reserved = sum((decimal(r["reserved"]) for r in self.store.db.execute(
             "SELECT request,reserved FROM orders WHERE portfolio_id=?", (self.portfolio,))
-            if venue_of(json.loads(r["request"])["ticker"]) == venue), Decimal(0))
-        return self.state().venue_cash.get(venue, Decimal(0)) - reserved
+            if venue_of(json.loads(r["request"])["ticker"]) == self.venue), Decimal(0))
+        return self.state().venue_cash.get(self.venue, Decimal(0)) - reserved
 
     def observe(self, kind: str, data: dict[str, Any]) -> str:
         return self.store.append("observation", {"kind": kind, **data}, self.portfolio, self.run_id)
@@ -80,6 +81,7 @@ class Broker:
         if self.adapter is None:
             raise ValueError("execution adapter required")
         order, context = dict(order), json.loads(encode(context or {}))
+        self._check_venue(order["ticker"])
         if order["side"] not in ("bid", "ask"):
             raise ValueError("V2 side must be bid or ask (YES book)")
         quantity, price = decimal(order["count"]), decimal(order["price"])
@@ -88,7 +90,7 @@ class Broker:
         if self.metadata.get("retired_at"):
             raise ValueError(f"portfolio {self.portfolio} is retired")
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
-        if self.mode == "live" and venue_of(order["ticker"]) not in self.venues:
+        if self.mode == "live" and self.venue not in (self.metadata.get("venues") or ["kalshi"]):
             raise ValueError(f"portfolio {self.portfolio} has no {venue_of(order['ticker'])} account")
         if self.mode == "live" and venue_of(order["ticker"]) == "kalshi":
             subaccount = self.metadata.get("subaccount")
@@ -140,6 +142,7 @@ class Broker:
 
     def finish(self, identifier: str, status: str, release: bool = True) -> None:
         with self.store.transaction():
+            self._order(identifier)
             self.store.db.execute("UPDATE orders SET status=?,reserved=CASE WHEN ? THEN '0' ELSE reserved END WHERE id=? AND portfolio_id=?",
                                   (status, release, identifier, self.portfolio))
             self.store.append("order", {"client_order_id": identifier, "status": status}, self.portfolio, self.run_id)
@@ -150,7 +153,9 @@ class Broker:
             self.finish(identifier, "canceled")
             return {"status": "canceled"}
         self._require_venue_id(row)
-        response = self.adapter.cancel_order(row["venue_id"], scope(self.metadata))
+        if not callable(getattr(self.adapter, "cancel_order", None)):
+            raise NotImplementedError(f"{self.venue} adapter does not support cancel")
+        response = self.adapter.cancel_order(row["venue_id"], scope(self.metadata) if self.venue == "kalshi" else {})
         self.observe("cancel_acknowledged", {"client_order_id": identifier, "response": response})
         # Account monitor releases reservations after fills and terminal status reconcile.
         return response
@@ -164,6 +169,9 @@ class Broker:
         """
         if self.mode == "paper":
             raise NotImplementedError("IOC paper orders do not rest; submit a new order")
+        self._order(identifier)
+        if self.venue != "kalshi" or not callable(getattr(self.adapter, "amend_order", None)):
+            raise NotImplementedError(f"{self.venue} adapter does not support amend")
         if changes.get("subaccount", self.metadata["subaccount"]) != self.metadata["subaccount"]:
             raise ValueError("cannot change portfolio ownership")
         if any(k in changes for k in ("ticker", "side", "client_order_id")):
@@ -203,12 +211,14 @@ class Broker:
         row = self.store.db.execute("SELECT * FROM orders WHERE id=? AND portfolio_id=?", (identifier, self.portfolio)).fetchone()
         if not row:
             raise ValueError("order does not belong to this portfolio")
+        self._check_venue(json.loads(row["request"])["ticker"])
         return dict(row)
 
     def fill(self, identifier: str, quantity: str, yes_price: str, fee: str,
              source: str, evidence: dict[str, Any], at: str | None = None) -> None:
         """Normalize a YES-book fill into closing and opening contract transactions."""
         with self.store.transaction():
+            row = self._order(identifier)
             receipt = {"source": source, "order_id": identifier, "quantity": str(decimal(quantity)),
                        "yes_price": str(decimal(yes_price)), "fee": str(decimal(fee)), "evidence": evidence}
             prior = self.store.db.execute("SELECT data FROM events WHERE source_key=?", (source + ":receipt",)).fetchone()
@@ -216,7 +226,6 @@ class Broker:
                 if json.loads(prior[0]) != receipt:
                     raise ValueError("conflicting fill receipt")
                 return
-            row = self._order(identifier)
             order, context = json.loads(row["request"]), json.loads(row["context"])
             qty, price, charge = decimal(quantity), decimal(yes_price), decimal(fee)
             if qty <= 0 or not 0 <= price <= 1 or decimal(row["filled"]) + qty > decimal(order["count"]):
@@ -248,6 +257,7 @@ class Broker:
             lot = self.state().lots.get(lot_id)
             if lot is None:
                 return
+            self._check_venue(lot["market"])
             value = decimal(yes_value)
             if not 0 <= value <= 1:
                 raise ValueError("invalid payout value")
@@ -267,6 +277,12 @@ class Broker:
                 raise ValueError("correction targets must belong to this portfolio")
             if any(known[t]["type"] != "transaction" for t in targets):
                 raise ValueError("corrections target economic transactions")
+            for target in targets:
+                data = known[target]["data"]
+                legs = data.get("legs", [])
+                venue = data.get("venue") or (venue_of(legs[0]["market"]) if legs else "kalshi")
+                if venue != self.venue:
+                    raise ValueError("correction targets must belong to this venue")
             identifier = self.store.append("correction", {"targets": targets, "reason": reason}, self.portfolio, self.run_id,
                                            at=min(known[t]["effective_at"] for t in targets))
             # A corrected fill no longer counts toward its order, so the genuine fill can

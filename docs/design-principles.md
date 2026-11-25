@@ -107,10 +107,13 @@ a rule that all future strategies must use those order types.
 ## Shared broker interface
 
 The current Python interface is Broker(store, portfolio, adapter=None,
-run_id=None). Store selects the shared logging directory. The portfolio must
+run_id=None, *, venue=None). Store selects the shared logging directory. The portfolio must
 already exist; construction does not create or fund it. The adapter implements
-execution for the chosen venue and mode. An omitted adapter allows accounting
-access but cannot submit orders. Venue-specific examples are in the
+execution for the chosen venue and mode. Built-in adapters declare their venue;
+otherwise it defaults to Kalshi. The venue keyword explicitly binds a collector
+or custom adapter. A conflicting adapter declaration is rejected. Orders, fills,
+completion, cancellation, settlement, and corrections cannot cross that boundary.
+An omitted adapter allows accounting access but cannot submit orders. Venue-specific examples are in the
 [Kalshi](services/kalshi-broker.md) and [Polymarket](services/polymarket-broker.md)
 guides. Their current order format is a binary YES-book convention, not a
 requirement that future instruments share those economics.
@@ -124,8 +127,10 @@ The strategy-facing operations are:
 - cancel(identifier) and amend(identifier, changes): act on a broker-owned
   client order ID. Availability depends on venue and execution mode. An
   acknowledgement is not evidence of a fill or completed reconciliation.
-- state() and available: inspect reconstructed holdings and cash, with open
-  reservations deducted from available cash. They may lag asynchronous live
+- state(): inspect the aggregate portfolio, including all its venues.
+- available: inspect cash after reservations. Paper brokers sharing a portfolio
+  share one hypothetical pool. Live brokers expose only their own venue allocation.
+  Both state and available may lag asynchronous live
   execution evidence; they do not silently turn uncertainty into zero fills.
 - observe(kind, data): attach diagnostics without changing economic state.
 

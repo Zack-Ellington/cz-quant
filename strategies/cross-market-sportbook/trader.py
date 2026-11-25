@@ -45,7 +45,7 @@ from czquant.accounting import active_events
 from czquant.draftkings import Blocked, DraftKings, OutOfCredits
 from czquant.kalshi import Kalshi
 from czquant.paper import Paper
-from czquant.sportsbook import Route, SportsbookPaper
+from czquant.sportsbook import SportsbookPaper
 from czquant.store import decimal
 
 from matching import KalshiGame, Pair, kalshi_game, load_pairs, match
@@ -109,10 +109,10 @@ class Engine:
         self.book.max_stake = decimal(cfg.max_stake)
         self.book.reserve = cfg.odds_reserve
         self.pacer = OddsPacer(self.book, cfg)
-        adapter = Route(Paper(self.kalshi, latency=cfg.kalshi_latency),
-                        SportsbookPaper(self.book, latency=cfg.book_latency, max_stake=str(cfg.max_stake),
-                                        max_age=cfg.max_odds_age))
-        self.broker = Broker(self.store, portfolio, adapter, self.run_id)
+        self.broker = Broker(self.store, portfolio, Paper(self.kalshi, latency=cfg.kalshi_latency), self.run_id)
+        self.book_broker = Broker(self.store, portfolio,
+                                  SportsbookPaper(self.book, latency=cfg.book_latency, max_stake=str(cfg.max_stake),
+                                                  max_age=cfg.max_odds_age), self.run_id)
         if self.broker.mode != "paper":
             raise ValueError("This strategy entry point is paper only")
         self.leagues = leagues if leagues is not None else load_leagues(cfg.leagues)
@@ -388,7 +388,7 @@ class Engine:
         kalshi = [leg for leg in current.legs if leg["venue"] == "kalshi"]
         try:
             for leg in sportsbook:
-                result = self.broker.submit({"ticker": leg["ticker"], "side": "bid", "count": str(current.sets),
+                result = self.book_broker.submit({"ticker": leg["ticker"], "side": "bid", "count": str(current.sets),
                                              "price": leg["limit"], "time_in_force": "fill_or_kill"}, context)
                 outcomes.append({"ticker": leg["ticker"], "venue": "draftkings", "status": result["status"],
                                  "filled": result.get("filled", "0"), "reason": result.get("reason")})

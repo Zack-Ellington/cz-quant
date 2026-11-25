@@ -114,8 +114,13 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
         a, b = rows[0], rows[-1]
         complete = all(r['equity'] is not None for r in rows)
         if portfolio_metadata[portfolio]['mode']=='live':
-            account_health = [e for e in events if e['type']=='health' and e['data'].get('component')=='account']
-            complete = complete and bool(account_health) and account_health[-1]['data']['status']=='healthy' and (last-timestamp(account_health[-1]['effective_at'])).total_seconds()<=120
+            venues = portfolio_metadata[portfolio]['metadata'].get('venues') or ['kalshi']
+            for venue in venues:
+                component = {'kalshi': 'account', 'polymarket_us': 'polymarket_us'}.get(venue)
+                health = [e for e in events if e['type']=='health' and e['data'].get('component')==component]
+                complete = (complete and component is not None and bool(health)
+                            and health[-1]['data']['status']=='healthy'
+                            and (last-timestamp(health[-1]['effective_at'])).total_seconds()<=120)
         cashflow = b['contributed'] - a['contributed']
         pnl = b['equity'] - a['equity'] - cashflow if a['equity'] is not None and b['equity'] is not None else None
         flows = any(e['portfolio_id']==portfolio and e['type']=='transaction' and decimal(e['data'].get('external_delta','0')) and first < timestamp(e['effective_at']) <= last for e in events)
@@ -138,7 +143,7 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
         own = [e for e in events if e['portfolio_id']==portfolio and first < timestamp(e['effective_at']) <= last]
         policies = sorted({e['data']['evidence'].get('policy','live') for e in own if e['type']=='execution'})
         health_coverage = {}
-        for component in ('market','account'):
+        for component in ('market','account','polymarket_us'):
             records = [e for e in events if e['type']=='health' and e['data'].get('component')==component]
             healthy = 0
             for at in points:
@@ -148,7 +153,7 @@ def compare(store: Store, start: str, end: str, recorded: str | None = None) -> 
                     healthy += latest['data']['status']=='healthy' and (at-timestamp(latest['effective_at'])).total_seconds()<=120
             health_coverage[component+'_health_coverage'] = healthy/len(points)
         metrics.append({**health_coverage, 'strategy_heartbeats':sum(e['type']=='observation' and e['data'].get('kind') in ('heartbeat','scan_complete') for e in own),
-            'strategy_errors':sum(e['type']=='observation' and e['data'].get('kind')=='error' for e in own), 'portfolio':portfolio, 'complete':complete, 'net_pnl':pnl,
+            'strategy_errors':sum(e['type']=='observation' and e['data'].get('kind')=='error' for e in own), 'portfolio':portfolio, 'mode':portfolio_metadata[portfolio]['mode'], 'complete':complete, 'net_pnl':pnl,
             'net_pnl_lower':b['equity_lower']-a['equity_upper']-cashflow if b['equity_lower'] is not None and a['equity_upper'] is not None else None,
             'net_pnl_upper':b['equity_upper']-a['equity_lower']-cashflow if b['equity_upper'] is not None and a['equity_lower'] is not None else None,
             'return_on_opening_equity':ret, 'time_weighted_return':growth-1 if complete and a['equity'] is not None and a['equity']>0 else None, 'max_drawdown':drawdown if complete else None,
@@ -195,10 +200,12 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
                 showlegend=False, connectgaps=False)
         fig.add_scatter(name=metric['portfolio'], legendgroup=metric['portfolio'], line={'color':color}, x=[r['time'] for r in rows],
                        y=[float(r['equity']) if r['equity'] is not None else None for r in rows], connectgaps=False)
-    fig.update_layout(title='Paper equity · midpoint lines and quote ranges (not liquidation values)', yaxis_title='USD')
+    fig.update_layout(title='Portfolio equity · midpoint lines and quote ranges (not liquidation values)', yaxis_title='USD')
     fig.write_html(destination/'report.html', include_plotlyjs=True)
     manifest = {'schema_version':1, 'generated_at':utc(), 'start':start, 'cutoff':end, 'recorded_cutoff':recorded,
-        'valuation':'midpoint-v1 plus quote-range-v1; one-minute grid; maximum book age 120 seconds',
+        'valuation':f'midpoint-v2 plus quote-range-v1; one-sided midpoint when width <= {ONE_SIDED_MAX_WIDTH}; one-minute grid; maximum book age 120 seconds',
+        'implementation_sha256':{name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                                 for name in ('report.py', 'accounting.py', 'book.py', 'store.py')},
         'cost_basis':'FIFO, fees included', 'metrics':metrics,
         'limitations':['Paper fills do not establish real execution quality.',
             'Missing midpoints exclude complete-period rankings. Fresh one-sided books retain quote ranges with 0/1 boundaries.',
@@ -207,13 +214,13 @@ def generate(root: str, start: str, end: str, output: str) -> dict[str, Any]:
             'Short trials cannot establish long-run profitability.'],
         'health':[e for e in frozen.events(until=end,recorded_until=recorded,kinds=('health',)) if e['type']=='health']}
     lines = ['# Experiment comparison', '', f'Window: {start} to {end}.', '',
-             'Paper portfolios; midpoint and quote-range valuation with 120-second maximum book age.', '',
-             '| Portfolio | Net P&L | P&L range | Realized | Fees | Fills | Midpoint coverage | Range coverage |',
-             '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+             'Paper and live modes are identified per portfolio; midpoint and quote-range valuation with 120-second maximum book age.', '',
+             '| Portfolio | Mode | Net P&L | P&L range | Realized | Fees | Fills | Midpoint coverage | Range coverage |',
+             '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
     for m in metrics:
         pnl = f"${float(m['net_pnl']):.4f}" if m['net_pnl'] is not None else 'incomplete'
         envelope = f"${float(m['net_pnl_lower']):.2f} to ${float(m['net_pnl_upper']):.2f}" if m['net_pnl_lower'] is not None else 'unavailable'
-        lines.append(f"| {m['portfolio']} | {pnl} | {envelope} | ${float(m['realized_pnl']):.2f} | ${float(m['fees']):.2f} | {m['fills']} | {100*m['valuation_coverage']:.1f}% | {100*m['range_coverage']:.1f}% |")
+        lines.append(f"| {m['portfolio']} | {m['mode']} | {pnl} | {envelope} | ${float(m['realized_pnl']):.2f} | ${float(m['fees']):.2f} | {m['fills']} | {100*m['valuation_coverage']:.1f}% | {100*m['range_coverage']:.1f}% |")
     lines += ['', 'A zero-fill result measures inactivity, not demonstrated profitability. Short trials and paper execution cannot establish durable returns.', '',
               'Ranges use fresh bid/ask quotes and 0/1 for missing sides. They do not model executable liquidation, exit fees, or guaranteed settlement. Stale or absent references remain gaps.', '',
               'Fees are included in P&L. Open positions remain valued at the cutoff; the report does not liquidate them.', '']

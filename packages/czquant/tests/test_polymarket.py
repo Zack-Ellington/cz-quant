@@ -8,7 +8,6 @@ from czquant import Broker, Store
 from czquant.book import levels
 from czquant.monitor import market_pass, polymarket_pass
 from czquant.polymarket import Polymarket, PolymarketPaper, fee, kalshi_layout, normalize_market, ticker
-from czquant.sportsbook import Route
 
 CELTICS, KINGS = "1152", "4341"
 
@@ -97,7 +96,7 @@ def test_closed_markets_do_not_fill(tmp_path):
     assert result["status"] == "canceled" and result["filled"] == "0"
 
 
-def test_route_sends_each_ticker_to_its_venue(tmp_path):
+def test_separate_brokers_send_each_ticker_to_its_venue(tmp_path):
     seen = []
 
     class Recorder:
@@ -109,14 +108,13 @@ def test_route_sends_each_ticker_to_its_venue(tmp_path):
 
     store = Store(tmp_path)
     store.create("p", "100")
-    route = Route(Recorder(), polymarket=PolymarketPaper(Client(), latency=0))
-    broker = Broker(store, "p", route)
+    broker = Broker(store, "p", Recorder())
+    poly_broker = Broker(store, "p", PolymarketPaper(Client(), latency=0))
     broker.submit({"ticker": "KXNBAGAME-26NOV21BOSSAC-BOS", "side": "bid", "count": "1", "price": "0.5"}, {})
-    filled = broker.submit({"ticker": ticker(CELTICS), "side": "bid", "count": "1", "price": "0.9"}, {})
+    filled = poly_broker.submit({"ticker": ticker(CELTICS), "side": "bid", "count": "1", "price": "0.9"}, {})
     assert seen == ["KXNBAGAME-26NOV21BOSSAC-BOS"] and filled["status"] == "filled"
-    assert route.policy == "kalshi-fixture+polymarket-ioc-depth-v1"
-    with pytest.raises(ValueError, match="no paper adapter"):
-        Route(Recorder()).create_order({"ticker": ticker(CELTICS)}, broker)
+    with pytest.raises(ValueError, match="kalshi broker"):
+        broker.submit({"ticker": ticker(CELTICS), "side": "bid", "count": "1", "price": "0.9"})
 
 
 def test_the_monitor_marks_tokens_and_settles_them_once_final(tmp_path):

@@ -34,6 +34,16 @@ The polymarket component reads public Gamma/CLOB data and records marks and
 final payouts. Neither public collector needs an account key. They collect
 their own venue's tickers; running one does not cover the other venue.
 
+For Polymarket US, use its own component:
+
+```bash
+uv run czquant monitor polymarket-us --interval 60
+```
+
+It marks held paper and live markets and settles paper lots from final results.
+A mapped live account also enables authenticated recovery and reconciliation;
+see the [account guide](account-monitor.md#polymarket-us-recovery).
+
 For DraftKings paper bets, use the configured source:
 
 ```bash
@@ -67,10 +77,13 @@ health. An outer collector failure writes failed health and exits so a
 process supervisor can restart it. A successful command exit alone does not
 prove every market was collected; inspect errors and reference coverage.
 
-The current collectors derive inventory from paper portfolios, then add
-outstanding orders and paper watchlists. In particular, Kalshi positions held
-after live orders finish are not discovered through a live-inventory scan.
-Do not assume this collector provides complete live valuation coverage.
+The Kalshi collector discovers both paper and live holdings, outstanding
+orders, and portfolio watchlists. It continues marking positions after live
+orders finish, but public outcomes settle only paper lots. International
+Polymarket and DraftKings collectors cover their supported paper inventory.
+The Polymarket US component marks held paper and live markets; it combines
+public references with authenticated recovery when a live account is mapped.
+None of these discovery paths guarantees uninterrupted reference coverage.
 
 Paper watchlists can be supplied when creating a portfolio with Store.create
 and its watch metadata. Held positions do not require strategy-specific

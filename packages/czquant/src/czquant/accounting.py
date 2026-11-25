@@ -12,8 +12,9 @@ ZERO = Decimal(0)
 
 
 def venue_of(market: str) -> str:
-    """The venue a ticker trades on: PMUS: Polymarket US, PM: Polymarket, else Kalshi.
-    (Venue cash only matters for live portfolios, which trade Kalshi and Polymarket US.)"""
+    """Venue identity for the supported contract ticker namespaces."""
+    if market.startswith("DK:"):
+        return "draftkings"
     if market.startswith("PMUS:"):
         return "polymarket_us"
     if market.startswith("PM:"):

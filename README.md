@@ -24,9 +24,9 @@ independently.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
-- [cross-market-sportbook](strategies/cross-market-sportbook/): the sum check across venues. Kalshi NBA, NHL and MLB game markets are priced against DraftKings moneylines, and baskets with legs on both venues are paper-traded through the shared broker. A new `czquant.draftkings` data flow, paper adapter and monitor support it.
+- [cross-market-sportbook](strategies/cross-market-sportbook/): the sum check across venues. Kalshi NBA, NHL and MLB game markets are priced against DraftKings moneylines, and baskets with legs on both venues are paper-traded through separate venue brokers. A new `czquant.draftkings` data flow, paper adapter and monitor support it.
 
-- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue are paper-traded through the shared broker. A new `czquant.polymarket` data flow, paper adapter and monitor support it.
+- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue use separate brokers. Polymarket US supports paper and live execution; international Polymarket supports paper execution.
 
 - [kalshi-sum-check-unwind](strategies/kalshi-sum-check-unwind/): the Kalshi sum check, but when a basket fills only some legs it keeps the complete sets and sells the extra contracts back within a slippage limit.
 
@@ -114,7 +114,7 @@ on the shared CLI can select a different root for inspection or restore.
 - [Kalshi broker](docs/services/kalshi-broker.md): paper orders, authentication,
   live mapping, allocation operations, and recovery.
 - [Polymarket broker](docs/services/polymarket-broker.md): international outcome
-  tokens, paper orders, and settlement collection.
+  tokens, US paper/live orders, and settlement collection.
 - [Market monitor](docs/services/market-monitor.md): public reference data,
   paper settlements, coverage, and process operation.
 - [Account monitor](docs/services/account-monitor.md): authenticated evidence,

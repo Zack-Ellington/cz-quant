@@ -1,4 +1,4 @@
-"""Paper bets at a sportsbook's quoted odds, and routing a basket across venues."""
+"""Paper bets and settlement at a sportsbook's quoted odds."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from .accounting import venue_of
 from .broker import Broker
 from .draftkings import DraftKings, OutOfCredits, is_sportsbook, parse_ticker
 from .store import Store, decimal, utc
@@ -23,6 +24,7 @@ class SportsbookPaper:
     for the book's unpublished account limits. The margin is in the price; the fee is 0.
     """
 
+    venue = "draftkings"
     policy = "sportsbook-fixed-odds-v1"
 
     def __init__(self, client: DraftKings, latency: float = 1.0, max_stake: str | None = None,
@@ -84,28 +86,6 @@ class SportsbookPaper:
                 "price": str(price), "odds": evidence["market"].get("odds"), "evidence": evidence}
 
 
-class Route:
-    """Paper adapters by venue, so one broker and one portfolio's cash serve a basket
-    whose legs are on Kalshi and on a sportsbook or Polymarket."""
-
-    def __init__(self, kalshi: Any, sportsbook: SportsbookPaper | None = None, polymarket: Any = None,
-                 polymarket_us: Any = None):
-        self.kalshi, self.sportsbook, self.polymarket = kalshi, sportsbook, polymarket
-        self.polymarket_us = polymarket_us
-        self.policy = "+".join(a.policy for a in (kalshi, sportsbook, polymarket, polymarket_us) if a is not None)
-
-    def create_order(self, order: dict[str, Any], broker: Broker) -> dict[str, Any]:
-        from .polymarket import is_polymarket
-        from .polymarket_us import is_polymarket_us
-        ticker = order["ticker"]
-        adapter = (self.sportsbook if is_sportsbook(ticker) else
-                   self.polymarket_us if is_polymarket_us(ticker) else
-                   self.polymarket if is_polymarket(ticker) else self.kalshi)
-        if adapter is None:
-            raise ValueError(f"no paper adapter for {ticker}")
-        return adapter.create_order(order, broker)
-
-
 def operator_settle(store: Store, ticker: str, result: str, note: str) -> int:
     """Settle every paper lot on a sportsbook selection from an operator's reading of
     the result: yes (it won), no (it lost) or void (stakes returned). Returns lots settled."""
@@ -126,7 +106,7 @@ def settle_lots(store: Store, ticker: str, market: dict[str, Any], evidence: dic
     for p in store.portfolios():
         if p["mode"] != "paper":
             continue
-        broker = Broker(store, p["id"], run_id=run_id)
+        broker = Broker(store, p["id"], run_id=run_id, venue=venue_of(ticker))
         for lot_id, lot in list(broker.state().lots.items()):
             if lot["market"] != ticker:
                 continue
