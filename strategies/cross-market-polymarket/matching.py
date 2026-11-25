@@ -176,3 +176,32 @@ def load_pairs(path: str = PAIRS) -> dict[str, Any]:
     except FileNotFoundError:
         data = {}
     return {"pairs": data.get("pairs") or {}, "blocked": set(data.get("blocked") or [])}
+
+
+def us_game(event: dict[str, Any], market: dict[str, Any]) -> PolyGame | None:
+    """A Polymarket US game event and its moneyline market as a PolyGame.
+
+    A US moneyline is one market: its long side (YES) is one team and its short side
+    (NO) the other, each side naming its team by `teamId`. `tokens` maps each team's
+    abbreviation to the contract that pays if it wins, "YES" or "NO", and `market` is
+    the moneyline market itself (its `slug` is the ticker). None unless both sides name
+    exactly the event's two teams.
+    """
+    teams = {t.get("id"): t for t in event.get("teams") or []}
+    sides = market.get("marketSides") or []
+    if len(teams) != 2 or len(sides) != 2 or market.get("sportsMarketTypeV2") != "SPORTS_MARKET_TYPE_MONEYLINE":
+        return None
+    tokens, names = {}, {}
+    for side in sides:
+        team = teams.get(side.get("teamId"))
+        abbr = str((team or {}).get("abbreviation") or "").lower()
+        if not abbr:
+            return None
+        tokens[abbr] = "YES" if side.get("long") else "NO"
+        names[abbr] = str(team.get("name") or "") if team else ""
+    if len(tokens) != 2 or sorted(tokens.values()) != ["NO", "YES"]:
+        return None
+    raw_start = event.get("startTime") or market.get("gameStartTime")
+    start = datetime.fromisoformat(raw_start.replace("Z", "+00:00")) if raw_start else None
+    day = start.astimezone(EASTERN).date() if start else None
+    return PolyGame(event.get("slug", ""), day, start, tokens, names, market)

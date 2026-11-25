@@ -11,6 +11,16 @@ from .store import decimal
 ZERO = Decimal(0)
 
 
+def venue_of(market: str) -> str:
+    """The venue a ticker trades on: PMUS: Polymarket US, PM: Polymarket, else Kalshi.
+    (Venue cash only matters for live portfolios, which trade Kalshi and Polymarket US.)"""
+    if market.startswith("PMUS:"):
+        return "polymarket_us"
+    if market.startswith("PM:"):
+        return "polymarket"
+    return "kalshi"
+
+
 @dataclass
 class State:
     cash: Decimal = ZERO
@@ -24,6 +34,8 @@ class State:
     settlements: int = 0
     lots: dict[str, dict[str, Any]] = field(default_factory=dict)
     markets: set[str] = field(default_factory=set)
+    # Cash by venue: a transaction's `venue`, else its leg's ticker's, else Kalshi.
+    venue_cash: dict[str, Decimal] = field(default_factory=dict)
 
     @property
     def cost(self) -> Decimal:
@@ -36,6 +48,9 @@ class State:
         cash, external, fee = (decimal(d.get(k, "0")) for k in ("cash_delta", "external_delta", "fee"))
         prepaid = decimal(d.get("prepaid_delta", "0"))
         self.cash += cash
+        legs_ = d.get("legs") or []
+        venue = d.get("venue") or (venue_of(legs_[0]["market"]) if legs_ else "kalshi")
+        self.venue_cash[venue] = self.venue_cash.get(venue, ZERO) + cash
         self.contributed += external
         self.fees += fee
         self.prepaid += prepaid

@@ -125,15 +125,15 @@ def test_no_basket_without_an_edge(engine_for):
     assert scan["counts"]["ok"] == 1 and scan["candidates"] == 0
 
 
-def test_games_about_to_start_are_skipped(engine_for, monkeypatch):
+def test_games_in_progress_are_traded(engine_for, monkeypatch):
     import trader
     engine = engine_for()
     engine.discover()
-    later = START.timestamp() - 60  # a minute before the start
-    monkeypatch.setattr(trader.time, "time", lambda: later)
-    assert engine.scan() == []
-    scan = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "scan_complete"][-1]
-    assert scan["counts"]["priced_too_close_to_start"] == 1
+    for minutes in (-1, 30, 8 * 60):  # just before kickoff, in play, past the expected payout
+        now = START.timestamp() + minutes * 60
+        monkeypatch.setattr(trader.time, "time", lambda now=now: now)
+        [(basket, _, _)] = engine.scan()
+        assert basket.days >= 1 / 24
 
 
 def test_a_short_later_leg_has_the_extras_sold_back(engine_for):

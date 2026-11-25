@@ -23,6 +23,7 @@ from typing import Any
 
 from czquant.book import levels as book_levels
 from czquant.polymarket import fee as polymarket_fee
+from czquant.polymarket_us import fee as polymarket_us_fee
 
 TAKER = Decimal("0.07")
 APR_CAP = 1e6
@@ -56,7 +57,17 @@ def polymarket_offer(role: str, ticker: str, raw_book: dict, schedule: dict) -> 
                  fee_schedule=tuple(sorted(schedule.items())))
 
 
+def polymarket_us_offer(role: str, ticker: str, raw_book: dict, theta: Decimal, contract: str) -> Offer:
+    """One side of a Polymarket US market, from its book in the Kalshi layout. The book
+    is the YES side's, as on Kalshi: YES is bought at the offers, NO at 1 - the bids."""
+    opposite = book_levels(raw_book)["no" if contract == "YES" else "yes"]
+    return Offer(role, "polymarket_us", ticker, tuple(sorted((1 - p, q) for p, q in opposite)),
+                 fee_schedule=(("theta", str(theta)),), contract=contract)
+
+
 def leg_fee(offer: Offer, fills: list[tuple[Decimal, Decimal]]) -> Decimal:
+    if offer.venue == "polymarket_us":
+        return polymarket_us_fee(fills, Decimal(dict(offer.fee_schedule or ())["theta"]))
     if offer.venue == "polymarket":
         return polymarket_fee(fills, dict(offer.fee_schedule or ()))
     base = sum((q * p * (1 - p) for p, q in fills), Decimal(0))
