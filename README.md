@@ -132,12 +132,16 @@ must use the broker contract.
 
 ## Runs and reporting
 
-Broker-backed runs write to the shared store. Use the reporting service for
-uniform accounting and independent valuation. The election strategies also
-retain standalone paper ledgers under runs/<strategy-id>/<UTC time>. Their
-strategy READMEs describe that compatibility path. The commands in
-[scripts/pnl.py](scripts/pnl.py) read those JSONL ledgers, not the shared store;
-they are not the integration path for new strategies.
+Reporting lives in packages/czquant, outside strategies. Its dashboard and
+frozen comparison reports read the shared accounting ledger and recorded
+market and account evidence. Strategies record executions through brokers
+and can attach diagnostics; they do not supply reporting implementations.
+See [reporting](docs/services/reporting.md) for commands and portfolio lifetime.
+
+One portfolio can hold both venues of a cross-market experiment. Its two
+brokers share the portfolio identity while keeping execution venue-specific.
+Reusing that portfolio preserves cash, positions, and losses across runs;
+reports compare portfolios rather than treating restarts as fresh experiments.
 
 ## Create a new strategy
 
@@ -184,8 +188,7 @@ they are not the integration path for new strategies.
 cz-quant/
 ├── README.md
 ├── scripts/
-│   ├── new-strategy.sh          # creates a strategy from the template
-│   └── pnl.py                   # `uv run pnl`: one CSV, a P&L table, a P&L plot across strategies
+│   └── new-strategy.sh          # creates a strategy from the template
 ├── packages/czquant/            # broker, accounting, monitors, reports
 ├── research/                    # independent data collection and analysis
 ├── docs/design-principles.md    # authoritative development contract

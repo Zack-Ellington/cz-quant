@@ -62,7 +62,9 @@ uv run czquant portfolio "$CZQUANT_PORTFOLIO" --cash 1000
 uv run python trader.py --once --leagues nba
 ```
 
-Create the portfolio once. Subsequent runs reuse it:
+Create the portfolio once. Both venue brokers use this one portfolio; they
+do not each receive $1,000. Paper cash is pooled, while live cash is recorded
+separately for each venue. Subsequent runs reuse the portfolio and its history:
 
 ```bash
 uv run python trader.py --duration 4:00
@@ -161,17 +163,14 @@ and tie rules before copying a candidate into markets.json. Auto-approval
 with --auto-approve writes unreviewed markets.auto.json for paper benchmarking.
 Reviewed entries take precedence. These pairs are skipped on Polymarket US.
 
-odds_monitor.py is a read-only view of Kalshi and international Polymarket:
+## Reporting
 
-```bash
-uv run python odds_monitor.py --league nba
-```
-
-Open http://127.0.0.1:8765/. It shows paired-game prices, estimated edges,
-and logged strategy activity. Historical traded-price estimates are separate
-from observed live asks; neither proves executable depth. Samples and pairing
-metadata persist under STRATEGY_RUNS_DIR/diagnostics/<portfolio>/odds_monitor.
-It does not display the Polymarket US venue or place orders.
+Use the shared [reporting service](../../docs/services/reporting.md) from
+packages/czquant with the same STRATEGY_RUNS_DIR. Its dashboard shows current
+portfolio economics and monitor health; frozen reports compare portfolios over
+a specified window. Both read the shared ledger without running or importing
+this strategy. The strategy records order context and diagnostics for external
+analysis and does not host its own reporting view.
 
 ## Validation
 

@@ -50,6 +50,12 @@ and a common economic record. Keep research choices inside each strategy.
    may read markets directly and need not call monitors, read their storage, or
    consume their health records. A strategy may choose to use monitor outputs;
    that choice does not become a requirement for other strategies.
+7. Keep reporting outside strategies. Performance reports, dashboards, and
+   valuation belong in independent reporting services that read the shared
+   ledger and recorded reference data. Strategies emit economic facts through
+   their brokers and may attach diagnostics or arbitrary context; they do not
+   maintain a second P&L ledger or implement reporting views. Reporting must
+   not import strategy code or require the strategy process to remain running.
 
 The broker is the only mandatory strategy integration surface. Installing it
 may install accounting and venue dependencies internally. That does not impose
@@ -70,6 +76,16 @@ Each run records which strategy revision used which allocation. A reporting
 portfolio may aggregate allocations across venues without becoming a broker
 that sends orders to all of them. Cash at one venue cannot fund an order at
 another without an actual, recorded transfer.
+
+Portfolio identity and broker identity are distinct. Two brokers do not require
+two portfolios. In the current cross-market implementation, one persistent
+portfolio records both venues; each live broker uses that portfolio's allocation
+at its own venue. Runs append to this history. Creating a new portfolio is an
+explicit experiment setup action, not a side effect of starting a broker.
+Reusing a portfolio continues its economic history; a fresh comparison experiment
+uses a separate portfolio with explicitly recorded funding. The current paper
+implementation uses one cash pool across both venues, which is a simulation
+assumption rather than evidence of transferable live venue balances.
 
 ```mermaid
 flowchart LR
@@ -280,6 +296,13 @@ data cutoff. It reconstructs opening holdings, cash flows, and remaining
 positions. Funding is capital, not return. Fees enter the economics; actual
 holdings include incomplete baskets. Corrections can restate a result, so
 retain the original snapshot and report provenance.
+
+The shared package owns the reporting implementation. The portfolio is the
+current comparison unit, across all of its runs and venues. Run identifiers
+retain execution provenance; restarting a process does not reset a report's
+cost basis or create a new performance series. Research-specific views, if
+needed, also live outside strategies and consume recorded evidence. A second
+ledger or live venue reads in a report must not substitute for that evidence.
 
 Use common accounting and valuation rules within a comparison. Record the
 reporting policy and implementation revision, paper fill policies, and data

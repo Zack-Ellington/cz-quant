@@ -6,10 +6,58 @@ strategies, contact venues, or require execution credentials. The
 [design principles](../design-principles.md) define the economic schema and
 comparison requirements. This guide describes the current reporting policy.
 
+The shared package provides the dashboard and frozen comparison reports.
+Strategies record executions and optional diagnostics; they do not host
+reporting views or maintain parallel performance ledgers. Reports and dashboards
+continue to work after a strategy stops or its source is removed.
+
 Use the [shared setup](../../README.md#shared-services) and run commands from
 packages/czquant. Choose the same STRATEGY_RUNS_DIR that execution and monitors
 write. The report's opening time must include the portfolios being compared;
 portfolios created after that time are not included by the current evaluator.
+
+## Portfolio lifetime and reporting identity
+
+A portfolio is a persistent accounting identity, not a process run or a broker.
+The cross-market strategy uses one portfolio with two brokers, one per venue.
+Both brokers record the same portfolio ID and run ID. Live cash is accounted
+for separately by venue; paper execution currently shares one hypothetical
+cash pool across both brokers. Two broker objects do not double the funding.
+
+Create a paper portfolio once, from packages/czquant with STRATEGY_RUNS_DIR
+set to a persistent directory outside the checkout:
+
+```bash
+uv run czquant portfolio cross-market-paper --cash 1000
+```
+
+This records initial funding. Repeating the creation command fails rather than
+resetting or refunding the portfolio. Live portfolios are created through
+map-live or map-live-cross, which record the mapped accounts and their opening
+cash; see the [live mapping guide](polymarket-broker.md#us-live-mapping-and-execution).
+Do not first create a paper portfolio for a live mapping.
+
+In each strategy shell, use the same STRATEGY_RUNS_DIR and set
+CZQUANT_PORTFOLIO to the existing ID. Starting the strategy creates a new run
+ID and records its revision and configuration. It reconstructs existing cash,
+positions, fees, and losses, and retains outstanding orders and reservations.
+Use a new portfolio ID when an experiment needs separate accounting; changing
+the run ID alone does not isolate its economics.
+
+The shared root contains accounting.sqlite3. Its portfolios table stores
+identity, mode, creation time, and account metadata. Its events table stores
+funding, economic transactions, execution evidence, and run provenance. Its
+orders table retains requests, context, status, fills, and reservations;
+checkpoints retain collector progress. Cash and positions are reconstructed
+from economic events. Keep this root across code updates and process restarts;
+use the full database [backup](#backup-and-restore) for recovery.
+
+Reports group by portfolio, combining both venues and every run contributing
+to the evaluation window. Earlier events establish opening cash and positions;
+window events determine subsequent cash flows and holdings. Run IDs remain
+available for attribution, but the current comparison does not produce separate
+per-run or per-venue performance rows. Reusing a portfolio across different
+strategy revisions combines their performance in that portfolio's history.
 
 ## Generate a comparison
 
@@ -17,6 +65,12 @@ Set START and END to the intended UTC window in ISO 8601 form, with an offset
 such as Z. Set REPORT_DIR to a new directory under the shared root for this
 report. The command freezes a database snapshot and prints the metrics and
 output location.
+
+For example, select an archive directory beneath the shared root:
+
+```bash
+export REPORT_DIR="$STRATEGY_RUNS_DIR/reports/comparison-001"
+```
 
 ```bash
 uv run czquant report --since "$START" --until "$END" --output "$REPORT_DIR"
