@@ -122,6 +122,8 @@ on the shared CLI can select a different root for inspection or restore.
   paper settlements, coverage, and process operation.
 - [Account monitor](docs/services/account-monitor.md): authenticated evidence,
   live fill recovery, reconciliation, and halt inspection.
+- [Virtual subaccounts](docs/services/virtual-subaccounts.md): registered accounts,
+  reserves, and loading or unloading cash pools on one account while it trades.
 - [Reporting](docs/services/reporting.md): comparisons, dashboard, export,
   valuation policy, and backup/restore.
 

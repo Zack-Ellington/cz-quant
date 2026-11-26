@@ -130,6 +130,11 @@ class Broker:
             raise ValueError("invalid quantity or price")
         if self.metadata.get("retired_at"):
             raise ValueError(f"cash pool {self.pool_id} is retired")
+        if self.metadata.get("reserve"):
+            raise ValueError(f"{self.pool_id} is an account reserve: open a virtual subaccount to trade")
+        from .accounts import market_in_scope, netting_conflict
+        if not market_in_scope(self.metadata.get("markets"), order["ticker"]):
+            raise ValueError(f"{order['ticker']} is outside cash pool {self.pool_id}'s markets {self.metadata['markets']}")
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
         if self.mode == "live" and venue_of(order["ticker"]) == "kalshi":
             subaccount = self.metadata.get("subaccount")
@@ -148,6 +153,18 @@ class Broker:
                     raise ValueError("client order ID reused for a different request")
                 return dict(prior)  # Never resubmit an uncertain write implicitly.
             reserve = self._reservation(order)
+            buys = "yes" if order["side"] == "bid" else "no"
+            closes = "no" if buys == "yes" else "yes"
+            own = sum((l["quantity"] for l in self.state().lots.values()
+                       if l["market"] == order["ticker"] and l["side"] == closes), Decimal(0))
+            if quantity > own:
+                pool = {"id": self.pool_id, "venue": self.venue, "mode": self.mode, "metadata": self.metadata}
+                other = netting_conflict(self.store, pool, order["ticker"], buys)
+                if other:
+                    self.observe("order_rejected", {"reason": "cross_pool_netting", "with": other,
+                                                    "order": order, "context": context})
+                    return {"client_order_id": identifier, "status": "rejected", "filled": "0",
+                            "reason": f"{other} holds the opposite side of {order['ticker']} on this account"}
             if reserve > self.available:
                 self.observe("order_rejected", {"reason": "insufficient_cash", "order": order, "context": context})
                 return {"client_order_id": identifier, "status": "rejected", "filled": "0"}

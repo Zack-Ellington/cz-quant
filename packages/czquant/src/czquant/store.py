@@ -90,6 +90,9 @@ class Store:
                 id TEXT PRIMARY KEY REFERENCES portfolios(id), venue TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS reporting_portfolios (
                 id TEXT PRIMARY KEY, created_at TEXT NOT NULL, pools TEXT NOT NULL, label TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY, venue TEXT NOT NULL, mode TEXT NOT NULL, created_at TEXT NOT NULL,
+                metadata TEXT NOT NULL);
         """)
 
     @contextmanager
@@ -139,8 +142,10 @@ class Store:
         venue = metadata.pop('venue', None) or (venues[0] if venues else 'kalshi')
         self.create_pool(identifier, venue, cash, mode, **metadata)
 
-    def create_pool(self, identifier: str, venue: str, cash: str = "1000", mode: str = "paper", **metadata: Any) -> None:
-        """Create one persistent venue allocation. Paper funding can be arbitrarily large."""
+    def create_pool(self, identifier: str, venue: str, cash: str = "1000", mode: str = "paper",
+                    fund: bool = True, **metadata: Any) -> None:
+        """Create one persistent venue allocation. Paper funding can be arbitrarily large.
+        `fund=False` creates it empty, for a pool funded by allocation (a virtual subaccount)."""
         if not identifier or not venue or metadata.get('venues'):
             raise ValueError('a cash pool needs an ID and exactly one venue')
         if mode not in ("paper", "live") or decimal(cash) < 0:
@@ -151,7 +156,7 @@ class Store:
                 raise ValueError(f"cash pool or portfolio already exists: {identifier}; reopen it instead")
             self.db.execute("INSERT INTO portfolios VALUES(?,?,?,?)", (identifier, mode, utc(), encode(metadata)))
             self.db.execute('INSERT INTO cash_pools VALUES(?,?)', (identifier, venue))
-            if mode == "paper":
+            if mode == "paper" and fund:
                 self.append("transaction", {"reason": "funding", "cash_delta": str(decimal(cash)),
                             "external_delta": str(decimal(cash)), "fee": "0", "legs": []}, identifier,
                             source=f"initial-funding:{identifier}")
@@ -174,6 +179,43 @@ class Store:
                 raise ValueError('portfolio ID conflicts with a cash pool or legacy portfolio')
             self.db.execute('INSERT INTO reporting_portfolios VALUES(?,?,?,?)',
                             (identifier, utc(), encode(pools), label))
+
+    def add_to_portfolio(self, identifier: str, pools: list[str]) -> None:
+        """Add pools to a reporting portfolio, e.g. a virtual subaccount opened mid-run.
+
+        Only a pool with no economic history but funding can join: its equity then equals
+        its funding, so counting it from its start adds no P&L the portfolio didn't earn.
+        Pools never leave; a closed sub keeps its realized P&L at zero equity."""
+        with self.transaction():
+            group = next((g for g in self.reporting_portfolios() if g['id'] == identifier), None)
+            if group is None:
+                raise ValueError(f'no reporting portfolio {identifier}')
+            known = {p['id']: p for p in self.pools()}
+            current = [known[p] for p in group['pools'] if p in known]
+            if not pools or len(set(pools)) != len(pools) or not set(pools) <= known.keys() or set(pools) & set(group['pools']):
+                raise ValueError('add distinct existing cash pools not already in the portfolio')
+            if {known[p]['mode'] for p in pools} != {current[0]['mode']}:
+                raise ValueError('a reporting portfolio cannot mix paper and live pools')
+            for pid in pools:
+                for e in self.events(pid, kinds=('transaction',)):
+                    if e['data'].get('legs') or e['data'].get('reason') != 'funding':
+                        raise ValueError(f'{pid} has trading history; only a pool with funding alone can join')
+            self.db.execute('UPDATE reporting_portfolios SET pools=? WHERE id=?',
+                            (encode(group['pools'] + list(pools)), identifier))
+            self.append('observation', {'kind': 'portfolio_members_added', 'portfolio': identifier, 'pools': list(pools)})
+
+    def account_key(self, pool: dict[str, Any]) -> tuple | None:
+        """Which real (or hypothetical) account a pool's cash belongs to. Pools with the
+        same key share one balance; None means the pool stands alone."""
+        meta, venue = pool['metadata'], pool['venue']
+        if pool['mode'] == 'live':
+            if venue == 'kalshi' and 'subaccount' in meta:
+                return ('kalshi', meta['subaccount'], meta.get('exchange_index', 0))
+            if venue == 'polymarket_us':
+                return ('polymarket_us',)
+        if meta.get('account'):
+            return (pool['mode'], venue, meta['account'])
+        return None
 
     def reporting_portfolios(self) -> list[dict[str, Any]]:
         return [{**dict(r), 'pools': json.loads(r['pools'])}

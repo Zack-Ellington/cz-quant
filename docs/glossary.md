@@ -10,6 +10,8 @@ for the full rules.
 | Account | The cash and positions actually held at a venue. |
 | Cash pool | A persistent allocation of one account's cash and positions, with one venue and one mode (paper or live). Stored in the retained `portfolio_id` column. |
 | Allocation | The portion of a shared account assigned to a cash pool in the ledger. Moving it changes recorded ownership, not venue balances. |
+| Registered account | A venue account (or hypothetical paper account) recorded in `accounts`, with a reserve pool for its unallocated cash. See [virtual subaccounts](services/virtual-subaccounts.md). |
+| Virtual subaccount | A cash pool on a registered account, funded by allocation from its reserve; loaded and unloaded without venue actions. |
 | Broker | Thin wrapper bound to exactly one cash pool; the only mandatory strategy integration surface. See [shared broker interface](design-principles.md#shared-broker-interface). |
 | Adapter | The venue- and mode-specific execution implementation a broker uses. |
 | Portfolio (reporting) | A flat reporting selection of cash pools. It owns no cash and executes no orders. |

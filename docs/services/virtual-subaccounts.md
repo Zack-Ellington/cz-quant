@@ -1,0 +1,88 @@
+# Virtual subaccounts
+
+A virtual subaccount is a cash pool that holds a recorded share of one registered
+account. Subaccounts work the same way at every venue and in paper mode, because
+nothing moves at the venue: only recorded ownership changes. A sub can therefore
+be loaded or unloaded while other pools on the account keep trading. Each venue's
+own subaccount mechanism (Kalshi's numbered subaccounts, for example) remains
+optional, as a way to get isolation at the venue.
+
+This follows [principle 5](../design-principles.md#core-principles): each broker
+binds to one pool, allocations on a shared account never count the same cash
+twice, and every allocation change is recorded and reconciled.
+
+## Model
+
+| Piece | What it is |
+| --- | --- |
+| Account | One real venue account (a Kalshi subaccount on one exchange, or the Polymarket US account), or one hypothetical paper account. Stored in the `accounts` table. |
+| Reserve | `<account>:reserve`, created at registration. It holds the account's unallocated cash. The monitor books venue-level funding (transfers, deposits, Polymarket US advances) here. It cannot trade. |
+| Sub | Any other pool on the account, funded by allocation from the reserve or from another sub. Brokers bind to subs. |
+
+For each live account, the monitor checks:
+
+```
+venue cash      == reserve cash + sum of sub cash
+venue positions == net of every pool's lots
+```
+
+Funding the monitor can identify is booked to the reserve as external funding. Any
+other difference is a discrepancy (`cash_mismatch`, `inventory_mismatch`), never profit.
+
+## Commands
+
+From packages/czquant:
+
+```bash
+# Register an account; its reserve opens with the cash no pool there records.
+uv run czquant account main --venue kalshi --subaccount 0 --primary-account
+uv run czquant account pmus --venue polymarket-us
+uv run czquant account lab --venue kalshi --paper-cash 5000
+
+# Load a sub, optionally limited to some markets ('*' ends a prefix).
+uv run czquant open-sub nba-game --account main --cash 200 --markets 'KXNBAGAME-26NOV26BOSSAC*'
+uv run czquant allocate --from main:reserve --to nba-game --dollars 50
+
+# Hand open contracts to another pool on the account, at cost (no P&L).
+uv run czquant move-lots --from nba-game --to main-book --market KXNBAGAME-... --side yes
+
+# Unload: the sub must be flat with no orders open; its cash returns to its parent.
+uv run czquant close-sub nba-game
+
+# A Kalshi deposit to the primary account has no transfer record. With positions
+# reconciled and no orders unresolved, the operator books it to the reserve.
+uv run czquant book-deposit main --note "ACH 2026-11-26"
+
+uv run czquant accounts            # each account's pools and recorded shares
+uv run czquant portfolio-add trial --pools nba-game
+```
+
+A strategy uses a sub by binding a broker to it: `Broker(store, "nba-game", adapter)`.
+Which market goes to which sub is the strategy's own choice. The `markets` scope is an
+assertion, like the broker's `venue` keyword: an order outside it is refused, and
+nothing is routed.
+
+## Rules and limits
+
+- **Mode and scope.** A sub has its account's venue and mode. Live Kalshi subs carry
+  the account's subaccount and exchange, so their orders go to the right account.
+- **Registering over existing pools.** Pools mapped before registration (`map-live`,
+  including `--share-account`) become members of the account. The reserve opens with
+  whatever cash they don't record.
+- **Cross-pool netting.** Kalshi and Polymarket US net one market's YES and NO within
+  one account. On a live account, a broker therefore refuses an order that would open
+  the opposite side of a market another pool on the account holds or is buying (reason
+  `cross_pool_netting`). Closing a pool's own position is allowed. Paper accounts don't
+  net, so the guard is live-only. `move-lots` never moves lots onto the opposite side.
+- **Moving lots.** `position_transfer` transactions move lots at their basis. The
+  source retires a lot with a prepaid credit equal to its basis; the target opens it
+  with the same basis. Realized P&L is unchanged.
+- **Reporting.** A reporting portfolio can add a pool that has only funding (a newly
+  loaded sub) with `portfolio-add`. Pools never leave. A closed sub keeps its realized
+  P&L at zero equity, and allocations between member pools are internal.
+- **Buying power.** No venue-level check runs at submission. Each pool's `available`
+  is limited to its own recorded cash, and the pools' total is reconciled against the
+  venue, so overspending shows up as a mismatch that halts traders that check health.
+- **Polymarket US.** The monitor books account activity to the reserve and settles
+  lots only when the whole account reconciles. Several pools on Polymarket US require
+  a registered account (`unregistered_shared_account` otherwise).

@@ -167,7 +167,11 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                 if transfer.get("exchange_index",0) != p["metadata"].get("exchange_index",0):
                     continue
                 direction = int(transfer["to_subaccount"]==sub)-int(transfer["from_subaccount"]==sub)
-                if direction and len(groups[account_of(p["metadata"])]) > 1:
+                group = groups[account_of(p["metadata"])]
+                reserve = next((q for q in group if q["metadata"].get("reserve")), None)
+                if direction and reserve is not None and p is not reserve:
+                    continue  # booked once, to the account's reserve
+                if direction and len(group) > 1 and reserve is None:
                     # Whose share of a shared account moved is the operator's call: `allocate`.
                     discrepancies.append({"portfolio": p["id"], "kind": "shared_account_transfer",
                                           "transfer": transfer.get("transfer_id")})
@@ -381,6 +385,8 @@ def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any],
                 discrepancies.append({"portfolio": p["id"], "kind": "unbooked_activity", "raw": activity})
             continue
         source = f"pmus-activity:{kind}:{body.get('transactionId')}"
+        if _booked(store, source) is not None:
+            continue
         if kind == "ACTIVITY_TYPE_TAKER_FEE_REBATE":
             store.append("transaction", {"reason": "rebate", "venue": "polymarket_us", "cash_delta": str(abs(value)),
                          "fee": "0", "legs": [], "evidence": activity}, p["id"], source=source, at=at)
@@ -394,13 +400,15 @@ def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any],
     return pending_advances
 
 
-def _settle(store: Store, client: PolymarketUS, p: dict[str, Any], observed_cash: Decimal,
+def _settle(store: Store, client: PolymarketUS, pools: list[dict[str, Any]], observed_cash: Decimal,
             positions: dict[str, Any], evidence: dict[str, Any]) -> int:
-    """Book resolved lots only when account cash and retired inventory support them."""
+    """Book resolved lots only when account cash and retired inventory support them.
+    Every pool on the account is checked together: they share one balance."""
     settled = 0
-    state = deepcopy(portfolio_state(store, p["id"]))
+    states = {p["id"]: deepcopy(portfolio_state(store, p["id"])) for p in pools}
     candidates = []
-    for market in sorted({lot["market"] for lot in state.lots.values() if is_polymarket_us(lot["market"])}):
+    held = {lot["market"] for s in states.values() for lot in s.lots.values() if is_polymarket_us(lot["market"])}
+    for market in sorted(held):
         normalized = client.market(market)
         observed = utc()
         store.append("market", {"ticker": market, "market": normalized,
@@ -410,28 +418,30 @@ def _settle(store: Store, client: PolymarketUS, p: dict[str, Any], observed_cash
         if position_quantity(positions.get(slug_of(market), {})):
             continue
         yes = decimal(normalized["settlement_value_dollars"])
-        for lot in state.lots.values():
-            if lot["market"] == market:
-                payout = yes if lot["side"] == "yes" else 1 - yes
-                candidates.append((lot, payout, normalized, observed))
+        for pid, state in states.items():
+            for lot in state.lots.values():
+                if lot["market"] == market:
+                    payout = yes if lot["side"] == "yes" else 1 - yes
+                    candidates.append((pid, lot, payout, normalized, observed))
     with store.transaction():
-        current = portfolio_state(store, p["id"])
         # A public outcome alone does not establish an account payout. Unexplained
         # differences remain reconciliation gaps, including reads racing a new fill.
-        if current.lots != state.lots or current.venue_cash != state.venue_cash:
-            return 0
-        expected = state.venue_cash.get("polymarket_us", Decimal(0))
-        expected += sum((lot["quantity"] * payout for lot, payout, _, _ in candidates), Decimal(0))
+        for pid, state in states.items():
+            current = portfolio_state(store, pid)
+            if current.lots != state.lots or current.venue_cash != state.venue_cash:
+                return 0
+        expected = sum((s.venue_cash.get("polymarket_us", Decimal(0)) for s in states.values()), Decimal(0))
+        expected += sum((lot["quantity"] * payout for _, lot, payout, _, _ in candidates), Decimal(0))
         if expected != observed_cash:
             return 0
-        for lot, payout, normalized, observed in candidates:
+        for pid, lot, payout, normalized, observed in candidates:
             market = lot["market"]
             store.append("transaction", {"reason": "settlement", "venue": "polymarket_us",
                 "cash_delta": str(lot["quantity"] * payout), "fee": "0", "context": lot["context"],
                 "evidence": {"market": normalized, "observed_at": observed, "account": evidence},
                 "legs": [{"market": market, "side": lot["side"], "quantity_delta": str(-lot["quantity"]),
                           "price": str(payout), "lot_id": lot["record_id"]}]},
-                p["id"], source=f"pmus-settlement:{p['id']}:{lot['record_id']}", at=observed)
+                pid, source=f"pmus-settlement:{pid}:{lot['record_id']}", at=observed)
             settled += 1
     return settled
 
@@ -484,38 +494,47 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
     for p in mapped:
         broker = Broker(store, p["id"], run_id="polymarket-us-monitor", venue="polymarket_us")
         recovered += _recover_orders(store, client, p, broker, discrepancies)
-        advanced = _book_activities(store, client, p, discrepancies)
+    if mapped:
+        # One account: venue-level activity goes to its reserve (or its only pool), and
+        # cash and positions are reconciled against every pool on it together.
+        reserve = next((p for p in mapped if p["metadata"].get("reserve")), None)
+        owner = reserve or mapped[0]
+        if reserve is None and len(mapped) > 1:
+            discrepancies.extend({"portfolio": p["id"], "kind": "unregistered_shared_account"} for p in mapped)
+        account = {**owner, "created_at": min(p["created_at"] for p in mapped)}
+        advanced = _book_activities(store, client, account, discrepancies)
         balance = client.balance()
         positions = client.positions()
         evidence = {"kind": "polymarket_us_snapshot", "balance": balance, "positions": positions,
                     "observed_at": utc()}
-        store.append("account_evidence", evidence, p["id"])
+        store.append("account_evidence", evidence, owner["id"])
         # A deposit still clearing is in currentBalance (and its buying power) but held as
         # depositReservation. The part Polymarket advanced is booked as cash already; any
         # rest is booked once the deposit completes, so until then it's left out.
         observed_cash = (decimal(balance["currentBalance"]) - decimal(balance.get("depositReservation") or 0)
                          + advanced)
-        settled += _settle(store, client, p, observed_cash, positions, evidence)
-        state = portfolio_state(store, p["id"])
-        recorded = state.venue_cash.get("polymarket_us", Decimal(0))
-        balances.append({"portfolio": p["id"], "cash": str(observed_cash), "recorded": str(recorded),
+        settled += _settle(store, client, mapped, observed_cash, positions, evidence)
+        states = {p["id"]: portfolio_state(store, p["id"]) for p in mapped}
+        recorded = sum((s.venue_cash.get("polymarket_us", Decimal(0)) for s in states.values()), Decimal(0))
+        ids = [p["id"] for p in mapped]
+        balances.append({"portfolio": owner["id"], **({"pools": sorted(ids, key=lambda i: i != owner["id"])} if len(ids) > 1 else {}), "cash": str(observed_cash), "recorded": str(recorded),
                          "clearing_deposits": str(decimal(balance.get("depositReservation") or 0)),
                          "advanced": str(advanced),
                          "buying_power": str(balance.get("buyingPower", "0"))})
         if observed_cash != recorded:
-            discrepancies.append({"portfolio": p["id"], "kind": "cash_mismatch", "venue": "polymarket_us",
-                                  "recorded": str(recorded), "observed": str(observed_cash)})
+            discrepancies.extend({"portfolio": pid, "kind": "cash_mismatch", "venue": "polymarket_us",
+                                  "recorded": str(recorded), "observed": str(observed_cash)} for pid in ids)
         expected: dict[str, Decimal] = {}
-        for lot in state.lots.values():
+        for lot in (lot for s in states.values() for lot in s.lots.values()):
             if is_polymarket_us(lot["market"]):
                 slug = slug_of(lot["market"])
                 expected[slug] = expected.get(slug, Decimal(0)) + lot["quantity"] * (1 if lot["side"] == "yes" else -1)
         observed = {slug: position_quantity(row) for slug, row in positions.items() if position_quantity(row)}
         expected = {k: v for k, v in expected.items() if v}
         if observed != expected:
-            discrepancies.append({"portfolio": p["id"], "kind": "inventory_mismatch", "venue": "polymarket_us",
+            discrepancies.extend({"portfolio": pid, "kind": "inventory_mismatch", "venue": "polymarket_us",
                                   "recorded": {k: str(v) for k, v in expected.items()},
-                                  "observed": {k: str(v) for k, v in observed.items()}})
+                                  "observed": {k: str(v) for k, v in observed.items()}} for pid in ids)
     status = {"component": "polymarket_us", "status": "healthy" if not discrepancies else "degraded",
               "portfolios": [p["id"] for p in mapped], "recovered_orders": recovered, "settled_lots": settled,
               "balances": balances, "discrepancies": discrepancies}
