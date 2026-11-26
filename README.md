@@ -73,7 +73,7 @@ cd cz-quant
 
 5. Fill in `.env`. Set `KALSHI_API_KEY_ID` to the key ID. Set `KALSHI_PRIVATE_KEY_PATH` to the path of the private key file.
 
-6. Export the variables into your shell. The code reads the environment only. It does not read `.env`. Do this step in each new shell, and again after you change `.env`.
+6. Export the variables into your shell. This strategy reads these settings from the environment. It does not read `.env`. Do this step in each new shell, and again after you change `.env`.
 
    ```bash
    set -a; source .env; set +a
@@ -194,7 +194,8 @@ records remain readable with a deprecation label.
 cz-quant/
 ├── README.md
 ├── scripts/
-│   └── new-strategy.sh          # creates a strategy from the template
+│   ├── new-strategy.sh          # creates a strategy from the template
+│   └── cross-market-pairs/      # discovery, matching and prepared pair export
 ├── packages/czquant/            # broker, accounting, monitors, reports
 ├── research/                    # independent data collection and analysis
 ├── docs/design-principles.md    # authoritative development contract
@@ -228,15 +229,15 @@ entry points. A common command or engine is not a strategy requirement.
 parses the command line, then calls `run()` in `src/strategy/runner.py`. A new
 strategy starts with an empty `run()`.
 
-Configuration comes from the environment only. No code reads `.env`, and no
-strategy depends on a dotenv library. The `.env` file is a convenience for the
-user, who exports it with `set -a; source .env; set +a` before a run. This keeps
-the code the same on a laptop, in a container, and under a scheduler, where the
-platform sets the variables.
+Secrets and API endpoint overrides come from exported environment variables.
+Strategy parameters use each strategy's documented CLI or configuration file;
+the cross-market strategy uses --experiment FILE.json. No code reads .env files,
+and no strategy depends on a dotenv library. An .env file is a shell convenience;
+export it before a run with `set -a; source .env; set +a`.
 
-The Python package is named `strategy` in every strategy. This is safe because
-each strategy installs into its own virtual environment, and it keeps the
-template free of names that must be changed.
+The template and election strategies use a Python package named strategy. Each
+strategy installs into its own virtual environment. Script-based strategies
+have their own documented entry points.
 
 Do not import code from one strategy into another. If two strategies need the
 same research code, copy it so each can change independently. Shared execution
