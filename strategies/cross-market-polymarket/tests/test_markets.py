@@ -10,9 +10,15 @@ from czquant.polymarket import Polymarket
 from find_pairs import candidates, numbers, words
 from markets import Listing, load_markets, resolve
 from trader import Config, Engine
+from experiments import Experiment, Outcome, SelectedPair
 
 END = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
 LISTING = Listing("Fed cut", "KXFED-26DEC-CUT", "fed-cut-december")
+
+EXPERIMENT = Experiment("fed", "k", "pm", "polymarket", "paper", SelectedPair(
+    "markets", "KXFED-26DEC", "fed-cut-december", "m9", (
+        Outcome("KXFED-26DEC-CUT", "YES", "PM:tok-yes", "YES"),
+        Outcome("KXFED-26DEC-CUT", "NO", "PM:tok-no", "YES"))))
 
 
 def poly_market(outcomes=("Yes", "No")):
@@ -95,13 +101,11 @@ class FakePoly(Polymarket):
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "k")
-    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm")
     store = Store(tmp_path)
     store.create_pool("k", "kalshi", "600")
     store.create_pool("pm", "polymarket", "400")
-    return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeKalshi(), FakePoly(),
-                  {}, {"pairs": {}, "blocked": set()}, "test", listings=[LISTING])
+    return Engine(Config(experiment=EXPERIMENT, kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeKalshi(), FakePoly(),
+                  {}, {"pairs": {}, "blocked": set()}, "test")
 
 
 def test_a_reviewed_pair_buys_kalshi_no_against_polymarket_yes(engine):
@@ -195,33 +199,16 @@ def test_oddpool_needs_a_key(monkeypatch):
         Oddpool.from_env()
 
 
-def test_discovery_rereads_markets_json(tmp_path, monkeypatch):
+def test_discovery_does_not_add_games_from_markets_json(engine, tmp_path, monkeypatch):
     import markets
     path = tmp_path / "markets.json"
-    path.write_text(json.dumps({"markets": []}))
-    monkeypatch.setattr(markets, "MARKETS", str(path))
+    path.write_text(json.dumps({"markets": [{"kalshi": "UNSELECTED", "polymarket": "other"}]}))
     monkeypatch.setattr(markets.load_markets, "__defaults__", (str(path), None))
-    monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "k")
-    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm")
-    store = Store(tmp_path)
-    store.create_pool("k", "kalshi", "600")
-    store.create_pool("pm", "polymarket", "400")
-    e = Engine(Config(kalshi_latency=0, polymarket_latency=0), FakeKalshi(), FakePoly(), {},
-               {"pairs": {}, "blocked": set()}, "test")
-    e.discover()
-    assert e.market_pairs == []
-    path.write_text(json.dumps({"markets": [{"kalshi": LISTING.kalshi, "polymarket": LISTING.polymarket}]}))
-    e.discover()
-    assert [p.key for p in e.market_pairs] == [LISTING.kalshi]
-    path.write_text('{"markets": [')  # caught mid-save: the last good list stays
-    e.discover()
-    assert [p.key for p in e.market_pairs] == [LISTING.kalshi]
-    path.write_text(json.dumps({"markets": []}))
-    e.discover()
-    assert e.market_pairs == []
-    kinds = [x["data"].get("kind") for x in e.store.events()]
-    assert kinds.count("markets_reloaded") == 2 and "error" in kinds
+    engine.discover()
+    assert [p.key for p in engine.market_pairs] == [LISTING.kalshi]
+    path.write_text('{"markets": [')
+    engine.discover()
+    assert [p.key for p in engine.market_pairs] == [LISTING.kalshi]
 
 
 def test_auto_approve_keeps_the_best_match_once_per_market():

@@ -1,5 +1,6 @@
 """The trader on Polymarket US: pairing, paper fills, and the live guards (dry run)."""
 from decimal import Decimal as D
+from dataclasses import replace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -9,7 +10,7 @@ from czquant.operator import map_live_cross
 from czquant.polymarket_us import PolymarketUS, kalshi_layout
 
 from matching import us_game
-from tests.test_trader import EVENT, LEAGUES, START, FakeKalshi
+from tests.test_trader import EVENT, LEAGUES, START, FakeKalshi, experiment
 from trader import Config, Engine
 
 SLUG = "aec-nba-bos-sac"
@@ -64,12 +65,11 @@ def test_a_us_moneyline_names_each_team_by_side():
 @pytest.fixture
 def runs(tmp_path, monkeypatch):
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "pm:kalshi")
-    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm:polymarket_us")
     return tmp_path
 
 
 def build(cfg, us, kalshi=None, kalshi_live=None):
+    cfg = replace(cfg, experiment=experiment("polymarket_us", "live" if cfg.live else "paper", "pm:kalshi", "pm:polymarket_us"))
     return Engine(cfg, kalshi or FakeKalshi(), None, LEAGUES, {"pairs": {}, "blocked": set()}, "test",
                   us=us, kalshi_live=kalshi_live)
 
@@ -179,5 +179,5 @@ def test_live_halts_on_an_order_with_an_unknown_outcome(runs):
     map_live_cross(store, LiveKalshi(), MappingUS(authenticated=True), "pm", subaccount=3)
     engine = build(live_cfg(dry_run=True), MappingUS(authenticated=True, dry_run=True), kalshi_live=LiveKalshi())
     store.db.execute("INSERT INTO orders(id,portfolio_id,request,context,status,reserved) VALUES('o','pm:polymarket_us',?,?,'unknown','1')",
-                     ('{"ticker": "%s"}' % TICKER, "{}"))
+                     ('{"ticker": "%s"}' % TICKER, '{"experiment_id": "bos-sac"}'))
     assert engine.live_block() == "halted"
