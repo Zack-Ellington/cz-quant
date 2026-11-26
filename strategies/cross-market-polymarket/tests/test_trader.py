@@ -9,11 +9,21 @@ from czquant.accounting import combine_states
 from czquant.polymarket import Polymarket
 
 from trader import Config, Engine
+from experiments import Experiment, Outcome, SelectedPair
 
 DAY = (datetime.now(timezone.utc) + timedelta(days=3)).date()
 START = datetime(DAY.year, DAY.month, DAY.day, 23, 0, tzinfo=timezone.utc)  # 7 pm Eastern, same date
 EVENT = f"KXNBAGAME-{DAY:%y}{DAY:%b}{DAY:%d}BOSSAC".upper()
 LEAGUES = {"nba": {"enabled": True, "kalshi_series": "KXNBAGAME", "polymarket_tag": "nba", "abbr_aliases": {}}}
+
+
+def experiment(venue="polymarket", mode="paper", kalshi_pool="k", poly_pool="pm"):
+    us = venue == "polymarket_us"
+    return Experiment("bos-sac", kalshi_pool, poly_pool, venue, mode, SelectedPair(
+        "nba", EVENT, "nba-bos-sac-" + START.date().isoformat() if us else "nba-bos-sac",
+        "aec-nba-bos-sac" if us else "m1", (
+            Outcome(EVENT + "-BOS", "YES", "PMUS:aec-nba-bos-sac" if us else "PM:tok-bos", "YES"),
+            Outcome(EVENT + "-SAC", "YES", "PMUS:aec-nba-bos-sac" if us else "PM:tok-sac", "NO" if us else "YES"))))
 
 
 class FakeKalshi:
@@ -84,15 +94,13 @@ class FakePoly(Polymarket):
 @pytest.fixture
 def engine_for(tmp_path, monkeypatch):
     monkeypatch.setenv("STRATEGY_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("CZQUANT_KALSHI_POOL", "k")
-    monkeypatch.setenv("CZQUANT_POLYMARKET_POOL", "pm")
     store = Store(tmp_path)
     store.create_pool("k", "kalshi", "600")
     store.create_pool("pm", "polymarket", "400")
     store.close()
 
     def build(kalshi=None, poly=None):
-        return Engine(Config(kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None),
+        return Engine(Config(experiment=experiment(), kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None),
                       kalshi or FakeKalshi(), poly or FakePoly(), LEAGUES, {"pairs": {}, "blocked": set()}, "test")
     return build
 
@@ -162,7 +170,7 @@ def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):
     import trader
     monkeypatch.delenv("STRATEGY_RUNS_DIR", raising=False)
     with pytest.raises(SystemExit):
-        trader.main(["--once"])
+        trader.main(["--experiment", "missing.json", "--once"])
     assert "STRATEGY_RUNS_DIR" in capsys.readouterr().err
 
 
@@ -199,7 +207,10 @@ def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch
         raise Captured()
 
     monkeypatch.setattr(trader, 'Engine', capture)
-    for args in (['--once'], ['--live', '--once']):
+    from dataclasses import asdict
+    for mode in ("paper", "live"):
+        path = tmp_path / f"{mode}.json"
+        path.write_text(json.dumps({**asdict(experiment(venue="polymarket_us", mode=mode)), "parameters": {}}))
         with pytest.raises(Captured):
-            trader.main(args)
+            trader.main(["--experiment", str(path), "--once"])
     assert [(c.max_sets, c.max_basket_dollars, c.max_total_dollars) for c in configs] == [(20, 25, 100)] * 2
