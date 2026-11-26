@@ -93,6 +93,10 @@ can join an already mapped Kalshi account if its positions and orders reconcile
 with the existing allocations. Its opening cash is the account balance less
 cash already owned by those allocations.
 
+Prefer one numbered subaccount per live cash pool when available; it isolates
+reconciliation. Shared-account allocations are the supported fallback, at the
+cost that an account cash discrepancy applies to every allocation on it.
+
 Map an existing, funded subaccount to a new cash pool:
 
 ```bash
