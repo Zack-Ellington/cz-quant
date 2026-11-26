@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 
 import pytest
-from czquant import Broker, Store
+from czquant import Store
 from czquant.polymarket import Polymarket
 
 from find_pairs import candidates, numbers, words
@@ -15,10 +15,10 @@ from experiments import Experiment, Outcome, SelectedPair
 END = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
 LISTING = Listing("Fed cut", "KXFED-26DEC-CUT", "fed-cut-december")
 
-EXPERIMENT = Experiment("fed", "k", "pm", "polymarket", "paper", SelectedPair(
-    "markets", "KXFED-26DEC", "fed-cut-december", "m9", (
+EXPERIMENT = Experiment("fed", {"kalshi": "k", "polymarket": "pm"}, "paper", SelectedPair(
+    "polymarket", "KXFED-26DEC", "KXFED", "fed-cut-december", "m9", END, (
         Outcome("KXFED-26DEC-CUT", "YES", "PM:tok-yes", "YES"),
-        Outcome("KXFED-26DEC-CUT", "NO", "PM:tok-no", "YES"))))
+        Outcome("KXFED-26DEC-CUT", "NO", "PM:tok-no", "YES")), {"method": "reviewed"}))
 
 
 def poly_market(outcomes=("Yes", "No")):
@@ -70,7 +70,7 @@ class FakeKalshi:
         raise AssertionError(path)
 
     def market(self, ticker):
-        return {"ticker": ticker, "status": "active", "series_ticker": "KXFED"}
+        return {"ticker": ticker, "status": "active", "series_ticker": "KXFED", "event_ticker": "KXFED-26DEC"}
 
     def book(self, ticker):
         return self.raw()
@@ -104,8 +104,8 @@ def engine(tmp_path, monkeypatch):
     store = Store(tmp_path)
     store.create_pool("k", "kalshi", "600")
     store.create_pool("pm", "polymarket", "400")
-    return Engine(Config(experiment=EXPERIMENT, kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeKalshi(), FakePoly(),
-                  {}, {"pairs": {}, "blocked": set()}, "test")
+    return Engine(Config(experiment=EXPERIMENT, kalshi_latency=0, polymarket_latency=0, max_capital_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeKalshi(), FakePoly(),
+                  "test")
 
 
 def test_a_reviewed_pair_buys_kalshi_no_against_polymarket_yes(engine):
@@ -113,7 +113,7 @@ def test_a_reviewed_pair_buys_kalshi_no_against_polymarket_yes(engine):
     held = {(lot["market"], lot["side"]): lot["quantity"] for broker in engine.brokers.values() for lot in broker.state().lots.values()}
     assert held == {("KXFED-26DEC-CUT", "no"): 100, ("PM:tok-yes", "yes"): 100}
     record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
-    assert record["context"]["match"]["method"] == "reviewed"
+    assert record["context"]["pair"]["evidence"]["method"] == "reviewed"
 
 
 def test_no_basket_when_the_venues_agree(engine):
@@ -199,16 +199,11 @@ def test_oddpool_needs_a_key(monkeypatch):
         Oddpool.from_env()
 
 
-def test_discovery_does_not_add_games_from_markets_json(engine, tmp_path, monkeypatch):
+def test_runtime_does_not_load_preprocessing_listings(engine, monkeypatch):
     import markets
-    path = tmp_path / "markets.json"
-    path.write_text(json.dumps({"markets": [{"kalshi": "UNSELECTED", "polymarket": "other"}]}))
-    monkeypatch.setattr(markets.load_markets, "__defaults__", (str(path), None))
-    engine.discover()
-    assert [p.key for p in engine.market_pairs] == [LISTING.kalshi]
-    path.write_text('{"markets": [')
-    engine.discover()
-    assert [p.key for p in engine.market_pairs] == [LISTING.kalshi]
+    monkeypatch.setattr(markets, "load_markets", lambda *a: pytest.fail("runtime loaded discovery listings"))
+    engine.step()
+    assert engine.counters["baskets"] == 1
 
 
 def test_auto_approve_keeps_the_best_match_once_per_market():

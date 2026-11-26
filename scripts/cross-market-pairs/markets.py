@@ -27,13 +27,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 MARKETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "markets.json")
-# Written by `find_pairs.py --auto-approve`: unreviewed pairs, for paper benchmarking.
-AUTO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "markets.auto.json")
 
 
 @dataclass(frozen=True)
@@ -48,11 +46,8 @@ class Listing:
 
 
 def _rows(path: str) -> list[dict[str, Any]]:
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f).get("markets") or []
-    except FileNotFoundError:
-        return []
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)["markets"]
 
 
 def _listing(row: dict[str, Any], source: str) -> Listing:
@@ -60,7 +55,7 @@ def _listing(row: dict[str, Any], source: str) -> Listing:
                    row.get("rules", ""), source, row.get("score"))
 
 
-def load_markets(path: str = MARKETS, auto: str | None = AUTO) -> list[Listing]:
+def load_markets(path: str = MARKETS, auto: str | None = None) -> list[Listing]:
     """Reviewed pairs from markets.json, then auto-approved ones from markets.auto.json.
 
     A reviewed entry wins over an auto one for the same Kalshi market, and a reviewed
@@ -86,20 +81,9 @@ def _time(value: str | None) -> datetime | None:
 class MarketPair:
     """A listing resolved against both venues: which token answers which way, and when."""
     listing: Listing
-    event: str  # the Kalshi event ticker, for the per-event limits
-    series: str
+    event: str  # the Kalshi event ticker
     tokens: dict[str, str]  # "yes"/"no" (in Kalshi's terms) -> the Polymarket token with the same answer
     resolves: datetime | None  # the later of the two venues' expected resolution
-    poly: dict[str, Any] = field(repr=False, default_factory=dict)
-
-    @property
-    def key(self) -> str:
-        return self.listing.kalshi
-
-    def roles(self) -> dict[str, list[tuple[str, str, str]]]:
-        """Each answer's ways to buy it: (venue, ticker or token, contract)."""
-        return {"yes": [("kalshi", self.listing.kalshi, "YES"), ("polymarket", self.tokens["yes"], "YES")],
-                "no": [("kalshi", self.listing.kalshi, "NO"), ("polymarket", self.tokens["no"], "YES")]}
 
 
 def resolve(listing: Listing, kalshi_market: dict[str, Any], poly_market: dict[str, Any]) -> tuple[MarketPair | None, str]:
@@ -114,5 +98,5 @@ def resolve(listing: Listing, kalshi_market: dict[str, Any], poly_market: dict[s
     mapping = {"yes": no, "no": yes} if listing.invert else {"yes": yes, "no": no}
     ends = [t for t in (_time(kalshi_market.get("expected_expiration_time") or kalshi_market.get("close_time")),
                         _time(poly_market.get("endDate"))) if t is not None]
-    return MarketPair(listing, kalshi_market.get("event_ticker", listing.kalshi), "", mapping,
-                      max(ends) if ends else None, poly_market), "ok"
+    return MarketPair(listing, kalshi_market["event_ticker"], mapping,
+                      max(ends) if ends else None), "ok"

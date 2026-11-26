@@ -24,7 +24,7 @@ independently.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
-- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue use separate brokers. Polymarket US supports paper and live execution; international Polymarket supports paper execution.
+- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. A separate [preprocessing bundle](scripts/cross-market-pairs/) discovers and prepares pairs. Each run prices one selected pair and operates on its funded venue cash pools through separate brokers. Polymarket US supports paper and live execution; international Polymarket supports paper execution.
 
 - [kalshi-sum-check-unwind](strategies/kalshi-sum-check-unwind/): the Kalshi sum check, but when a basket fills only some legs it keeps the complete sets and sells the extra contracts back within a slippage limit.
 
@@ -140,7 +140,7 @@ market and account evidence. Strategies record executions through brokers
 and can attach diagnostics; they do not supply reporting implementations.
 See [reporting](docs/services/reporting.md) for commands and portfolio lifetime.
 
-The [cross-market strategy](strategies/cross-market-polymarket/#experiment-configuration)
+The [cross-market strategy](strategies/cross-market-polymarket/#prepare-configuration)
 selects one pair and two pre-created allocations with --experiment FILE.json.
 Each experiment uses two venue cash pools and two brokers in both
 paper and live mode. A reporting portfolio groups those pools without merging

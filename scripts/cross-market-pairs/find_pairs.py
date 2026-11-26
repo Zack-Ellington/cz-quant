@@ -21,8 +21,8 @@ and a rough top-of-book cost (the cheaper of Kalshi YES + Polymarket No and Kals
 markets.json with "enabled": true, and "invert": true if the questions are complements.
 
 Usage
-  uv run python find_pairs.py --topics fed,cpi,inflation
-  uv run python find_pairs.py --source scan --min-score 0.6 --days 3 --categories Politics,Economics
+  uv run --project strategies/cross-market-polymarket python scripts/cross-market-pairs/find_pairs.py --topics fed,cpi,inflation --out /path/to/candidates.json
+  uv run --project strategies/cross-market-polymarket python scripts/cross-market-pairs/find_pairs.py --source scan --out /path/to/candidates.json
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import re
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -40,9 +41,6 @@ from czquant.polymarket import Polymarket
 
 from oddpool import Oddpool
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "candidates.json")
-AUTO = os.path.join(HERE, "markets.auto.json")
 SPORTS_CATEGORIES = {"Sports"}
 SPORTS_TAGS = {"sports", "esports", "games"}
 STOP = set("""a an the of in on at to by for and or be will is are was with from before after than more less
@@ -265,11 +263,7 @@ def oddpool_candidates(client: Oddpool, topics: list[str], min_score: float, ser
 
 
 def write_json(path: str, data: Any) -> None:
-    """Write whole or not at all: readers (the trader, an editor) never see half a file."""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1)
-    os.replace(tmp, path)
+    Path(path).write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
 
 
 def auto_approve(found: list[dict[str, Any]], min_score: float) -> list[dict[str, Any]]:
@@ -298,10 +292,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--days", type=float, default=7, help="max gap between the venues' resolution dates (7)")
     p.add_argument("--max-kalshi", type=int, default=500000)
     p.add_argument("--max-polymarket", type=int, default=500000)
-    p.add_argument("--out", default=OUT)
+    p.add_argument("--out", required=True, help="candidate output path outside the source checkout")
     p.add_argument("--auto-approve", type=float, default=None, metavar="SCORE",
-                   help="also write every candidate scoring SCORE or more to markets.auto.json, which the "
-                        "paper trader trades without review (for benchmarking pairing accuracy)")
+                   help="also write every candidate scoring SCORE or more to markets.auto.json, for offline pairing benchmarks "
+                        "(not read by the strategy runner)")
     a = p.parse_args(argv)
     source = a.source or ("oddpool" if os.environ.get("ODDPOOL_API_KEY") else "scan")
     kalshi, poly = Kalshi(authenticated=False), Polymarket.from_env()
@@ -321,8 +315,9 @@ def main(argv: list[str] | None = None) -> None:
     print(f"{summary} -> {a.out}")
     if a.auto_approve is not None:
         approved = auto_approve(found, a.auto_approve)
-        write_json(AUTO, {"generated": generated, "min_score": a.auto_approve, "markets": approved})
-        print(f"{len(approved)} pairs scoring {a.auto_approve} or more -> {AUTO} (paper benchmarking; unreviewed)")
+        auto = str(Path(a.out).with_name("markets.auto.json"))
+        write_json(auto, {"generated": generated, "min_score": a.auto_approve, "markets": approved})
+        print(f"{len(approved)} pairs scoring {a.auto_approve} or more -> {auto} (paper benchmarking; unreviewed)")
     for c in found[:25]:
         print(f"{c['score']:.2f}  cost {c['rough_cost']}  {c['kalshi']}  <->  {c['polymarket']}")
         print(f"      differ: kalshi {' '.join(c['only_kalshi'])} | polymarket {' '.join(c['only_polymarket'])}")

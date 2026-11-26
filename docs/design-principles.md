@@ -86,7 +86,10 @@ Several pools may share a real account, but their allocations cannot count the
 same cash twice. A broker binds to exactly one pool; its state and available
 cash exclude every other pool, including other pools at the same venue.
 
-A portfolio is a flat reporting selection of cash pools. It owns no cash,
+A strategy operates on an explicitly selected portfolio of funded cash pools
+through their brokers. These cash pools exist independently of a strategy run.
+
+A reporting portfolio is a flat selection of cash pools. It owns no additional cash,
 executes no orders, and does not make its pools' balances interchangeable.
 For example, a cross-market experiment uses two venue pools and two brokers;
 a reporting portfolio can combine their performance. A strategy need not
@@ -158,6 +161,9 @@ requirement that future instruments share those economics.
 The strategy-facing operations are:
 
 - start(strategy, revision, config): record a run and opaque configuration.
+- check(order): validate venue, allocation scope and required cash without
+  submitting or reserving. This is a nonbinding preflight; submit repeats the
+  checks when it records the intent.
 - submit(order, context=None): persist ownership, intent, and optional context,
   then request execution. Keep an explicit client_order_id when retrying the
   same intent. Reuse for a different request or context is rejected.

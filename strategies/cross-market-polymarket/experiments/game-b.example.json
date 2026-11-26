@@ -1,11 +1,11 @@
 {
   "id": "game-b",
-  "kalshi_pool": "game-b-kalshi",
-  "polymarket_pool": "game-b-us",
-  "venue": "polymarket_us",
+  "portfolio": {
+    "kalshi": "game-b-kalshi",
+    "polymarket_us": "game-b-us"
+  },
   "mode": "paper",
   "pair": {
-    "league": "nba",
     "kalshi_event": "REPLACE_KALSHI_EVENT_B",
     "polymarket_event": "REPLACE_US_EVENT_SLUG_B",
     "polymarket_market": "REPLACE_US_MARKET_SLUG_B",
@@ -23,21 +23,21 @@
         "polymarket_side": "NO"
       }
     ],
-    "invert": false
+    "venue": "polymarket_us",
+    "kalshi_series": "KXNBAGAME",
+    "resolves_at": "2027-01-01T06:00:00+00:00",
+    "evidence": {
+      "rules": "REPLACE_WITH_REVIEWED_SETTLEMENT_RULES"
+    }
   },
   "parameters": {
     "interval_seconds": 15,
-    "discover_minutes": 10,
-    "max_event_frac": 0.1,
-    "max_total_frac": 1,
-    "max_open_events": 1,
     "max_sets": 20,
     "risk_free": 0.05,
     "min_net": 0.25,
     "min_edge": 0.01,
     "max_apr": null,
     "require_cross": true,
-    "resolution_hours": 6,
     "unwind_slippage": 0.05,
     "kalshi_latency": 0.3,
     "polymarket_latency": 0.5,
@@ -47,6 +47,7 @@
     "pmus_theta": null,
     "max_basket_dollars": 25,
     "max_total_dollars": 100,
-    "monitor_max_age": 300
+    "monitor_max_age": 300,
+    "max_capital_frac": 0.1
   }
 }

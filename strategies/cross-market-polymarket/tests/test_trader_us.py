@@ -1,16 +1,15 @@
 """The trader on Polymarket US: pairing, paper fills, and the live guards (dry run)."""
 from decimal import Decimal as D
-from dataclasses import replace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from czquant import Broker, Store
+from czquant import Store
 from czquant.operator import map_live_cross
-from czquant.polymarket_us import PolymarketUS, kalshi_layout
+from czquant.polymarket_us import PolymarketUS
 
 from matching import us_game
-from tests.test_trader import EVENT, LEAGUES, START, FakeKalshi, experiment
+from tests.test_trader import EVENT, START, FakeKalshi, experiment
 from trader import Config, Engine
 
 SLUG = "aec-nba-bos-sac"
@@ -69,8 +68,7 @@ def runs(tmp_path, monkeypatch):
 
 
 def build(cfg, us, kalshi=None, kalshi_live=None):
-    cfg = replace(cfg, experiment=experiment("polymarket_us", "live" if cfg.live else "paper", "pm:kalshi", "pm:polymarket_us"))
-    return Engine(cfg, kalshi or FakeKalshi(), None, LEAGUES, {"pairs": {}, "blocked": set()}, "test",
+    return Engine(cfg, kalshi or FakeKalshi(), None, "test",
                   us=us, kalshi_live=kalshi_live)
 
 
@@ -78,7 +76,7 @@ def test_paper_on_polymarket_us_buys_each_team_where_it_is_cheaper(runs):
     store = Store(runs)
     store.create_pool("pm:kalshi", "kalshi", "600")
     store.create_pool("pm:polymarket_us", "polymarket_us", "400")
-    engine = build(Config(venue="polymarket_us", kalshi_latency=0, polymarket_latency=0, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None),
+    engine = build(Config(experiment=experiment("polymarket_us", "paper", "pm:kalshi", "pm:polymarket_us"), kalshi_latency=0, polymarket_latency=0, max_capital_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None),
                    FakeUSVenue())
     assert engine.kalshi_broker.venue == "kalshi" and engine.poly_broker.venue == "polymarket_us"
     engine.step()
@@ -92,9 +90,9 @@ def test_a_theta_override_prices_with_it(runs):
     store = Store(runs)
     store.create_pool("pm:kalshi", "kalshi", "600")
     store.create_pool("pm:polymarket_us", "polymarket_us", "400")
-    engine = build(Config(venue="polymarket_us", pmus_theta=0.0695, max_event_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeUSVenue())
-    engine.discover()
-    basket = engine.scan()[0][0]
+    engine = build(Config(experiment=experiment("polymarket_us", "paper", "pm:kalshi", "pm:polymarket_us"), pmus_theta=0.0695, max_capital_frac=1.0, max_sets=500, max_basket_dollars=None, max_total_dollars=None), FakeUSVenue())
+    basket = engine.scan()
+    assert basket is not None
     us_leg = [leg for leg in basket.legs if leg["venue"] == "polymarket_us"][0]
     assert D(us_leg["fee"]) == D("1.64")  # 0.0695 x 100 x 0.38 x 0.62 = 1.6375
 
@@ -133,7 +131,7 @@ class MappingUS(FakeUSVenue):
 
 
 def live_cfg(**kw):
-    return Config(venue="polymarket_us", live=True, max_event_frac=1.0, max_basket_dollars=25,
+    return Config(experiment=experiment("polymarket_us", "live", "pm:kalshi", "pm:polymarket_us"), max_capital_frac=1.0, max_basket_dollars=25,
                   max_total_dollars=100, max_sets=20, **kw)
 
 
@@ -148,7 +146,7 @@ def test_live_needs_a_live_portfolio(runs):
 def test_a_paper_run_refuses_a_live_portfolio(runs):
     map_live_cross(Store(runs), LiveKalshi(), MappingUS(authenticated=True), "pm", subaccount=3)
     with pytest.raises(ValueError, match="must be paper|same mode"):
-        build(Config(venue="polymarket_us"), FakeUSVenue())
+        build(Config(experiment=experiment("polymarket_us", "paper", "pm:kalshi", "pm:polymarket_us")), FakeUSVenue())
 
 
 def test_live_dry_run_sizes_within_the_caps_and_sends_nothing(runs):

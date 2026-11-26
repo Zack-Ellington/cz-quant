@@ -334,3 +334,36 @@ def test_execution_rejects_wrong_adapter_mode_before_any_intent(tmp_path, mode):
     with pytest.raises(ValueError, match='same mode'):
         broker.submit(order('M', 'wrong-mode'))
     assert store.events() == before and not adapter.sent
+
+
+@pytest.mark.parametrize('mode', ['paper', 'live'])
+def test_preflight_is_read_only_and_submit_rechecks_available_cash(tmp_path, mode):
+    store = Store(tmp_path)
+    pool(store, 'k', 'kalshi', '1.5', mode)
+    adapter = Pending('kalshi')
+    broker = Broker(store, 'k', adapter)
+    request = order('M', 'first')
+    before = store.events()
+    assert broker.check(request) == {'status': 'ready', 'reserved': '1.04'}
+    assert store.events() == before and broker.orders() == []
+    assert broker.available == D('1.5') and adapter.sent == []
+    assert request == order('M', 'first')
+    other = Broker(store, 'k', adapter)
+    assert other.submit(order('M', 'other'))['status'] == 'pending'
+    assert broker.check(request)['reason'] == 'insufficient_cash'
+    assert broker.submit(request)['reason'] == 'insufficient_cash'
+    assert len(adapter.sent) == 1
+
+
+def test_preflight_observes_changed_scope_before_recording_an_intent(tmp_path):
+    store = Store(tmp_path)
+    store.create_pool('k', 'kalshi', '10')
+    broker = Broker(store, 'k', Pending('kalshi'))
+    assert broker.check(order('M', 'one'))['status'] == 'ready'
+    store.db.execute('UPDATE portfolios SET metadata=? WHERE id=?',
+                     (json.dumps({'markets': ['OTHER']}), 'k'))
+    before = store.events()
+    for action in (broker.check, broker.submit):
+        with pytest.raises(ValueError, match='outside cash pool'):
+            action(order('M', 'one'))
+    assert store.events() == before and broker.orders() == [] and broker.adapter.sent == []
