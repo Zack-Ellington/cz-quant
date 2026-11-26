@@ -122,6 +122,14 @@ def test_snapshot_deduplicates_brokers_pools_and_fills(tmp_path):
     assert data['overall']['attempts'] == 1
     assert data['overall']['executed_trades'] == 1
     assert data['overall']['expected_profit'] == D('.16')
+    assert data['overall']['positions'] == D(2)
+    assert data['overall']['expected_return'] == D('.004')
+    assert data['overall_history'][-1]['cash'] == D('39.16')
+    assert data['overall_history'][-1]['expected_return'] == D('.004')
+    assert data['overall_history'][-2]['positions'] == D(2)
+    assert data['overall_history'][-3]['expected_return'] is None  # First leg alone is unhedged.
+    assert data['venue_history'][-1]['cash'] == D('99.16')
+    assert len(data['games'][0]['positions']) == 2
     assert data['games'][0]['fills'] == 2
     assert data['games'][0]['trades'][0]['fees'] == D('.04')
 
@@ -169,3 +177,25 @@ def test_public_sampler_does_not_change_cash_or_orders(tmp_path):
     assert store.events(kinds=('transaction', 'order', 'execution')) == before
     assert store.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0] == 0
     store.close()
+
+
+def test_price_history_retains_all_samples_and_raw_prices(tmp_path):
+    store = Store(tmp_path)
+    cfg = config()
+    store.append('run', {'strategy': 'cross-market-polymarket', 'config': cfg})
+    measured = measure_quotes(cfg, {'GAME1-A': book(), 'GAME1-B': book()}, book('.5', '.5'),
+                              D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
+    for _ in range(3001):
+        store.append('observation', {'kind': 'cross_market_quote', 'experiment_id': 'GAME1',
+                                    'status': 'ok', **measured})
+    store.append('observation', {'kind': 'cross_market_quote', 'experiment_id': 'GAME1',
+                                'status': 'error', 'legs': [], 'routes': []})
+    store.close()
+    game = snapshot(tmp_path)['games'][0]
+    assert len(game['price_history']) == 3002
+    route = game['price_history'][0]['routes'][0]
+    assert D(route['kalshi_price']) == D('.4')
+    assert D(route['polymarket_price']) == D('.5')
+    assert D(route['net_per_set']) == D('.06')
+    assert game['price_history'][-1]['routes'] == []
+    assert len(game['route_labels']) == 2

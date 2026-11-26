@@ -70,6 +70,7 @@ def conditional_profit(state: State, pair: dict) -> dict:
     complete = not unmatched and quantities[0] == quantities[1]
     profit = min(quantities) - state.cost if complete else None
     return {"matched_sets": min(quantities), "unmatched_contracts": abs(quantities[0] - quantities[1]),
+            "open_contracts": sum((lot['quantity'] for lot in state.lots.values()), ZERO),
             "open_expected_profit": profit,
             "expected_profit": state.realized + profit if profit is not None else None}
 
@@ -140,6 +141,18 @@ def snapshot(root: Path) -> dict:
     states = {p["id"]: State() for p in pools}
     cash_history = {c["experiment"]["id"]: [] for c in configs}
     memberships = {c["experiment"]["id"]: set(c["experiment"]["portfolio"].values()) for c in configs}
+    selected_pools = set().union(*memberships.values()) if memberships else set()
+    overall_history = []
+
+    def measure_overall(at: str) -> dict:
+        combined = combine_states([states[p] for p in selected_pools if p in states])
+        projections = [conditional_profit(combine_states([states[p] for p in memberships[c['experiment']['id']]
+                                                          if p in states]), c['experiment']['pair']) for c in configs]
+        expected = sum((p['expected_profit'] for p in projections), ZERO) if all(
+            p['expected_profit'] is not None for p in projections) else None
+        return {'at': at, 'cash': combined.cash, 'positions': sum((p['open_contracts'] for p in projections), ZERO),
+                'expected_profit': expected, 'expected_return': expected / combined.contributed if
+                expected is not None and combined.contributed > 0 else None}
     economic = active_events([e for e in events if e["type"] in ("transaction", "correction")])
     for event in sorted(economic, key=lambda e: (e["effective_at"], e["sequence"])):
         pid = event["portfolio_id"]
@@ -149,7 +162,10 @@ def snapshot(root: Path) -> dict:
                 if pid in members:
                     cash_history[identifier].append({"at": event["effective_at"],
                         "cash": sum((states[p].cash for p in members if p in states), ZERO)})
+            if pid in selected_pools:
+                overall_history.append(measure_overall(event['effective_at']))
     health, venue_balances = {}, {}
+    venue_history = []
     for event in events:
         d = event["data"]
         if event["type"] == "account_evidence" and d.get("kind") == "polymarket_us_snapshot":
@@ -166,6 +182,10 @@ def snapshot(root: Path) -> dict:
             if d['component'] == 'account' and d.get('balances'):
                 venue_balances['kalshi'] = {'at': event['effective_at'],
                     'venue_balance': sum((decimal(b['cash']) for b in d['balances']), ZERO)}
+        if (len(venue_balances) == 2 and (event['type'] == 'account_evidence'
+                and d.get('kind') == 'polymarket_us_snapshot' or event['type'] == 'health' and d.get('component') == 'account')):
+            venue_history.append({'at': event['effective_at'], 'cash': sum(
+                (b['venue_balance'] for b in venue_balances.values()), ZERO)})
     games = []
     for config in configs:
         experiment = config["experiment"]
@@ -198,13 +218,19 @@ def snapshot(root: Path) -> dict:
                       "total_cash": state.cash, "realized_profit": state.realized, "fees": state.fees,
                       **conditional_profit(state, pair), "attempts": len(trades),
                       "executed_trades": sum(t["filled"] for t in trades), "fills": state.fills,
-                      "trades": trades[:100], "issues": issues[-30:][::-1], "heartbeat": last.get("heartbeat"),
+                      "trades": trades, "issues": issues[-30:][::-1], "heartbeat": last.get("heartbeat"),
+                      "positions": list(state.lots.values()),
                       "scan": last.get("scan_complete"), "quote": quote, "windows": windows(quotes, now.timestamp())[:100],
+                      "route_labels": next(([{'id': r['id'], 'name': r['name']} for r in e['data']['routes']]
+                                             for e in reversed(quotes) if e['data'].get('routes')), []),
                       "price_history": [{"at": e["effective_at"], "status": e["data"]["status"],
-                                         "routes": e["data"]["routes"]} for e in quotes[-3000:]],
+                        "routes": [{"id": r['id'], "kalshi_price": e['data']['legs'][int(r['id'])]['kalshi_ask'],
+                                    "polymarket_price": e['data']['legs'][1-int(r['id'])]['polymarket_ask'],
+                                    "net_per_set": r['one_set']['net_per_set'] if r.get('one_set') else None,
+                                    "fee_per_set": r['one_set']['fee_per_set'] if r.get('one_set') else None}
+                                   for r in e['data']['routes']]} for e in quotes],
                       "cash_history": cash_history[identifier][-3000:] + [{"at": now.isoformat(), "cash": state.cash}],
                       "quote_history_start": quotes[0]["effective_at"] if quotes else None})
-    selected_pools = set().union(*memberships.values()) if memberships else set()
     accounts = []
     for venue in ("kalshi", "polymarket_us"):
         live = [p for p in pools if p["mode"] == "live" and p["venue"] == venue]
@@ -216,9 +242,13 @@ def snapshot(root: Path) -> dict:
     all_trades = trade_rows(orders, events, selected_pools)
     expected = sum((g["expected_profit"] for g in games), ZERO) if all(g["expected_profit"] is not None for g in games) else None
     venue_total = sum((a['venue_balance'] for a in accounts), ZERO) if all('venue_balance' in a for a in accounts) else None
+    overall_history.append(measure_overall(now.isoformat()))
     return {"at": now.isoformat(), "health": health, "games": games, "accounts": accounts,
+            "overall_history": overall_history, "venue_history": venue_history,
             "overall": {"cash": unique.cash, "account_cash": sum((a["cash"] for a in accounts), ZERO),
                         "venue_balance": venue_total,
+                        "positions": overall_history[-1]['positions'],
+                        "expected_return": overall_history[-1]['expected_return'],
                         "attempts": len(all_trades), "executed_trades": sum(t["filled"] for t in all_trades),
                         "expected_profit": expected, "realized_profit": unique.realized, "fees": unique.fees}}
 

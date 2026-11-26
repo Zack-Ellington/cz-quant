@@ -196,8 +196,17 @@ accounts. The dashboard opens SQLite in read-only mode and refreshes every five
 seconds. Existing strategy and authenticated account-monitor processes stay
 independent.
 
-Each game shows venue cash, reservations, available cash, both outcomes' buy
-prices, and both complementary cross-venue combinations. Gross gap is $1 minus
+The light dashboard has an Overall tab and one tab per game. Overall plots venue
+cash, allocated game cash, open contract counts, and expected return over time.
+Expected return divides conditional expected profit by contributed game capital.
+Each game shows venue cash, reservations, and available cash. A selector chooses
+one of the two complementary cross-venue combinations. Its Plotly chart shows
+the two raw ask prices on the left axis and the executable one-set gap after
+rounded fees on the right axis. Positive sampled gaps have green shading;
+isolated positive samples have green dots. Recorded attempts and executed trades
+appear as dots on the time axis, with executions dated by their first booked fill.
+Markers include all activity for the game, regardless of the selected route.
+Gross gap is $1 minus
 the two purchase prices. Fee calculations use rounded taker fees and walk depth
 for integer sizes up to the recorded max_sets. A sampled opportunity requires
 positive net at a size funded by both venue pools and within the recorded capital
@@ -206,8 +215,10 @@ an observed opportunity is not an execution recommendation or a guaranteed fill.
 
 Windows report the first and last positive samples, sample count, and peak quoted
 net. Errors and collection gaps break windows. History begins with collection;
-earlier no-edge scan logs contain no leg prices. Charts retain the latest 3,000
-samples per game, while the ledger retains all observations. Times are Pacific.
+earlier no-edge scan logs contain no leg prices. Charts grow with all collected
+samples and retain zoom across refreshes. Green chart regions use the one-set
+fee-adjusted gap; the separate funded-window table additionally checks cash and
+size. Times are Pacific.
 
 Trade attempts count recorded preflight/recheck refusals plus distinct submitted
 baskets. Rate-limited diagnostic logs cannot establish every unrecorded retry.
