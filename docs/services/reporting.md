@@ -201,7 +201,7 @@ cash, allocated game cash, open contract counts, and expected return over time.
 Expected return divides conditional expected profit by contributed game capital.
 Each game has one Plotly chart on a single cents axis. Four solid lines show
 raw buy prices: dark/light blue for one team's Kalshi/Polymarket US prices,
-and dark/light orange for the other team's prices. Two solid purple and teal lines show the
+and dark/light orange for the other team's prices. Two solid dark and light grey lines show the
 maximum fee-adjusted profit per matched pair in each cross-venue direction.
 For each sample, every integer size up to max_sets is priced through available
 depth. Sizes must fit the recorded pools' available cash, broker fee buffers,
