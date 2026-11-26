@@ -4,7 +4,7 @@ import pytest
 
 from czquant import Store
 from czquant.accounting import State
-from czquant.cross_market_dashboard import conditional_profit, seconds, snapshot, trade_rows, windows
+from czquant.cross_market_dashboard import conditional_profit, reprice_history, seconds, snapshot, trade_rows, windows
 from czquant.cross_market_monitor import asks, measure_quotes, quote_route, sample
 
 
@@ -54,6 +54,52 @@ def test_no_side_uses_complement_of_yes_bid():
                             D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
     assert result['legs'][0]['polymarket_ask'] == D('.8')
     assert result['legs'][1]['polymarket_ask'] == D('.3')
+
+
+def test_max_gap_is_per_pair_not_total_basket_profit():
+    cfg = config()
+    stepped = {'orderbook_fp': {'yes_dollars': [['.3', '20']],
+                               'no_dollars': [['.6', '1'], ['.55', '19']]}}
+    result = measure_quotes(cfg, {'GAME1-A': stepped, 'GAME1-B': book()}, book('.6', '.4'),
+                            D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
+    route = result['routes'][0]
+    assert route['max_gap']['sets'] == 1
+    assert route['max_gap']['net_per_set'] == D('.16')
+    assert route['best']['sets'] == 20
+    assert route['best']['net'] > route['max_gap']['net']
+    assert route['best']['net_per_set'] < route['max_gap']['net_per_set']
+
+
+def test_max_gap_search_includes_fee_rounding_and_pool_reservations():
+    cfg = config()
+    result = measure_quotes(cfg, {'GAME1-A': book('.1', '.84'), 'GAME1-B': book()}, book('.21', '.77'),
+                            D(1), D('.11'), {'kalshi': D(10), 'polymarket_us': D('9.70')}, D(20))
+    route = result['routes'][0]
+    assert route['max_gap']['sets'] == 3
+    assert route['max_gap']['net_per_set'] == D('.07') / 3
+    assert route['max_gap']['net_per_set'] > route['one_set']['net_per_set']
+    assert route['best']['sets'] == 11  # Twelve need 9.78 with the broker's fee buffer.
+    assert route['max_gap']['polymarket_required'] <= D('9.70')
+
+
+def test_legacy_history_reprices_with_recorded_books_without_reusing_stale_books():
+    cfg = config()
+    kbooks = {'GAME1-A': book('.1', '.84'), 'GAME1-B': book()}
+    pbook = book('.21', '.77')
+    measured = measure_quotes(cfg, kbooks, pbook, D(1), D('.11'),
+                              {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
+    for route in measured['routes']:
+        route.pop('max_gap')
+    def observation():
+        return {'type': 'observation', 'data': {'kind': 'cross_market_quote', 'experiment_id': 'GAME1',
+                                               'status': 'ok', **measured}}
+    events = [{'type': 'run', 'data': {'strategy': 'cross-market-polymarket', 'config': cfg}}]
+    events += [{'type': 'market', 'data': {'source': 'cross_market_quotes', 'ticker': t, 'book': b}}
+               for t, b in {**kbooks, 'PMUS:GAME1': pbook}.items()]
+    events += [observation(), observation()]
+    reprice_history(events)
+    assert events[-2]['data']['routes'][0]['max_gap']['net_per_set'] == D('.07') / 3
+    assert 'max_gap' not in events[-1]['data']['routes'][0]
 
 
 def test_crossed_book_is_not_an_opportunity():

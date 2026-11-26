@@ -9,6 +9,7 @@ from typing import Any
 
 from .accounting import portfolio_state
 from .book import levels
+from .broker import FEE_ALLOWANCE
 from .kalshi import Kalshi
 from .polymarket_us import PolymarketUS, DEFAULT_THETA, fee, normalize_market
 from .store import Store, decimal, utc
@@ -61,11 +62,15 @@ def quote_route(kbook: list, pbook: list, count: int, multiplier: Decimal, theta
         Decimal("0.01"), rounding=ROUND_CEILING)
     pfee = fee(pfills, theta)
     gross = count - kcost - pcost
+    required = [max(count * max(p for p, _ in fills) + charge,
+                    count * max(p for p, _ in fills) + (count * FEE_ALLOWANCE[venue]).quantize(
+                        Decimal('.01'), rounding=ROUND_CEILING))
+                for fills, charge, venue in ((kfills, kfee, 'kalshi'), (pfills, pfee, 'polymarket_us'))]
     return {"sets": count, "kalshi_price": kcost / count, "polymarket_price": pcost / count,
             "gross_gap": gross / count, "fees": kfee + pfee, "fee_per_set": (kfee + pfee) / count,
             "net": gross - kfee - pfee, "net_per_set": (gross - kfee - pfee) / count,
             "capital": kcost + pcost + kfee + pfee, "kalshi_capital": kcost + kfee,
-            "polymarket_capital": pcost + pfee}
+            "polymarket_capital": pcost + pfee, "kalshi_required": required[0], "polymarket_required": required[1]}
 
 
 def measure_quotes(config: dict, kbooks: dict, pbook: dict, multiplier: Decimal, theta: Decimal,
@@ -97,12 +102,14 @@ def measure_quotes(config: dict, kbooks: dict, pbook: dict, multiplier: Decimal,
             q = quote_route(kb[i], pb[j], size, multiplier, theta)
             if q is None:
                 break
-            if (q["kalshi_capital"] <= available["kalshi"]
-                    and q["polymarket_capital"] <= available["polymarket_us"] and q["capital"] <= capital):
+            if (q["kalshi_required"] <= available["kalshi"]
+                    and q["polymarket_required"] <= available["polymarket_us"] and q["capital"] <= capital):
                 feasible.append(q)
         best = max(feasible, key=lambda q: q["net"], default=None)
+        max_gap = max(feasible, key=lambda q: (q['net_per_set'], q['net']), default=None)
         routes.append({"id": str(i), "name": f"{legs[i]['name']} on Kalshi + {legs[j]['name']} on Polymarket US",
-                       "one_set": one, "best": best, "opportunity": bool(best and best["net"] > 0)})
+                       "one_set": one, "best": best, "max_gap": max_gap,
+                       "opportunity": bool(best and best["net"] > 0)})
     return {"legs": legs, "routes": routes, "capital_limit": capital,
             "available": available, "fee_multiplier": multiplier, "fee_coefficient": theta}
 
@@ -149,6 +156,7 @@ def sample(store: Store, config: dict, kalshi: Any, pmus: Any) -> dict:
         for route in measured["routes"]:
             route["opportunity"] = False
             route["best"] = None
+            route["max_gap"] = None
     return {"experiment_id": experiment["id"], "status": "ok" if open_ else "closed",
             "started_at": started, "observed_at": utc(), **measured}
 

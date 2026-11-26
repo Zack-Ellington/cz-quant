@@ -199,15 +199,19 @@ independent.
 The light dashboard has an Overall tab and one tab per game. Overall plots venue
 cash, allocated game cash, open contract counts, and expected return over time.
 Expected return divides conditional expected profit by contributed game capital.
-Each game shows venue cash, reservations, and available cash. Two stacked Plotly charts show
-both complementary cross-venue combinations at the same time. Each chart shows
-the two raw ask prices on the left axis and the executable one-set gap after
-rounded fees on the right axis. Positive sampled gaps have green shading;
-isolated positive samples have green dots. Recorded attempts and executed trades
-appear as dots on the time axis, with executions dated by their first booked fill.
-Markers include all activity for the game, and are repeated on both combination charts.
-Gross gap is $1 minus
-the two purchase prices. Fee calculations use rounded taker fees and walk depth
+Each game has one Plotly chart on a single cents axis. Four solid lines show
+raw buy prices: dark/light blue for one team's Kalshi/Polymarket US prices,
+and dark/light orange for the other team's prices. Two solid purple and teal lines show the
+maximum fee-adjusted profit per matched pair in each cross-venue direction.
+For each sample, every integer size up to max_sets is priced through available
+depth. Sizes must fit the recorded pools' available cash, broker fee buffers,
+limit-price funding requirements, and the recorded total capital limit. The
+chart selects the largest net profit per pair, breaking ties by total profit.
+Hover text includes quantity, average leg costs, fees per pair, and basket profit.
+A gap of zero is break-even; positive portions are filled green. The strategy's
+minimum-profit hurdle and execution checks still apply. Attempts and executed
+trades appear once on the time axis, with executions dated by their first fill.
+Gross gap is $1 minus the two purchase prices. Fee calculations use rounded taker fees and walk depth
 for integer sizes up to the recorded max_sets. A sampled opportunity requires
 positive net at a size funded by both venue pools and within the recorded capital
 limits. Strategy edge, return, cooldown, and execution checks are separate;
@@ -216,9 +220,10 @@ an observed opportunity is not an execution recommendation or a guaranteed fill.
 Windows report the first and last positive samples, sample count, and peak quoted
 net. Errors and collection gaps break windows. History begins with collection;
 earlier no-edge scan logs contain no leg prices. Charts grow with all collected
-samples and retain zoom across refreshes. Green chart regions use the one-set
-fee-adjusted gap; the separate funded-window table additionally checks cash and
-size. Times are Pacific.
+samples and retain zoom across refreshes. Green chart regions use the maximum
+affordable gap per pair; the funded-window table reports the maximum total basket profit. Older samples are
+reconstructed from their recorded books, fees, pool cash, and run configuration;
+missing evidence leaves a gap instead of reusing stale books. Times are Pacific.
 
 Trade attempts count recorded preflight/recheck refusals plus distinct submitted
 baskets. Rate-limited diagnostic logs cannot establish every unrecorded retry.

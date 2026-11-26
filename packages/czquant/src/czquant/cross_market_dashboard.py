@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .accounting import State, active_events, combine_states
-from .cross_market_monitor import selections
+from .cross_market_monitor import measure_quotes, selections
 from .store import decimal, encode
 
 ZERO = Decimal(0)
@@ -20,6 +20,31 @@ ZERO = Decimal(0)
 
 def seconds(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def reprice_history(events: list[dict]) -> None:
+    """Reconstruct older gap samples from their recorded books, fees and pool cash."""
+    configs, books = {}, {}
+    for event in events:
+        d = event['data']
+        if event['type'] == 'run' and d.get('strategy') == 'cross-market-polymarket':
+            cfg = d['config']
+            configs[cfg['experiment']['id']] = cfg
+        if event['type'] == 'market' and d.get('source') == 'cross_market_quotes':
+            books[d['ticker']] = d['book']
+        if event['type'] != 'observation' or d.get('kind') != 'cross_market_quote':
+            continue
+        cfg = configs.get(d['experiment_id'])
+        if cfg and d['status'] == 'ok' and any('max_gap' not in r for r in d['routes']):
+            pair = cfg['experiment']['pair']
+            ktickers = [o['kalshi'] for o in pair['outcomes']]
+            pticker = 'PMUS:' + pair['polymarket_market']
+            if all(t in books for t in [*ktickers, pticker]):
+                event['data'] = {**d, **measure_quotes(cfg, {t: books[t] for t in ktickers}, books[pticker],
+                    decimal(d['fee_multiplier']), decimal(d['fee_coefficient']),
+                    {v: decimal(c) for v, c in d['available'].items()}, decimal(d['capital_limit']))}
+        # Only the books collected for this sample may reconstruct its gap.
+        books.clear()
 
 
 def windows(samples: list[dict], now: float) -> list[dict]:
@@ -127,6 +152,7 @@ def snapshot(root: Path) -> dict:
     try:
         db.execute("BEGIN")
         rows = db.execute("""SELECT * FROM events WHERE type IN ('run','transaction','correction','order','health','account_evidence')
+            OR (type='market' AND json_extract(data,'$.source')='cross_market_quotes')
             OR (type='observation' AND json_extract(data,'$.kind') IN
             ('cross_market_quote','heartbeat','scan_complete','halt','halt_cleared','reject','error',
              'basket_execution','order_rejected')) ORDER BY sequence""").fetchall()
@@ -138,6 +164,7 @@ def snapshot(root: Path) -> dict:
     finally:
         db.close()
     configs = selections([e for e in events if e["type"] == "run"])
+    reprice_history(events)
     states = {p["id"]: State() for p in pools}
     cash_history = {c["experiment"]["id"]: [] for c in configs}
     memberships = {c["experiment"]["id"]: set(c["experiment"]["portfolio"].values()) for c in configs}
@@ -223,11 +250,14 @@ def snapshot(root: Path) -> dict:
                       "scan": last.get("scan_complete"), "quote": quote, "windows": windows(quotes, now.timestamp())[:100],
                       "route_labels": next(([{'id': r['id'], 'name': r['name']} for r in e['data']['routes']]
                                              for e in reversed(quotes) if e['data'].get('routes')), []),
+                      "team_names": next(([l['name'] for l in e['data']['legs']]
+                                            for e in reversed(quotes) if e['data'].get('legs')), []),
                       "price_history": [{"at": e["effective_at"], "status": e["data"]["status"],
                         "routes": [{"id": r['id'], "kalshi_price": e['data']['legs'][int(r['id'])]['kalshi_ask'],
                                     "polymarket_price": e['data']['legs'][1-int(r['id'])]['polymarket_ask'],
                                     "net_per_set": r['one_set']['net_per_set'] if r.get('one_set') else None,
-                                    "fee_per_set": r['one_set']['fee_per_set'] if r.get('one_set') else None}
+                                    "fee_per_set": r['one_set']['fee_per_set'] if r.get('one_set') else None,
+                                    "max_gap": r.get('max_gap'), "best": r.get('best')}
                                    for r in e['data']['routes']]} for e in quotes],
                       "cash_history": cash_history[identifier][-3000:] + [{"at": now.isoformat(), "cash": state.cash}],
                       "quote_history_start": quotes[0]["effective_at"] if quotes else None})
