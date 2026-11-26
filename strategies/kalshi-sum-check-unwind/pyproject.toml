@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [tool.uv]
-# Plain scripts on top of ../kalshi_sum_check, not an installable package.
+# Plain scripts with a local copy of the kalshi_sum_check engine, not an installable package.
 package = false
 # OneDrive rejects the hardlinks uv uses by default, which leaves a half-built .venv.
 link-mode = "copy"
@@ -26,8 +26,7 @@ dev = ["pytest>=8", "basedpyright>=1.30"]
 typeCheckingMode = "basic"
 venvPath = "."
 venv = ".venv"
-extraPaths = ["../kalshi_sum_check"]
 exclude = ["tests", ".venv"]
 
 [tool.pytest.ini_options]
-pythonpath = [".", "../kalshi_sum_check"]
+pythonpath = ["."]

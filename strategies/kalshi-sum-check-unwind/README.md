@@ -23,18 +23,19 @@ excess contracts and how many were sold. The selling legs are fills on the same
 
 ## Run
 
-Use a separate paper portfolio, so this strategy's results can be compared with
+Use a separate paper cash pool, so this strategy's results can be compared with
 the base sum check and the retry variant.
 
 ```bash
 uv sync
-uv run czquant portfolio sum-unwind --cash 1000
+uv run czquant pool sum-unwind --venue kalshi --cash 1000
 export STRATEGY_RUNS_DIR=... CZQUANT_PORTFOLIO=sum-unwind
 uv run python unwind.py --preset low --feed rest
 ```
 
-Every flag of the base trader works here (`--help` lists them). It also reads the
-base strategy's presets and `approvals.json` from `../kalshi_sum_check`.
+Every flag of the base trader works here (`--help` lists them). The engine is a
+local copy of the base strategy's modules, presets and `approvals.json`; edit
+them here without affecting the base strategy.
 
 | Flag | Default | Meaning |
 |---|---|---|

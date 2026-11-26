@@ -168,6 +168,8 @@ The strategy-facing operations are:
 - available: inspect that pool's cash after reservations, in either mode.
   Both state and available may lag asynchronous live
   execution evidence; they do not silently turn uncertainty into zero fills.
+- orders(statuses=None): read this pool's broker-owned orders (client order
+  ID, status, booked fill, context) without touching private tables.
 - observe(kind, data): attach diagnostics without changing economic state.
 
 Infrastructure uses acknowledge, fill, finish, settle, and correct to record

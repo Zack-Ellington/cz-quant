@@ -31,18 +31,19 @@ as `complete` and is held to the base strategy's loss halt.
 
 ## Run
 
-Use a separate paper portfolio, so this strategy's results can be compared with
+Use a separate paper cash pool, so this strategy's results can be compared with
 the base sum check and the unwind variant.
 
 ```bash
 uv sync
-uv run czquant portfolio sum-retry --cash 1000
+uv run czquant pool sum-retry --venue kalshi --cash 1000
 export STRATEGY_RUNS_DIR=... CZQUANT_PORTFOLIO=sum-retry
 uv run python retry.py --preset low --feed rest
 ```
 
-Every flag of the base trader works here (`--help` lists them). It also reads the
-base strategy's presets and `approvals.json` from `../kalshi_sum_check`.
+Every flag of the base trader works here (`--help` lists them). The engine is a
+local copy of the base strategy's modules, presets and `approvals.json`; edit
+them here without affecting the base strategy.
 
 | Flag | Default | Meaning |
 |---|---|---|

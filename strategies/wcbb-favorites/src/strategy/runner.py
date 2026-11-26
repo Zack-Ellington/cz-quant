@@ -175,7 +175,7 @@ def run(once: bool = False, broker: Any = None, client: Any = None,
 
         portfolio = os.environ.get("CZQUANT_PORTFOLIO")
         if not portfolio:
-            raise ValueError("Set CZQUANT_PORTFOLIO to an explicitly created paper portfolio")
+            raise ValueError("Set CZQUANT_PORTFOLIO to an explicitly created paper cash pool")
         client = Kalshi(authenticated=False)
         broker = Broker(Store(), portfolio, Paper(client))
     if broker.mode != "paper":

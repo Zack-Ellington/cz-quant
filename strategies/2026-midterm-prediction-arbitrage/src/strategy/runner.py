@@ -16,7 +16,7 @@ paper trade -> paper section.
    fill. The paper section is read back from the ledger.
 
 Every run writes ``runs/<strategy-id>/<UTC timestamp>/`` (see ``ledger.py``).
-Paper mode is the default. ``mode='live'`` trades a portfolio mapped to a Kalshi
+Paper mode is the default. ``mode='live'`` trades a cash pool mapped to a Kalshi
 subaccount through ``strategy.live``, and sends orders only with ``send_orders``.
 
 Everything but the model -- quotes, snapshots, checks, fees, trading, ledger --
