@@ -209,8 +209,8 @@ limit-price funding requirements, and the recorded total capital limit. The
 chart selects the largest net profit per pair, breaking ties by total profit.
 Hover text includes quantity, average leg costs, fees per pair, and basket profit.
 A gap of zero is break-even; positive portions are filled green. The strategy's
-minimum-profit hurdle and execution checks still apply. Attempts and executed
-trades appear once on the time axis, with executions dated by their first fill.
+minimum-profit hurdle and execution checks still apply. Attempts appear as small red vertical ticks on the time axis. Executed trades
+appear as green ticks, dated by their first booked fill.
 Gross gap is $1 minus the two purchase prices. Fee calculations use rounded taker fees and walk depth
 for integer sizes up to the recorded max_sets. A sampled opportunity requires
 positive net at a size funded by both venue pools and within the recorded capital
