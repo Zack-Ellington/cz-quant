@@ -24,7 +24,7 @@ independently.
 
 - [2026-midterm-dependence-arbitrage](strategies/2026-midterm-dependence-arbitrage/): 2026 Congress control (DD/DR/RD/RR) from Kalshi's House and Senate race markets with a calibrated latent-swing model, nine-state model-free checks, and paper trading into `runs/`, against the `KXBALANCEPOWERCOMBO` combo market.
 
-- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. Kalshi NBA, NHL and MLB game markets are paired with Polymarket moneylines by date and team abbreviation, and baskets with a leg on each venue use separate brokers. Polymarket US supports paper and live execution; international Polymarket supports paper execution.
+- [cross-market-polymarket](strategies/cross-market-polymarket/): the sum check across Kalshi and Polymarket. A separate [preprocessing bundle](scripts/cross-market-pairs/) discovers and prepares pairs. Each run prices one selected pair and operates on its funded venue cash pools through separate brokers. Polymarket US supports paper and live execution; international Polymarket supports paper execution.
 
 - [kalshi-sum-check-unwind](strategies/kalshi-sum-check-unwind/): the Kalshi sum check, but when a basket fills only some legs it keeps the complete sets and sells the extra contracts back within a slippage limit.
 
@@ -73,7 +73,7 @@ cd cz-quant
 
 5. Fill in `.env`. Set `KALSHI_API_KEY_ID` to the key ID. Set `KALSHI_PRIVATE_KEY_PATH` to the path of the private key file.
 
-6. Export the variables into your shell. The code reads the environment only. It does not read `.env`. Do this step in each new shell, and again after you change `.env`.
+6. Export the variables into your shell. This strategy reads these settings from the environment. It does not read `.env`. Do this step in each new shell, and again after you change `.env`.
 
    ```bash
    set -a; source .env; set +a
@@ -140,7 +140,9 @@ market and account evidence. Strategies record executions through brokers
 and can attach diagnostics; they do not supply reporting implementations.
 See [reporting](docs/services/reporting.md) for commands and portfolio lifetime.
 
-A cross-market experiment uses two venue cash pools and two brokers in both
+The [cross-market strategy](strategies/cross-market-polymarket/#prepare-configuration)
+selects one pair and two pre-created allocations with --experiment FILE.json.
+Each experiment uses two venue cash pools and two brokers in both
 paper and live mode. A reporting portfolio groups those pools without merging
 their spending authority. Reusing a pool preserves its cash, positions, and
 losses across runs. Paper funding can be arbitrarily large but remains bound
@@ -192,7 +194,8 @@ records remain readable with a deprecation label.
 cz-quant/
 ├── README.md
 ├── scripts/
-│   └── new-strategy.sh          # creates a strategy from the template
+│   ├── new-strategy.sh          # creates a strategy from the template
+│   └── cross-market-pairs/      # discovery, matching and prepared pair export
 ├── packages/czquant/            # broker, accounting, monitors, reports
 ├── research/                    # independent data collection and analysis
 ├── docs/design-principles.md    # authoritative development contract
@@ -226,15 +229,15 @@ entry points. A common command or engine is not a strategy requirement.
 parses the command line, then calls `run()` in `src/strategy/runner.py`. A new
 strategy starts with an empty `run()`.
 
-Configuration comes from the environment only. No code reads `.env`, and no
-strategy depends on a dotenv library. The `.env` file is a convenience for the
-user, who exports it with `set -a; source .env; set +a` before a run. This keeps
-the code the same on a laptop, in a container, and under a scheduler, where the
-platform sets the variables.
+Secrets and API endpoint overrides come from exported environment variables.
+Strategy parameters use each strategy's documented CLI or configuration file;
+the cross-market strategy uses --experiment FILE.json. No code reads .env files,
+and no strategy depends on a dotenv library. An .env file is a shell convenience;
+export it before a run with `set -a; source .env; set +a`.
 
-The Python package is named `strategy` in every strategy. This is safe because
-each strategy installs into its own virtual environment, and it keeps the
-template free of names that must be changed.
+The template and election strategies use a Python package named strategy. Each
+strategy installs into its own virtual environment. Script-based strategies
+have their own documented entry points.
 
 Do not import code from one strategy into another. If two strategies need the
 same research code, copy it so each can change independently. Shared execution

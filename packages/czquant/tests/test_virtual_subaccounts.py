@@ -184,6 +184,9 @@ def test_live_subs_cannot_hold_opposite_sides_of_one_market(tmp_path):
     open_sub(store, "b", "main", "100", api=api)
     Broker(store, "a", Fills(mode="live")).submit(order(side="bid"))  # a holds YES
     b = Broker(store, "b", Fills(mode="live"))
+    before = store.events()
+    assert b.check(order(side="ask"))["reason"] == "cross_pool_netting"
+    assert store.events() == before and b.orders() == []
     result = b.submit(order(side="ask"))  # would buy NO: Kalshi nets it against a's YES
     assert result["status"] == "rejected" and "a holds" in result["reason"]
     assert b.submit(order(side="bid"))["status"] == "executed"  # the same side is fine

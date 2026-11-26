@@ -144,46 +144,65 @@ class Broker:
         return self.store.append("run", {"status": "started", "strategy": strategy,
             "revision": revision, "config": config}, self.pool_id, self.run_id)
 
-    def submit(self, order: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _validate_order(self, order: dict[str, Any]) -> None:
         if self.adapter is None:
             raise ValueError("execution adapter required")
         if getattr(self.adapter, "mode", self.mode) != self.mode:
             raise ValueError("execution adapter and cash pool must use the same mode")
-        order, context = dict(order), json.loads(encode(context or {}))
         self._check_venue(order["ticker"])
         if order["side"] not in ("bid", "ask"):
             raise ValueError("V2 side must be bid or ask (YES book)")
         quantity, price = decimal(order["count"]), decimal(order["price"])
         if quantity <= 0 or not 0 <= price <= 1:
             raise ValueError("invalid quantity or price")
+        self._check_active(order['ticker'])
+        if self.mode == "live" and self.venue == "kalshi":
+            subaccount = self.metadata.get("subaccount")
+            if subaccount is None or order.get("subaccount", subaccount) != subaccount:
+                raise ValueError("live order must use the mapped subaccount")
+            if order.get("exchange_index", self.metadata.get("exchange_index", 0)) != self.metadata.get("exchange_index", 0):
+                raise ValueError("cannot change cash-pool exchange")
+
+    def _check_budget(self, order: dict[str, Any]) -> dict[str, Any]:
+        reserve = self._reservation(order)
+        other = self._netting_conflict(order)
+        if other:
+            return {"status": "rejected", "reason": "cross_pool_netting", "with": other, "reserved": str(reserve),
+                    "detail": f"{other} holds or may open the opposite side of {order['ticker']} on this account"}
+        if reserve > self.available:
+            return {"status": "rejected", "reason": "insufficient_cash", "reserved": str(reserve)}
+        return {"status": "ready", "reserved": str(reserve)}
+
+    def check(self, order: dict[str, Any]) -> dict[str, Any]:
+        """Validate an intended order without reserving cash or contacting the venue.
+
+        Returns ready/rejected and required cash. A ready result is not a reservation;
+        submit repeats these checks atomically when recording the intent.
+        """
+        with self.store.transaction():
+            self._validate_order(order)
+            return self._check_budget(order)
+
+    def submit(self, order: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+        order, context = dict(order), json.loads(encode(context or {}))
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
         with self.store.transaction():
-            self._check_active(order['ticker'])
+            self._validate_order(order)
             if self.mode == "live" and self.venue == "kalshi":
-                subaccount = self.metadata.get("subaccount")
-                if subaccount is None or order.get("subaccount", subaccount) != subaccount:
-                    raise ValueError("live order must use the mapped subaccount")
                 order.pop("subaccount", None)
                 order.update(scope(self.metadata))
-                exchange = self.metadata.get("exchange_index", 0)
-                if order.get("exchange_index", exchange) != exchange:
-                    raise ValueError("cannot change cash-pool exchange")
-                order["exchange_index"] = exchange
+                order["exchange_index"] = self.metadata.get("exchange_index", 0)
             prior = self.store.db.execute("SELECT * FROM orders WHERE id=?", (identifier,)).fetchone()
             if prior:
                 if prior["portfolio_id"] != self.pool_id or prior["request"] != encode(order) or prior["context"] != encode(context):
                     raise ValueError("client order ID reused for a different request")
                 return dict(prior)  # Never resubmit an uncertain write implicitly.
-            reserve = self._reservation(order)
-            other = self._netting_conflict(order)
-            if other:
-                self.observe("order_rejected", {"reason": "cross_pool_netting", "with": other,
-                                                "order": order, "context": context})
+            checked = self._check_budget(order)
+            if checked["status"] == "rejected":
+                self.observe("order_rejected", {**checked, "order": order, "context": context})
                 return {"client_order_id": identifier, "status": "rejected", "filled": "0",
-                        "reason": f"{other} holds or may open the opposite side of {order['ticker']} on this account"}
-            if reserve > self.available:
-                self.observe("order_rejected", {"reason": "insufficient_cash", "order": order, "context": context})
-                return {"client_order_id": identifier, "status": "rejected", "filled": "0"}
+                        "reason": checked.get("detail", checked["reason"])}
+            reserve = decimal(checked["reserved"])
             self.store.db.execute("INSERT INTO orders(id,portfolio_id,run_id,request,context,status,reserved) VALUES(?,?,?,?,?,?,?)",
                                   (identifier, self.pool_id, self.run_id, encode(order), encode(context), "pending", str(reserve)))
             self.store.append("order", {"status": "intent", "order": order, "context": context, "reserved": str(reserve)}, self.pool_id, self.run_id)

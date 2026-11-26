@@ -170,11 +170,8 @@ def match(game: KalshiGame, polys: list[PolyGame], aliases: dict[str, str] | Non
 def load_pairs(path: str = PAIRS) -> dict[str, Any]:
     """{"pairs": {kalshi_event: {"slug": polymarket_slug, "legs": {kalshi_ticker: polymarket_abbr}}},
     "blocked": [kalshi_event]}"""
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
     return {"pairs": data.get("pairs") or {}, "blocked": set(data.get("blocked") or [])}
 
 

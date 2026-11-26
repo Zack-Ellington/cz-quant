@@ -50,8 +50,8 @@ for a different selection. Portfolio totals overlap their constituent pool
 rows; never sum all output rows as though they were independent holdings.
 
 Reuse the same STRATEGY_RUNS_DIR and pool IDs on every strategy restart. The
-cross-market strategy selects them with CZQUANT_KALSHI_POOL and
-CZQUANT_POLYMARKET_POOL. Each invocation records a new run ID and revision;
+cross-market strategy selects them through the portfolio venue-to-pool mapping
+in its --experiment JSON file. Each invocation records a new run ID and revision;
 existing cash, positions, fees, losses, orders and reservations persist.
 Separate experiments need separate pools; a new run or reporting group does
 not create an independent allocation.

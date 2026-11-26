@@ -135,9 +135,10 @@ without placing an order:
 uv run czquant check-polymarket-us
 ```
 
-Map the account to a new Polymarket US cash pool. It must be flat with no
-open orders. The current US account collector supports one active live pool;
-shared Kalshi allocations remain supported independently.
+The map-live command maps a flat account with no open orders to one Polymarket
+US cash pool. For several pools on the same account, use account registration
+and open-sub as described in [virtual subaccounts](virtual-subaccounts.md).
+The account monitor reconciles those registered allocations together.
 
 ```bash
 uv run czquant map-live example-us-live --venue polymarket-us

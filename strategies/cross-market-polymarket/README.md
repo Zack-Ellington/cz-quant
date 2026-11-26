@@ -1,194 +1,203 @@
-# Cross-market Polymarket strategy
+# Cross-market Polymarket experiments
 
-This strategy compares equivalent outcomes on Kalshi and Polymarket, then buys
-a complete set when the estimated payout exceeds cost and fees. It uses
-Polymarket US by default, on paper or live. International Polymarket is available
-for paper experiments with --venue polymarket.
+Each run trades one prepared market pair. Its portfolio selects two funded cash
+pools, one per venue. The strategy prices the pair, sizes a complete set and
+submits every entry and repair through the broker for that venue's pool.
+Multiple independent experiments use distinct pools and run as separate processes.
 
-A complete set pays as expected only if both venues resolve the question the
-same way. Differences in deadlines, ties, postponements, or settlement rules
-can turn an apparent edge into a loss. Pairing evidence is recorded with every
-order; partial execution leaves directional exposure.
+A complete set has an estimated $1 payout only when the venues resolve equivalent
+outcomes. Review deadlines, ties, postponements and settlement rules before
+selecting the pair. Matching names alone does not establish equivalent payouts.
 
-## Architecture
+## Separation of responsibilities
 
-The strategy owns discovery, matching, pricing, sizing, sequencing, and risk
-policy. It reads venue data directly and imports no other strategy. Every
-entry, exit, and unwind goes through one of two venue-bound brokers.
+[Pair preprocessing](../../scripts/cross-market-pairs/) discovers markets, matches
+teams or questions, applies aliases and reviewed overrides, and exports outcome
+mappings. It does not open cash pools or execute orders. The runtime does not
+import these tools, enumerate markets or refresh its selection. It reads metadata
+and prices only for the pair in its configuration.
+
+Cash pools persist independently of runs. Brokers enforce venue, mode, ownership,
+market scope, reservations and available cash. Startup never creates or funds a
+pool. A new experiment ID does not reset cash, losses or positions. The optional
+`czquant portfolio` command creates a reporting group; that group is not used by
+the strategy and has no additional buying power.
 
 ```mermaid
 flowchart LR
-    K[Kalshi reader] --> S[Strategy]
-    P[Polymarket reader] --> S
-    S --> KB[Kalshi broker]
-    S --> PB[Polymarket broker]
-    KB --> L[(Shared ledger)]
-    PB --> L
-    M[Independent monitors] --> L
-    L --> R[Reporting]
+    D[Discovery and review] --> P[Prepared pair]
+    P --> S[One strategy run]
+    S --> K[Kalshi broker]
+    S --> U[Polymarket broker]
+    K --> KC[Funded Kalshi cash pool]
+    U --> UC[Funded Polymarket cash pool]
+    K --> L[(Economic log)]
+    U --> L
+    L --> R[Independent reporting]
 ```
 
-Each broker owns one venue cash pool. Both record the same run ID, and optional
-order context links legs by trade_id; execution is not atomic. Paper and live
-use the same pool ownership, cash checks and reservations. Paper balances can
-be arbitrarily large but cannot fund another venue. Restarts retain both pools'
-positions, losses and standing halts. Reporting can group the pools independently.
-
-- matching.py pairs sports events by teams, date, and start time. leagues.json
-  supplies aliases and rule notes. pairs.us.json and pairs.json contain pins
-  and exclusions for the US and international venues respectively.
-- markets.py loads non-sports question pairs for international paper runs.
-- sum_check.py walks both books, applies fees, and sizes candidates against
-  capital limits and the configured return hurdle.
-- trader.py coordinates the run. It rechecks a candidate, sends its thinnest
-  leg first as an IOC order, and limits later legs to the smallest fill so far.
-  Excess contracts are offered back with reduce-only IOC orders within the
-  configured slippage. Unknown outcomes halt execution before another leg.
-
-The [design principles](../../docs/design-principles.md) define the contract.
+The [design principles](../../docs/design-principles.md) define the broker contract.
 The [Kalshi](../../docs/services/kalshi-broker.md) and
-[Polymarket](../../docs/services/polymarket-broker.md) guides describe broker
-capabilities, credentials, fee evidence, account allocation, and recovery.
+[Polymarket](../../docs/services/polymarket-broker.md) service guides cover account
+mapping, execution capabilities and explicit capital operations.
 
-## Paper run
+## Prepare configuration
 
-Run from this strategy directory. Set STRATEGY_RUNS_DIR to persistent storage
-outside the checkout. Configuration comes from exported environment variables;
-.env.example lists them, but the program does not load an environment file.
+The runtime interface is `uv run python trader.py --experiment FILE.json`, with
+optional --once. The file specifies an ID, portfolio, mode, one pair and parameters.
+There are no environment pool selectors, discovery flags or parameter overrides.
+Secrets come from exported environment variables; no dotenv file is loaded.
+
+From the repository root, prepare sports candidates using public endpoints:
+
+```bash
+export STRATEGY_RUNS_DIR=/absolute/path/to/czquant-runs
+mkdir -p "$STRATEGY_RUNS_DIR/experiments"
+uv run --project strategies/cross-market-polymarket python scripts/cross-market-pairs/prepare.py \
+  --venue polymarket-us --leagues nba --out "$STRATEGY_RUNS_DIR/experiments/candidates.json"
+```
+
+Review the candidates and both venues' rules. Copy
+[game-a.example.json](experiments/game-a.example.json) to your private experiment
+directory. Replace its entire pair object with one reviewed object from the
+candidate file's pairs array. The example identifiers and resolution date are
+placeholders, not current listings. [game-b.example.json](experiments/game-b.example.json)
+uses different pool IDs for a second experiment.
+
+The portfolio maps venue names to pre-created cash pool IDs:
+
+```json
+{
+  "id": "game-a",
+  "portfolio": {"kalshi": "game-a-kalshi", "polymarket_us": "game-a-us"},
+  "mode": "paper"
+}
+```
+
+The pair object has venue, kalshi_event, kalshi_series, polymarket_event,
+polymarket_market, resolves_at, outcomes and optional evidence. Preprocessing
+resolves aliases and question inversion into the two explicit outcome mappings.
+For US markets, the mappings use YES and NO on one PMUS: market slug. For
+international markets, they use two PM: token IDs with side YES; only paper
+execution is supported. resolves_at is a timezone-aware estimate used for the
+return hurdle. evidence retains the matching method and reviewed rules.
+
+Parameters omitted from the file use [Config defaults](trader.py):
+
+- interval_seconds, cooldown and duration_minutes control timing. A null duration
+  runs until stopped.
+- max_capital_frac limits outstanding cost relative to contributed capital.
+  max_sets limits basket size. max_basket_dollars and max_total_dollars impose
+  absolute limits; null disables the respective dollar cap.
+- risk_free, min_net, min_edge and max_apr control the return hurdle.
+- require_cross defaults to true. False permits both outcomes at one venue.
+  Opposite sides of the same market are refused because their fills would net.
+- unwind_slippage limits repair prices. kalshi_latency and polymarket_latency
+  specify paper execution delays.
+- pmus_theta overrides US pricing and paper fees. Null uses the market coefficient;
+  this parameter does not change live venue fees.
+- dry_run requires live mode and builds orders without submitting them.
+  monitor_max_age limits the age of live monitor evidence.
+
+Both brokers record the full resolved configuration and code revision at run
+start. Each order includes the experiment ID, selected pair and shared trade ID.
+Reporting reads the economic log without importing the strategy.
+
+## Fund once and run
+
+From this strategy directory, create the two paper pools after preparing the
+experiment file. Funding is an explicit operation outside the strategy:
 
 ```bash
 uv sync --locked
-export CZQUANT_KALSHI_POOL=cross-kalshi-paper
-export CZQUANT_POLYMARKET_POOL=cross-us-paper
-uv run czquant pool "$CZQUANT_KALSHI_POOL" --venue kalshi --cash 600
-uv run czquant pool "$CZQUANT_POLYMARKET_POOL" --venue polymarket-us --cash 400
-uv run python trader.py --once --leagues nba
+uv run czquant pool game-a-kalshi --venue kalshi --cash 60
+uv run czquant pool game-a-us --venue polymarket-us --cash 40
+uv run python trader.py --experiment "$STRATEGY_RUNS_DIR/experiments/game-a.json" --once
 ```
 
-Create each pool once with its own hypothetical funding. The amounts above
-are examples, not limits. Subsequent runs reuse the same two pool IDs:
+Repeat only the run command on restart. Cash, positions, losses and reservations
+remain in the same pools. The pools can be used by a later run; unresolved orders
+or incompatible holdings must be reconciled first. Each run considers one pair.
+
+For a second reviewed pair, prepare game-b.json and fund its separate pools once:
 
 ```bash
-uv run python trader.py --duration 4:00
+uv run czquant pool game-b-kalshi --venue kalshi --cash 60
+uv run czquant pool game-b-us --venue polymarket-us --cash 40
 ```
 
-For international paper trading, create the second pool with --venue polymarket,
-select its ID in CZQUANT_POLYMARKET_POOL, and run the trader with --venue polymarket. The US market uses
-one PMUS: slug with YES/NO sides. International markets use separate PM:
-outcome-token IDs. The broker adapters keep those representations distinct.
-
-Run the reference collectors in separate shells with the same logging root:
+Run the two experiments in parallel from the same shell:
 
 ```bash
-uv run czquant monitor market
-uv run czquant monitor polymarket-us
+uv run python trader.py --experiment "$STRATEGY_RUNS_DIR/experiments/game-a.json" &
+uv run python trader.py --experiment "$STRATEGY_RUNS_DIR/experiments/game-b.json" &
+wait
 ```
 
-Use monitor polymarket instead of polymarket-us for international tokens.
-Public outcomes settle paper holdings. The shared dashboard and reports read
-the same ledger without importing this strategy.
+Each experiment spends only its pools' cash. Use one process per experiment and
+distinct pool IDs for independent runs. Both processes use the same economic log;
+their diagnostic directories and KILL files are separated by pool IDs.
 
-## Live run
+## Live preparation and recovery
 
-Follow the [live mapping guide](../../docs/services/polymarket-broker.md#us-live-mapping-and-execution)
-to create a Kalshi cash pool and a separate Polymarket US cash pool.
-Shared Kalshi accounts and explicit ledger allocations are supported.
-Live trading is available only with Polymarket US.
+Live execution requires Polymarket US and pre-created live allocations. Follow
+the [virtual-subaccount guide](../../docs/services/virtual-subaccounts.md):
+register each venue account with czquant account, then use czquant open-sub to
+allocate two dedicated pools per experiment. Optional --markets scopes are
+enforced by the brokers. Several US pools require account-wide reconciliation;
+repeating map-live cannot prepare these allocations. Registered accounts also
+prevent experiments from opening opposite sides of the same market.
+Set mode to live, select the live pool IDs and set parameters.dry_run to true
+for a dry run. Export the credentials listed in .env.example. The runtime does
+not create accounts, move funds or manage allocation ownership.
 
-Run monitor market for Kalshi price references, monitor account for Kalshi
-execution recovery, and monitor polymarket-us for US references and account
-reconciliation. Live settlement requires account evidence.
+Run the independent market and account collectors documented in the service
+guides against the same logging root. Live runs wait for fresh account and
+Polymarket US monitor evidence. Dry runs skip monitor freshness checks while
+retaining allocation and unresolved-order checks.
 
-A dry run builds orders and sends none:
+Before submitting either leg, the strategy reprices the selected pair and calls
+Broker.check for both intended orders. It also checks aggregate basket cost and
+existing holdings. Broker.submit repeats its checks and reserves funds atomically
+for each order. Separate venue orders are not atomic; a preflight result does
+not reserve cash or guarantee a fill. Insufficient funding, opposite inventory
+or a reconciliation pause records a rejection and leaves the process running.
+Invalid pool, scope or pair configuration raises an error before submission.
+
+The thinnest leg goes first as an IOC. Later legs use the smallest known fill.
+Known partial fills or failures trigger reduce-only repair of excess holdings.
+Unknown results stop further submissions and retain reservations for reconciliation.
+Incomplete repairs, unresolved inventory, settlement losses, monitor discrepancies
+and KILL files leave a persistent halt.
+
+Restart reads the existing economic records and cooldown. It does not retry
+uncertain orders with new IDs. Acknowledged orders pause entries without a
+persistent halt until the monitor books their fills and releases reservations.
+Pending or unknown writes still halt. Inventory completeness is checked after
+outstanding orders are reconciled; incomplete inventory then halts unless a
+completed basket is partway through settlement. Inspect and reconcile the
+affected pools before clearing a halt:
 
 ```bash
-export CZQUANT_KALSHI_POOL=example-kalshi-live
-export CZQUANT_POLYMARKET_POOL=example-us-live
-uv run python trader.py --live --dry-run --leagues nba --once
+uv run czquant halts game-a-kalshi
+uv run czquant clear-halt game-a-kalshi --halt-id HALT_RECORD_ID --reason "Reviewed reconciliation and remaining exposure"
 ```
 
-A live run sends real IOC orders:
-
-```bash
-uv run python trader.py --live --leagues nba --max-basket-dollars 25 --max-total-dollars 100
-```
-
-Both modes default to $25 per basket, $100 total exposure, and 20 sets per
-basket. Set larger caps explicitly for experiments that need them.
-Each venue must have enough recorded available cash for its leg. Kalshi fills
-arrive through account recovery, so reservations count toward exposure until
-reconciled. US fills are recorded from synchronous execution reports.
-
-This strategy pauses when either account monitor is missing or older than
-five minutes. It halts on an unknown order outcome, a cash-pool discrepancy,
-a complete basket settling at a loss, or a KILL file under
-STRATEGY_RUNS_DIR/diagnostics/cross-market-polymarket/<kalshi-pool>/<polymarket-pool>/. Halts persist across restarts;
-inspect and resolve their evidence before using czquant clear-halt. Partial
-basket losses are recorded but do not by themselves trigger the complete-set
-loss rule. Dry runs skip monitor freshness checks.
-
-These checks are this strategy's risk policy. They are not broker requirements
-for other strategies. Live integration limits are documented in the
-[Polymarket guide](../../docs/services/polymarket-broker.md#us-live-mapping-and-execution).
-
-## Experiment settings
-
-Use trader.py --help for all flags. The main controls are:
-
-| Flag | Default | Controls |
-| --- | --- | --- |
-| --leagues | Enabled leagues | Sports universe |
-| --interval | 15 seconds | Scan interval |
-| --discover | 10 minutes | Universe refresh |
-| --max-event-frac | 0.10 | Capital per event |
-| --max-sets | 20 in both modes | Basket size |
-| --min-edge | 0.01 | Net edge per set |
-| --min-net | 0.25 | Net dollars per basket |
-| --risk-free | 0.05 | Annual return hurdle |
-| --unwind-slippage | 0.05 | Exit price allowance |
-| --cooldown | 300 seconds | Repeat-event delay |
-| --any-venue | Off | Allow single-venue sets |
-| --no-markets | Off | Skip non-sports pairs |
-
-Pricing uses Kalshi's series fee multiplier and the selected Polymarket
-market's fee schedule. --pmus-theta overrides the coefficient used for US
-pricing and paper simulation; it does not change live fees.
-
-## Research tools
-
-For international non-sports questions, find_pairs.py proposes matches:
-
-```bash
-uv run python find_pairs.py --source scan
-```
-
-With ODDPOOL_API_KEY, the default source uses Oddpool series search;
---topics fed,cpi narrows it. Review wording, dates, source, cancellation,
-and tie rules before copying a candidate into markets.json. Auto-approval
-with --auto-approve writes unreviewed markets.auto.json for paper benchmarking.
-Reviewed entries take precedence. These pairs are skipped on Polymarket US.
-
-## Reporting
-
-An optional reporting portfolio groups the existing pools without changing their cash:
-
-```bash
-uv run czquant portfolio cross-market-paper --pools "$CZQUANT_KALSHI_POOL" "$CZQUANT_POLYMARKET_POOL"
-```
-
-Use the shared [reporting service](../../docs/services/reporting.md) from
-packages/czquant with the same STRATEGY_RUNS_DIR. Its dashboard shows current
-pool economics, portfolio totals, and monitor health; frozen reports compare them over
-a specified window. Both read the shared ledger without running or importing
-this strategy. The strategy records order context and diagnostics for external
-analysis and does not host its own reporting view.
+Clearing a halt does not erase orders or inventory; unresolved conditions halt
+again. Keep the ledger and pool identities during recovery. The independent
+[reporting service](../../docs/services/reporting.md) provides performance views,
+export and backup.
 
 ## Validation
+
+Offline tests use fake venues, including fake live adapters:
 
 ```bash
 uv run pytest -q
 uv run basedpyright
 ```
 
-Fixture tests cover matching, pricing, two-broker execution, partial fills,
-unwinds, restart recovery, and live guards without placing real orders.
+These checks cover preprocessing exports, one-pair runtime isolation, independent
+cash pools, whole-basket preflight, retained balances and reservations, restarts,
+partial-fill repairs and unknown execution outcomes. Type checking includes the
+preprocessing bundle.
