@@ -2,6 +2,10 @@
 
 launch.py starts one independent live strategy process per prepared Kalshi / Polymarket US pair. It assigns $10 per venue per game, with a $20 exposure cap per game, and starts both account monitors. It submits real orders through the existing strategy.
 
+Entry requires at least $0.01 net profit per matched pair after fees. The launcher
+sets min_net to zero, so there is no separate minimum dollar profit per basket.
+Pool funding, capital limits, the return hurdle, and execution checks still apply.
+
 Export the credentials and STRATEGY_RUNS_DIR described in the strategy README. Use the existing ledger for accounts already managed by cz-quant. Supply a reviewed candidate file from scripts/cross-market-pairs/prepare.py:
 
 ```bash

@@ -35,6 +35,7 @@ def experiments(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                                      "polymarket_us": identifier + "-pmus"},
                        "parameters": {"dry_run": False, "max_capital_frac": 1.0,
                                       "max_basket_dollars": 20, "max_total_dollars": 20,
+                                      "min_net": 0, "min_edge": 0.01,
                                       "require_cross": True}})
     if not result or len({e["id"] for e in result}) != len(result):
         raise ValueError("select at least one pair, with no duplicate Kalshi events")

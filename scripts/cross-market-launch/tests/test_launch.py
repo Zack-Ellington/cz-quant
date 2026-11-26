@@ -26,6 +26,8 @@ def test_two_games_have_four_distinct_pools_and_explicit_live_caps():
         assert config["parameters"]["dry_run"] is False
         assert config["parameters"]["max_total_dollars"] == 20
         assert config["parameters"]["max_capital_frac"] == 1
+        assert config["parameters"]["min_net"] == 0
+        assert config["parameters"]["min_edge"] == .01
 
 
 def test_duplicate_or_international_pairs_are_refused():
