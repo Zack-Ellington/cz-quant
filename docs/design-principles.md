@@ -7,6 +7,9 @@ The [service guides](../README.md#shared-services) describe available
 implementations and commands. This document owns the shared interface and
 economic schema; service guides describe how to use them.
 
+Terms such as venue, account, cash pool and portfolio are summarized in the
+[glossary](glossary.md); this document remains authoritative.
+
 ## Purpose
 
 CZ Quant exists to try, replace, and discard many trading strategies. Most
@@ -23,11 +26,16 @@ and a common economic record. Keep research choices inside each strategy.
 
 1. Optimize for experimentation. Rewrites and duplication are valid design
    choices. Do not preserve an abstraction merely because several strategies
-   currently resemble one another.
+   currently resemble one another. A strategy directory and its recorded
+   run configuration should be enough to reproduce a run. Variants are
+   separate strategy copies or separate runs with distinct revisions and
+   configurations.
 2. Measure strategies consistently. Record actual or simulated executions,
    capital flows, and positions in a common format. Apply the same reporting
    policy to the portfolios being compared, with differences in execution
-   assumptions and evidence coverage made explicit.
+   assumptions and evidence coverage made explicit. Comparability comes from
+   the broker's economic record, not from shared strategy configuration;
+   configuration is recorded opaquely for provenance.
 3. Keep every strategy independent. A strategy owns its models, market
    readers, matching, sizing, execution sequence, configuration, dependencies,
    and schedule. It must be possible to change or retire it without changing
@@ -45,7 +53,8 @@ and a common economic record. Keep research choices inside each strategy.
    strategy must make every trade through a broker, including exits, repairs, and retries. Use a broker for each venue
    and allocation being traded. Shared accounts and allocation management belong
    in broker infrastructure and must preserve ownership of every cash and
-   position change.
+   position change. Pools may be sized unevenly; see
+   [fair comparison](#storage-and-fair-comparison) for how totals combine them.
 6. Keep reporting observation independent of strategy decisions. Account and
    market monitors collect references for accounting and comparison. Strategies
    may read markets directly and need not call monitors, read their storage, or
@@ -111,7 +120,9 @@ flowchart LR
 A strategy may use as many broker instances as its experiment needs. For
 example, a strategy trading two venues uses two brokers that write to the
 same logging directory. Optional context can link their orders for analysis.
-The strategy controls order sequencing and partial-fill handling. A common
+Data a strategy uses to decide, including historical data, is selected and
+owned by that strategy; market monitors supply reference data for reporting
+only. The strategy controls order sequencing and partial-fill handling. A common
 trade identifier does not promise atomic execution across venues.
 
 Several experimental allocations may share one real account. The account is
@@ -348,8 +359,8 @@ strategy research, and they are not permanent properties of the broker API.
 A strategy change should be implementable without modifying another
 strategy. A new strategy should require no changes to the reporting code
 when its executions fit the existing economic schema. If a new instrument
-cannot be represented faithfully, extend accounting and its evidence rather
-than forcing the experiment into misleading binary-contract semantics.
+cannot be represented faithfully by the existing schema, extend accounting
+and its evidence rather than forcing the experiment into misleading binary-contract semantics.
 
 A broker change should preserve auditable ownership and economic facts while
 leaving venue-specific execution possible. A monitor change should improve

@@ -168,7 +168,9 @@ credentials or requests are needed. --host and --port change the binding;
 --interval controls refresh and --step controls the history grid.
 
 The dashboard reads the common store and uses a rebuildable replay cache
-under the shared root. It is an operational view, not the frozen comparison
+under the shared root. Paper and live pools are computed by the same replay and metrics; differences
+should arise only from execution evidence and recorded fill assumptions. It is
+an operational view, not the frozen comparison
 artifact produced by the report command. A heartbeat indicates activity,
 not profitability or complete evidence.
 
