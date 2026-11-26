@@ -156,6 +156,13 @@ guides against the same logging root. Live runs wait for fresh account and
 Polymarket US monitor evidence. Dry runs skip monitor freshness checks while
 retaining allocation and unresolved-order checks.
 
+Basket sizing uses the available cash in each selected portfolio's broker pool,
+including existing reservations. Candidate sizes must cover both the broker's
+fee allowance and the quoted fees at each leg's limit price. The search reduces
+quantity to fit each venue before choosing a profitable basket; it cannot use
+another game's allocation or the account reserve. Aggregate capital and profit
+thresholds still apply.
+
 Before submitting either leg, the strategy reprices the selected pair and calls
 Broker.check for both intended orders. It also checks aggregate basket cost and
 existing holdings. Broker.submit repeats its checks and reserves funds atomically

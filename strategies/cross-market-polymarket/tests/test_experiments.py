@@ -418,3 +418,106 @@ def test_same_market_opposite_basket_legs_are_rejected_before_submission(setup, 
     engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
     assert "opposite" in store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["detail"]
+
+
+def pool_sizing_engine(setup, mode='paper', kalshi_price='.16', us_price='.79', us_cash='10'):
+    store, create, build = setup
+    engine = build(create(mode=mode), max_sets=20, min_net=.01, pmus_theta=.11)
+    for broker, cash in ((engine.kalshi_broker, '10'), (engine.poly_broker, us_cash)):
+        delta = D(cash) - broker.state().cash
+        store.append('transaction', {'reason': 'funding', 'cash_delta': str(delta),
+                                    'external_delta': str(delta), 'legs': []}, broker.pool_id)
+    engine.kalshi.asks = {'BOS': kalshi_price, 'SAC': '.99'}
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+        'bids': [{'px': {'value': str(1-D(us_price))}, 'qty': '100'}],
+        'offers': [{'px': {'value': str(1-D(us_price)+D('.02'))}, 'qty': '100'}]}}
+    return engine
+
+
+@pytest.mark.parametrize('mode', ['paper', 'live'])
+@pytest.mark.parametrize('kalshi_price,us_price', [('.16', '.79'), ('.79', '.16')])
+def test_sizing_fits_each_pool_and_executes_smaller_profitable_basket(setup, mode, kalshi_price, us_price):
+    engine = pool_sizing_engine(setup, mode, kalshi_price, us_price)
+    engine.cfg.min_net = .25  # Preserve the production profit hurdle.
+    before = engine.store.events(kinds=('transaction', 'order', 'execution'))
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 12 and basket.net >= D('.25')
+    assert engine.check_basket(basket) is None
+    assert engine.store.events(kinds=('transaction', 'order', 'execution')) == before
+    assert all(b.available == 10 for b in engine.brokers.values())
+    engine.execute(basket)  # Offline fixtures only, including the fake live adapters.
+    assert engine.counters['baskets'] == 1
+    assert all(b.available >= 0 for b in engine.brokers.values())
+    assert all(sum(lot['quantity'] for lot in b.state().lots.values()) == 12 for b in engine.brokers.values())
+    assert not engine.poly.sent
+
+
+def test_sizing_uses_broker_fee_buffer_and_respects_profit_hurdle(setup):
+    engine = pool_sizing_engine(setup, us_cash='9.70')
+    # Twelve NO contracts cost 9.48 + quoted fee .22, but the broker reserves 9.78.
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 11
+    assert engine.check_basket(basket) is None
+    engine.cfg.min_net = .26  # The affordable basket earns .24; do not relax the hurdle.
+    assert engine.scan() is None
+
+
+def test_sizing_subtracts_pending_reservations_and_ignores_other_pools(setup):
+    store, create, build = setup
+    engine = pool_sizing_engine(setup)
+    other = build(create('b'))
+    other_before = [b.available for b in other.brokers.values()]
+    broker = engine.poly_broker
+    # Reserve 1.80 with a fake acknowledged order, without a fill or cash transfer.
+    broker.adapter.create_order = lambda order, b: b.finish(order['client_order_id'], 'acknowledged', release=False)
+    broker.submit({'ticker': 'PMUS:'+engine.pair.polymarket_market, 'side': 'ask', 'price': '.125', 'count': '2'})
+    assert broker.available == D('8.20')
+    before = store.events(kinds=('transaction', 'order', 'execution'))
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 10
+    assert engine.budget_block(basket) is None
+    assert store.events(kinds=('transaction', 'order', 'execution')) == before
+    assert [b.available for b in other.brokers.values()] == other_before
+    assert broker.available == D('8.20')
+
+
+def test_sizing_uses_limit_cost_when_depth_crosses_a_price_level(setup):
+    engine = pool_sizing_engine(setup, kalshi_price='.10', us_cash='5')
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+        'bids': [{'px': {'value': '.80'}, 'qty': '5'}, {'px': {'value': '.20'}, 'qty': '100'}],
+        'offers': [{'px': {'value': '.82'}, 'qty': '100'}]}}
+    # Seven cost only 2.60 at VWAP but require >5 at the .80 limit. Six fit.
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 6
+    assert engine.check_basket(basket) is None
+
+
+def test_sizing_returns_no_basket_when_neither_route_can_fund_one_set(setup):
+    engine = pool_sizing_engine(setup, us_cash='.01')
+    basket, reason = engine.price_pair()
+    assert basket is None and reason == 'capital_limit'
+    assert not engine.store.events(kinds=('order', 'execution'))
+
+
+def test_sizing_aggregates_multiple_legs_on_the_same_venue(setup):
+    engine = pool_sizing_engine(setup)
+    engine.cfg.require_cross = False
+    engine.kalshi.asks = {'BOS': '.4', 'SAC': '.4'}
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+        'bids': [{'px': {'value': '.5'}, 'qty': '100'}],
+        'offers': [{'px': {'value': '.5'}, 'qty': '100'}]}}
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 11  # Twelve reserve 2 × 5.01 > 10.
+    assert all(leg['venue'] == 'kalshi' for leg in basket.legs)
+    assert engine.check_basket(basket) is None
+
+
+def test_execution_reprices_size_after_selected_pool_cash_changes(setup):
+    engine = pool_sizing_engine(setup)
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 12
+    engine.store.append('transaction', {'reason': 'funding', 'cash_delta': '-3',
+                        'external_delta': '-3', 'legs': []}, engine.poly_broker.pool_id)
+    engine.execute(basket)
+    assert engine.counters['baskets'] == 1
+    assert all(sum(lot['quantity'] for lot in b.state().lots.values()) == 8 for b in engine.brokers.values())

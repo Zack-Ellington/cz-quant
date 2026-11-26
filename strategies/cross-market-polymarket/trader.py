@@ -124,13 +124,8 @@ class Engine:
                 if (lot["market"], lot["side"].upper()) not in self.pair.contracts(venue):
                     raise ValueError(f"incompatible existing holdings in {broker.pool_id}; reconcile before starting this pair")
 
-    def check_basket(self, basket: Basket) -> str | None:
-        self.validate_inventory()
-        block = "halted" if self.halted else self.live_block()
-        if block:
-            return block
-        if len({leg["ticker"] for leg in basket.legs}) != len(basket.legs):
-            return "basket contains opposite sides of the same market; fills would net"
+    def budget_block(self, basket: Basket) -> str | None:
+        """Check limit costs and broker reservations against each selected pool."""
         need: dict[str, Decimal] = {}
         for leg in basket.legs:
             venue = venue_of(leg["ticker"])
@@ -146,6 +141,18 @@ class Engine:
             need[venue] = need.get(venue, Decimal(0)) + required
         if any(self.brokers[venue].available < amount for venue, amount in need.items()):
             return "selected allocation cannot fund the full basket at its limit prices"
+        return None
+
+    def check_basket(self, basket: Basket) -> str | None:
+        self.validate_inventory()
+        block = "halted" if self.halted else self.live_block()
+        if block:
+            return block
+        if len({leg["ticker"] for leg in basket.legs}) != len(basket.legs):
+            return "basket contains opposite sides of the same market; fills would net"
+        block = self.budget_block(basket)
+        if block:
+            return block
         # Opposite inventory would close an existing position instead of buying a set.
         for leg in basket.legs:
             if any(lot["market"] == leg["ticker"] and lot["side"].upper() != leg["contract"]
@@ -335,7 +342,7 @@ class Engine:
         days = max((datetime.fromisoformat(pair.resolves_at).timestamp() - time.time()) / 86400, 1 / 24)
         return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, self.limits(),
                     Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr,
-                    self.cfg.require_cross)
+                    self.cfg.require_cross, fundable=lambda basket: self.budget_block(basket) is None)
 
     def scan(self) -> Basket | None:
         self.counters["scans"] += 1

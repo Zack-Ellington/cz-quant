@@ -186,13 +186,15 @@ def test_restart_recovers_both_venues_without_refunding(engine_for):
     assert len(restarted.kalshi_broker.state().lots) == len(restarted.poly_broker.state().lots) == 1
 
 
-def test_paper_rejects_a_basket_when_only_the_other_venue_has_enough_cash(engine_for):
+def test_paper_sizes_to_the_venue_with_less_cash(engine_for):
     engine = engine_for()
     engine.store.append('transaction', {'reason': 'funding', 'cash_delta': '-390',
                                       'external_delta': '-390', 'legs': []}, engine.poly_broker.pool_id)
     engine.step()
-    assert engine.kalshi_broker.available == 600 and engine.poly_broker.available == 10
-    assert not engine.store.events(kinds=('order',))
+    assert engine.counters['baskets'] == 1
+    assert 0 <= engine.poly_broker.available < 10
+    assert 0 <= engine.kalshi_broker.available < 600
+    assert all(sum(lot['quantity'] for lot in b.state().lots.values()) == 25 for b in engine.brokers.values())
 
 
 def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch):
