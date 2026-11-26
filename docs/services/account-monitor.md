@@ -104,6 +104,9 @@ without its venue ID. That order remains a discrepancy for investigation.
 Supported deposits, withdrawals, rebates, and deposit advances are logged as
 separate account effects. Pending advances and their reversals change funding,
 not trading profit. Balance and position snapshots retain the account evidence.
+On registered accounts, funding goes to the reserve. Rebates without pool ownership
+evidence remain quarantined and nonspendable; they are reported as unattributed_rebate
+rather than assigned to the reserve. See [virtual subaccounts](virtual-subaccounts.md).
 A public resolution can retire live lots only when the observed account no
 longer holds them and its cash matches the recorded balance plus their payout.
 If those observations disagree, the lots remain and reconciliation reports

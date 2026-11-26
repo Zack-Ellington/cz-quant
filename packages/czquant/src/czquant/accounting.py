@@ -90,7 +90,9 @@ class State:
         if d["reason"] == "settlement":
             self.settlements += 1
         if qty > 0:
-            self.lots[event["record_id"]] = {**leg, "quantity": qty, "cost": -cash - prepaid,
+            # In-kind funding carries basis as external capital, with no cash or
+            # collateral effect. Cash purchases have zero external capital here.
+            self.lots[event["record_id"]] = {**leg, "quantity": qty, "cost": -cash - prepaid + external,
                 "opened_at": event["effective_at"], "context": d.get("context", {}),
                 "order_id": d.get("order_id"), "record_id": event["record_id"]}
             return
@@ -112,7 +114,7 @@ class State:
                 break
         if remaining:
             raise ValueError(f"unmatched inventory retirement: {market} {side}")
-        self.realized += cash + prepaid - basis
+        self.realized += cash + prepaid - basis - external
 
 
 def active_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

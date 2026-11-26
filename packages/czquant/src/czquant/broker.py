@@ -52,30 +52,58 @@ class Broker:
         if venue_of(ticker) != self.venue:
             raise ValueError(f"{self.venue} broker cannot execute or modify {ticker}")
 
-    def _reservation(self, order: dict[str, Any]) -> Decimal:
-        """Cash to hold for an order: the cost of the contracts it opens (net of any
-        opposite position it closes) plus a conservative fee allowance."""
-        quantity, price = decimal(order["count"]), decimal(order["price"])
-        # Confirmed executions establish inventory ownership before the account
-        # monitor books exact cash and fees. They never create spendable cash.
+    def _inventory(self, ticker: str, exclude: str | None = None) -> tuple[Decimal, Decimal, Decimal]:
+        """Confirmed net inventory and still-possible buys/sells of the YES book.
+
+        Booked fills replace confirmations rather than adding to them. Pending
+        quantities are kept separately: they can reserve closes or open exposure.
+        """
         acknowledgements = {e['data']['client_order_id']: e['data']
                             for e in self.store.events(self.pool_id, kinds=('order',))
                             if e['data'].get('status') == 'acknowledged'}
         net = sum((lot['quantity'] * (1 if lot['side'] == 'yes' else -1)
-                   for lot in self.state().lots.values() if lot['market'] == order['ticker']), Decimal(0))
-        pending_closes = Decimal(0)
+                   for lot in self.state().lots.values() if lot['market'] == ticker), Decimal(0))
+        pending = {'bid': Decimal(0), 'ask': Decimal(0)}
         for row in self.store.db.execute('SELECT * FROM orders WHERE portfolio_id=?', (self.pool_id,)):
             other = json.loads(row['request'])
-            if other['ticker'] != order['ticker']:
+            if other['ticker'] != ticker:
                 continue
             ack = acknowledgements.get(row['id'], {})
             confirmed = decimal(ack.get('confirmed_filled', '0'))
             booked = decimal(row['filled'])
             net += max(Decimal(0), confirmed - booked) * (1 if other['side'] == 'bid' else -1)
-            if (row['id'] != order.get('client_order_id') and other['side'] == order['side']
-                    and row['status'] in ('pending', 'unknown', 'acknowledged') and not ack.get('terminal')):
-                pending_closes += max(Decimal(0), decimal(other['count']) - max(booked, confirmed))
-        held = max(Decimal(0), (net if order['side'] == 'ask' else -net) - pending_closes)
+            if (row['id'] != exclude and row['status'] in ('pending', 'unknown', 'acknowledged')
+                    and not ack.get('terminal')):
+                pending[other['side']] += max(Decimal(0), decimal(other['count']) - max(booked, confirmed))
+        return net, pending['bid'], pending['ask']
+
+    def _closing_quantity(self, order: dict[str, Any]) -> Decimal:
+        net, bids, asks = self._inventory(order['ticker'], order.get('client_order_id'))
+        return max(Decimal(0), net - asks if order['side'] == 'ask' else -net - bids)
+
+    def _netting_conflict(self, order: dict[str, Any]) -> str | None:
+        from .accounts import netting_conflict
+        if decimal(order['count']) <= self._closing_quantity(order):
+            return None
+        pool = {'id': self.pool_id, 'venue': self.venue, 'mode': self.mode, 'metadata': self.metadata}
+        return netting_conflict(self.store, pool, order['ticker'], 'yes' if order['side'] == 'bid' else 'no')
+
+    def _check_active(self, ticker: str) -> None:
+        # Called under the write transaction: a long-running broker must observe
+        # retirement performed by another process before it records another intent.
+        self.metadata = next(p['metadata'] for p in self.store.pools() if p['id'] == self.pool_id)
+        if self.metadata.get('retired_at'):
+            raise ValueError(f'cash pool {self.pool_id} is retired')
+        if self.metadata.get('reserve'):
+            raise ValueError(f'{self.pool_id} is an account reserve: open a virtual subaccount to trade')
+        from .accounts import market_in_scope
+        if not market_in_scope(self.metadata.get('markets'), ticker):
+            raise ValueError(f"{ticker} is outside cash pool {self.pool_id}'s markets {self.metadata['markets']}")
+
+    def _reservation(self, order: dict[str, Any]) -> Decimal:
+        """Reserve opening cost and fees, allowing closes of confirmed inventory."""
+        quantity, price = decimal(order['count']), decimal(order['price'])
+        held = self._closing_quantity(order)
         if order.get('reduce_only') and quantity > held:
             raise ValueError('reduce-only quantity exceeds unreserved holdings in this cash pool')
         opening = max(Decimal(0), quantity - held)
@@ -128,26 +156,31 @@ class Broker:
         quantity, price = decimal(order["count"]), decimal(order["price"])
         if quantity <= 0 or not 0 <= price <= 1:
             raise ValueError("invalid quantity or price")
-        if self.metadata.get("retired_at"):
-            raise ValueError(f"cash pool {self.pool_id} is retired")
         identifier = order.setdefault("client_order_id", str(uuid.uuid4()))
-        if self.mode == "live" and venue_of(order["ticker"]) == "kalshi":
-            subaccount = self.metadata.get("subaccount")
-            if subaccount is None or order.get("subaccount", subaccount) != subaccount:
-                raise ValueError("live order must use the mapped subaccount")
-            order.pop("subaccount", None)
-            order.update(scope(self.metadata))
-            exchange = self.metadata.get("exchange_index", 0)
-            if order.get("exchange_index", exchange) != exchange:
-                raise ValueError("cannot change cash-pool exchange")
-            order["exchange_index"] = exchange
         with self.store.transaction():
+            self._check_active(order['ticker'])
+            if self.mode == "live" and self.venue == "kalshi":
+                subaccount = self.metadata.get("subaccount")
+                if subaccount is None or order.get("subaccount", subaccount) != subaccount:
+                    raise ValueError("live order must use the mapped subaccount")
+                order.pop("subaccount", None)
+                order.update(scope(self.metadata))
+                exchange = self.metadata.get("exchange_index", 0)
+                if order.get("exchange_index", exchange) != exchange:
+                    raise ValueError("cannot change cash-pool exchange")
+                order["exchange_index"] = exchange
             prior = self.store.db.execute("SELECT * FROM orders WHERE id=?", (identifier,)).fetchone()
             if prior:
                 if prior["portfolio_id"] != self.pool_id or prior["request"] != encode(order) or prior["context"] != encode(context):
                     raise ValueError("client order ID reused for a different request")
                 return dict(prior)  # Never resubmit an uncertain write implicitly.
             reserve = self._reservation(order)
+            other = self._netting_conflict(order)
+            if other:
+                self.observe("order_rejected", {"reason": "cross_pool_netting", "with": other,
+                                                "order": order, "context": context})
+                return {"client_order_id": identifier, "status": "rejected", "filled": "0",
+                        "reason": f"{other} holds or may open the opposite side of {order['ticker']} on this account"}
             if reserve > self.available:
                 self.observe("order_rejected", {"reason": "insufficient_cash", "order": order, "context": context})
                 return {"client_order_id": identifier, "status": "rejected", "filled": "0"}
@@ -237,16 +270,27 @@ class Broker:
             if row["status"] not in ("acknowledged", "pending"):
                 raise ValueError(f"cannot amend an order that is {row['status']}")
             amended = {**json.loads(row["request"]), **changes}
+            self._check_active(amended['ticker'])
             quantity, price = decimal(amended["count"]), decimal(amended["price"])
             if quantity <= 0 or not 0 <= price <= 1 or quantity < decimal(row["filled"]):
                 raise ValueError("invalid amended quantity or price")
             remaining = quantity - decimal(row['filled'])
             old = decimal(row['reserved'])
-            new = self._reservation({**amended, 'count': str(remaining)}) if remaining else Decimal(0)
+            unfilled = {**amended, 'count': str(remaining)}
+            new = self._reservation(unfilled) if remaining else Decimal(0)
+            other = self._netting_conflict(unfilled) if remaining else None
+            if other:
+                raise ValueError(f"{other} holds or may open the opposite side of {amended['ticker']} on this account")
             held = max(old, new)
             if held - old > self.available:
                 raise ValueError("insufficient cash in this pool for amendment")
-            self.store.db.execute("UPDATE orders SET reserved=? WHERE id=?", (str(held), identifier))
+            # Publish both possible quantities before the venue call. Other pools
+            # must see increased exposure even if the amendment acknowledgement is
+            # delayed or lost; a reduction is not effective until it is confirmed.
+            pending = {**json.loads(row['request']), 'count': str(max(
+                quantity, decimal(json.loads(row['request'])['count'])))}
+            self.store.db.execute("UPDATE orders SET request=?,reserved=? WHERE id=?",
+                                  (encode(pending), str(held), identifier))
             self.observe("amend_intent", {"client_order_id": identifier, "changes": request,
                                           "reserved_before": str(old), "reserved_during": str(held)})
         result = self.adapter.amend_order(row["venue_id"], request)

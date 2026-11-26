@@ -61,10 +61,10 @@ def test_allocation_moves_recorded_cash_and_the_group_reconciles(tmp_path):
     store, api = Store(tmp_path), Kalshi(cents=10000)
     map_live(store, api, "a", 0, primary=True)
     map_live(store, api, "b", 0, primary=True, share=True)
-    allocate(store, "a", "b", D("40"))
+    allocate(store, "a", "b", D("40"), api=api)
     assert (cash(store, "a"), cash(store, "b")) == (60, 40)
     with pytest.raises(ValueError, match="free Kalshi cash"):
-        allocate(store, "a", "b", D("61"))
+        allocate(store, "a", "b", D("61"), api=api)
     buy(store, "b")
     api.cents, api.positions = 9600, [{"ticker": "M", "position_fp": "10"}]
     status = account_pass(store, api)
@@ -81,7 +81,7 @@ def test_an_inventory_mismatch_is_charged_to_the_portfolio_holding_that_market(t
     store, api = Store(tmp_path), Kalshi(cents=10000)
     map_live(store, api, "a", 0, primary=True)
     map_live(store, api, "b", 0, primary=True, share=True)
-    allocate(store, "a", "b", D("40"))
+    allocate(store, "a", "b", D("40"), api=api)
     buy(store, "b")
     api.cents, api.positions = 9600, [{"ticker": "M", "position_fp": "7"}]
     wrong = [d for d in account_pass(store, api)["discrepancies"] if d["kind"] == "inventory_mismatch"]
@@ -92,7 +92,7 @@ def test_a_settlement_on_a_shared_account_pays_the_portfolio_holding_it(tmp_path
     store, api = Store(tmp_path), Kalshi(cents=10000)
     map_live(store, api, "a", 0, primary=True)
     map_live(store, api, "b", 0, primary=True, share=True)
-    allocate(store, "a", "b", D("40"))
+    allocate(store, "a", "b", D("40"), api=api)
     buy(store, "b")
     api.cents = 10600
     api.settlements = [{"ticker": "M", "market_result": "yes", "value": 100, "revenue": 1000,

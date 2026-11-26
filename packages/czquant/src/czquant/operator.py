@@ -202,24 +202,10 @@ def remap_kalshi(store: Store, api: Any, portfolio: str, subaccount: int, exchan
             source=f'opening-live:{portfolio}:{tag}')
 
 
-def allocate(store: Store, source: str, target: str, dollars: Decimal) -> None:
-    """Move recorded Kalshi cash between two live portfolios on the same Kalshi account.
-    No money moves at Kalshi; only each portfolio's share of the account changes."""
-    if dollars <= 0 or source == target:
-        raise ValueError('a positive amount between two portfolios is required')
-    with store.transaction():
-        a, b = _active(store, source), _active(store, target)
-        if a['venue'] != 'kalshi' or b['venue'] != 'kalshi' or account_of(a['metadata']) != account_of(b['metadata']):
-            raise ValueError(f'{source} and {target} trade different Kalshi accounts: use `transfer` to move money')
-        free = kalshi_cash(store, a) - _kalshi_reserved(store, source)
-        if dollars > free:
-            raise ValueError(f'{source} has ${free} of free Kalshi cash')
-        tag = uuid.uuid4().hex
-        at = utc()
-        for portfolio, delta in ((source, -dollars), (target, dollars)):
-            store.append('transaction', {'reason': 'funding', 'purpose': 'allocation', 'venue': 'kalshi',
-                'cash_delta': str(delta), 'external_delta': str(delta), 'fee': '0', 'legs': [],
-                'evidence': {'from': source, 'to': target}}, portfolio, source=f'allocate:{tag}:{portfolio}', at=at)
+def allocate(store: Store, source: str, target: str, dollars: Decimal, *, api: Any = None) -> None:
+    """Move recorded cash between two pools on one account. See `accounts.allocate`."""
+    from .accounts import allocate as allocate_any
+    allocate_any(store, source, target, dollars, api=api)
 
 
 def _settle_for_retirement(store: Store, api: Any, portfolio: str, params: dict[str, Any], sub: int,
@@ -303,7 +289,7 @@ def retire_live(store: Store, api: Any, portfolio: str, book_difference: bool = 
                 portfolio, source=f'reconcile:{portfolio}:{tag}')
         released = {v: c for v, c in portfolio_state(store, portfolio).venue_cash.items() if c}
         if to is not None and released.get('kalshi'):
-            allocate(store, portfolio, to, released.pop('kalshi'))
+            allocate(store, portfolio, to, released.pop('kalshi'), api=api)
         for venue, cash in released.items():
             _release(store, portfolio, venue, cash, 'retirement', {'balance': balance} if venue == 'kalshi' else {}, tag)
         result = {'settled': booked, 'difference': str(difference),

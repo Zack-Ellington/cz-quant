@@ -62,7 +62,37 @@ def main() -> None:
     retire.add_argument('--book-difference', action='store_true',
                         help='book an unexplained Kalshi cash difference as an external adjustment')
     retire.add_argument('--to', help='on a shared account: the pool that receives its Kalshi cash')
-    allocation = commands.add_parser('allocate', help='move recorded Kalshi cash between pools on one account')
+    register = commands.add_parser('account', help='register a venue (or paper) account; creates its reserve pool')
+    register.add_argument('id')
+    register.add_argument('--venue', required=True, choices=['kalshi', 'polymarket', 'polymarket-us'])
+    register.add_argument('--paper-cash', help='a hypothetical paper account opening with this cash')
+    register.add_argument('--subaccount', type=int, help='live Kalshi: the subaccount (0 with --primary-account)')
+    register.add_argument('--exchange-index', type=int, default=0)
+    register.add_argument('--primary-account', action='store_true')
+    show = commands.add_parser('accounts', help="show registered accounts and each pool's recorded share")
+    show.add_argument('id', nargs='?')
+    sub_open = commands.add_parser('open-sub', help='load a virtual subaccount: a new pool funded from the reserve')
+    sub_open.add_argument('id')
+    sub_open.add_argument('--account', required=True)
+    sub_open.add_argument('--cash', default='0')
+    sub_open.add_argument('--from', dest='source', help='fund it from this pool instead of the reserve')
+    sub_open.add_argument('--markets', nargs='+', help="limit it to these tickers, or prefixes ending in '*'")
+    sub_close = commands.add_parser('close-sub', help='unload a flat virtual subaccount; its cash goes back')
+    sub_close.add_argument('id')
+    sub_close.add_argument('--to', help='the pool receiving its cash (default: its parent)')
+    move = commands.add_parser('move-lots', help='hand open contracts to another pool on the account, at cost')
+    move.add_argument('--from', dest='source', required=True)
+    move.add_argument('--to', dest='target', required=True)
+    move.add_argument('--market', required=True)
+    move.add_argument('--side', required=True, choices=['yes', 'no'])
+    move.add_argument('--quantity', help='default: all of them')
+    difference = commands.add_parser('book-deposit', help="book a confirmed Kalshi deposit/withdrawal to the account's reserve")
+    difference.add_argument('account')
+    difference.add_argument('--note', required=True, help='what the difference is, e.g. the deposit reference')
+    join = commands.add_parser('portfolio-add', help='add new, funding-only pools to a reporting portfolio')
+    join.add_argument('id')
+    join.add_argument('--pools', nargs='+', required=True)
+    allocation = commands.add_parser('allocate', help='move recorded cash between pools on one account')
     allocation.add_argument('--from', dest='source', required=True)
     allocation.add_argument('--to', dest='target', required=True)
     allocation.add_argument('--dollars', required=True)
@@ -119,7 +149,47 @@ def main() -> None:
         from .operator import allocate
         from .store import decimal
         allocate(store, args.source, args.target, decimal(args.dollars))
-        print(f'Allocated ${args.dollars} of Kalshi cash from {args.source} to {args.target}.')
+        print(f'Allocated ${args.dollars} from {args.source} to {args.target}.')
+    elif args.command == 'account':
+        from . import accounts
+        venue = args.venue.replace('-', '_')
+        if args.paper_cash is not None:
+            if args.subaccount is not None or args.primary_account:
+                parser.error('a paper account takes no live account options')
+            accounts.register_paper(store, args.id, venue, args.paper_cash)
+        elif venue == 'kalshi':
+            if args.subaccount is None:
+                parser.error('a live Kalshi account needs --subaccount')
+            from .kalshi import Kalshi
+            accounts.register_kalshi(store, Kalshi(), args.id, args.subaccount, args.exchange_index, args.primary_account)
+        elif venue == 'polymarket_us':
+            from .polymarket_us import PolymarketUS
+            accounts.register_polymarket_us(store, PolymarketUS.from_env(authenticated=True), args.id)
+        else:
+            parser.error('Polymarket (international) has no live execution: register it with --paper-cash')
+        print(encode(accounts.summary(store, args.id)))
+    elif args.command == 'accounts':
+        from . import accounts
+        for a in accounts.accounts(store):
+            if args.id in (None, a['id']):
+                print(encode(accounts.summary(store, a['id'])))
+    elif args.command == 'open-sub':
+        from .accounts import open_sub
+        open_sub(store, args.id, args.account, args.cash, args.markets, args.source)
+        print(f'Opened {args.id} on {args.account} with ${args.cash}.')
+    elif args.command == 'close-sub':
+        from .accounts import close_sub
+        print(f'Closed {args.id}; ${close_sub(store, args.id, args.to)} returned.')
+    elif args.command == 'move-lots':
+        from .accounts import move_lots
+        print(f'Moved {move_lots(store, args.source, args.target, args.market, args.side, args.quantity)} '
+              f'{args.side} of {args.market} to {args.target}.')
+    elif args.command == 'book-deposit':
+        from .accounts import book_reserve_difference
+        from .kalshi import Kalshi
+        print(f'Booked ${book_reserve_difference(store, Kalshi(), args.account, args.note)} to the reserve.')
+    elif args.command == 'portfolio-add':
+        store.add_to_portfolio(args.id, args.pools)
     elif args.command == 'check-polymarket-us':
         from .polymarket_us import PolymarketUS
         client = PolymarketUS.from_env()
