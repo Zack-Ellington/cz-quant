@@ -199,13 +199,13 @@ independent.
 The light dashboard has an Overall tab and one tab per game. Overall plots venue
 cash, allocated game cash, open contract counts, and expected return over time.
 Expected return divides conditional expected profit by contributed game capital.
-Each game shows venue cash, reservations, and available cash. A selector chooses
-one of the two complementary cross-venue combinations. Its Plotly chart shows
+Each game shows venue cash, reservations, and available cash. Two stacked Plotly charts show
+both complementary cross-venue combinations at the same time. Each chart shows
 the two raw ask prices on the left axis and the executable one-set gap after
 rounded fees on the right axis. Positive sampled gaps have green shading;
 isolated positive samples have green dots. Recorded attempts and executed trades
 appear as dots on the time axis, with executions dated by their first booked fill.
-Markers include all activity for the game, regardless of the selected route.
+Markers include all activity for the game, and are repeated on both combination charts.
 Gross gap is $1 minus
 the two purchase prices. Fee calculations use rounded taker fees and walk depth
 for integer sizes up to the recorded max_sets. A sampled opportunity requires
