@@ -222,11 +222,10 @@ class Engine:
         if identity != (selected.kalshi_event, selected.polymarket_event, selected.polymarket_market) or actual != expected:
             raise ValueError("venue pair or outcome mapping differs from the experiment; review configuration")
 
-    def validate_basket(self, basket: Basket, pair: Pair | MarketPair) -> None:
+    def validate_basket(self, basket: Basket, pair: Pair | MarketPair) -> str | None:
+        """Raise for invalid configuration; return a reason for a runtime refusal."""
         self.validate_pair(pair)
         self.validate_allocations()
-        if self.halted or self.live_block():
-            raise ValueError("experiment is halted or awaiting account reconciliation; reuse these pools after recovery")
         roles = []
         need: dict[str, Decimal] = {}
         for leg in basket.legs:
@@ -243,23 +242,34 @@ class Engine:
             price = decimal(leg["limit"])
             if not price.is_finite() or not 0 <= price <= 1:
                 raise ValueError("invalid basket limit price")
+            # Mirrors czquant.broker.FEE_ALLOWANCE, including its Kalshi fallback.
             allowance = Decimal("0.025") if venue == "polymarket_us" else Decimal("0.0175")
             fees = max(decimal(leg["fee"]), (basket.sets * allowance).quantize(Decimal("0.01"), rounding=ROUND_CEILING))
             need[venue] = need.get(venue, Decimal(0)) + basket.sets * price + fees
         if sorted(roles) != [0, 1] or (self.cfg.require_cross and len(need) != 2):
             raise ValueError("basket must cover both outcomes and the configured venues")
+        block = "halted" if self.halted else self.live_block()
+        if block:
+            return block
+        if len({leg["ticker"] for leg in basket.legs}) != len(basket.legs):
+            return "basket contains opposite sides of the same market; fills would net"
         if any(self.brokers[venue].available < amount for venue, amount in need.items()):
-            raise ValueError("selected allocation cannot fund the full basket at its limit prices")
+            return "selected allocation cannot fund the full basket at its limit prices"
         # Opposite inventory would close an existing position instead of buying a set.
         for leg in basket.legs:
             if any(lot["market"] == leg["ticker"] and lot["side"].upper() != leg["contract"]
                    for lot in self.brokers[venue_of(leg["ticker"])].state().lots.values()):
-                raise ValueError("basket conflicts with existing inventory; reconcile before adding a set")
+                return "basket conflicts with existing inventory; reconcile before adding a set"
+        return None
 
     # -- state ---------------------------------------------------------------
 
     def resume(self) -> None:
         """Recover actual holdings and the halt state from the shared store."""
+        # Read orders first: if the monitor finishes while state is read, defer
+        # completeness until the next scan rather than judging older lots.
+        awaiting = {o["context"].get("trade_id") for b in self.brokers.values()
+                    for o in b.orders(("pending", "unknown", "acknowledged"))}
         state = combine_states([b.state() for b in self.brokers.values()])
         self.cash = state.cash - sum((self.store.reserved(b.pool_id) for b in self.brokers.values()), Decimal(0))
         self.bankroll = state.contributed
@@ -315,6 +325,10 @@ class Engine:
                 self.halt(f"settled trade {tid} lost ${-pnl:.2f}")
 
         for tid, position in self.positions.items():
+            # Live fills can be confirmed before their lots are booked. The order
+            # gate prevents new entries until the monitor finishes reconciliation.
+            if tid in awaiting:
+                continue
             intended = {(leg["ticker"], leg["contract"].lower()) for leg in position.get("intended_legs", [])}
             quantities: dict[tuple[str, str], Decimal] = {}
             for lot in state.lots.values():
@@ -359,14 +373,15 @@ class Engine:
         return next((v for v, amount in need.items() if self.brokers[v].available < amount), None)
 
     def live_block(self) -> str | None:
-        """Live: a reason not to trade now. Unresolved orders and monitor discrepancies
-        halt; a missing or stale monitor check only pauses."""
-        unresolved = sum(len(b.orders(("pending", "unknown", "acknowledged"))) for b in self.brokers.values())
+        """Unknown writes and monitor discrepancies halt; acknowledged orders and
+        missing or stale monitor checks pause until reconciliation catches up."""
+        unresolved = sum(len(b.orders(("pending", "unknown"))) for b in self.brokers.values())
         if unresolved:
             self.halt(f"{unresolved} order(s) awaiting reconciliation; keep the same experiment and pools, reconcile both venues, then clear the halt")
             return "halted"
+        busy = any(b.orders(("acknowledged",)) for b in self.brokers.values())
         if not self.cfg.live or self.cfg.dry_run:
-            return None
+            return "awaiting_reconciliation" if busy else None
         now = datetime.now(timezone.utc)
         for component in ("account", "polymarket_us"):
             rows = [e for e in self.store.events(kinds=("health",)) if e["data"].get("component") == component]
@@ -380,7 +395,7 @@ class Engine:
             if mine:
                 self.halt(f"{component} monitor reports {mine[0].get('kind')}: reconcile before trading")
                 return "halted"
-        return None
+        return "awaiting_reconciliation" if busy else None
 
     def _throttled(self, key: tuple, every: float = 300.0) -> bool:
         now = time.monotonic()
@@ -609,7 +624,8 @@ class Engine:
                 counts["blocked"] = counts.get("blocked", 0) + 1
                 continue
             pair, why = match(game, [p for p in self.polys.get(league, [])
-                                     if p.slug == self.experiment.pair.polymarket_event], aliases)
+                                     if p.slug == self.experiment.pair.polymarket_event], aliases,
+                              self.pairs["pairs"].get(game.event))
             counts[why] = counts.get(why, 0) + 1
             if pair:
                 self.validate_pair(pair)
@@ -675,7 +691,10 @@ class Engine:
         if current is None or {(leg["ticker"], leg["contract"]) for leg in current.legs} != intended:
             self.reject(event, "recheck_failed", why=why if current is None else "legs_changed")
             return
-        self.validate_basket(current, pair)
+        block = self.validate_basket(current, pair)
+        if block:
+            self.reject(event, block)
+            return
         trade_id = uuid.uuid4().hex[:12]
         if isinstance(pair, MarketPair):
             where = {"kalshi_market": pair.key, "polymarket_event": pair.listing.polymarket,

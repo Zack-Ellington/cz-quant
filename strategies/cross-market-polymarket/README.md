@@ -64,8 +64,8 @@ For a sports game:
 - On international Polymarket, venue is polymarket and mode must be paper.
   polymarket_market is the market ID. Each outcome names its own PM: token ID
   with polymarket_side YES.
-- The mapping must agree with the venues' team/date matching and league aliases.
-  Existing pins cannot add games or override the experiment's outcome mapping.
+- Matching uses the venues' team/date information and league aliases, or an
+  existing reviewed pin. Pins cannot add games or override the experiment's outcome mapping.
   Existing blocked events remain excluded.
 
 For a reviewed international binary question, use league markets and set
@@ -86,7 +86,8 @@ Config defaults and all resolved values are logged:
 - risk_free, min_net, min_edge and max_apr control the return hurdle.
   max_apr null disables the upper APR filter.
 - require_cross defaults to true. False permits both outcomes at one venue,
-  while retaining the same selected pair and pool ownership.
+  while retaining the same selected pair and pool ownership. Opposite sides of
+  the same market are refused because their fills would net instead of holding a set.
 - resolution_hours estimates time to payout. unwind_slippage limits repair prices.
 - kalshi_latency and polymarket_latency identify paper execution assumptions.
 - pmus_theta overrides US pricing and paper fees; null uses the market coefficient.
@@ -131,6 +132,9 @@ Repeat only the launch command on restart. Do not recreate the pools, replace
 the log, change the experiment's pair, or assign its pools to another experiment.
 Risk parameters can change between runs; each run records their resolved values.
 An incompatible old pool requires reconciliation, not a new ID that hides its losses.
+Pools with earlier run records that lack the experiment key cannot be adopted by
+this strategy. Reconcile and retire those allocations through the operator tools, retain
+their history, and prepare dedicated allocations for a new experiment.
 
 ## Run two independent experiments
 
@@ -162,18 +166,21 @@ both pool IDs, so their logs and KILL files remain separate.
 ## Live preparation and current limits
 
 Live experiments require Polymarket US and two pre-created live allocations.
-Follow the [live mapping guide](../../docs/services/polymarket-broker.md#us-live-mapping-and-execution).
+For several experiments on one account, follow the
+[virtual-subaccount guide](../../docs/services/virtual-subaccounts.md): register
+each venue account with czquant account, then use czquant open-sub to allocate
+two dedicated pools per experiment. Select optional market scopes with --markets.
+The paper funding commands above do not create live allocations.
 Set the file's mode to live, use those live pool IDs and set parameters.dry_run
 true for a dry run. Export KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH,
 POLYMARKET_US_KEY_ID and POLYMARKET_US_SECRET_KEY_PATH as documented in
 .env.example. Use the same --experiment command in paper, dry-run and live modes.
 
-The main-branch US account collector currently supports one active live pool.
-Several live experiments sharing that account require the separate
-[virtual-subaccount work](https://github.com/Zack-Ellington/cz-quant/pull/31)
-and its account reconciliation support. Creating extra paper pools or reporting
-portfolios does not solve that live-account requirement. This strategy does not
-create subaccounts, transfer funds, or bypass allocation checks.
+Several live Polymarket US pools require a registered account and its account-wide
+reconciliation. The legacy map-live command still maps only one US pool; repeating
+it cannot prepare both examples. Registered accounts also enforce cross-pool
+netting restrictions, so the experiments must not open opposite sides of the same
+market. This strategy does not create subaccounts, transfer funds, or bypass allocation checks.
 
 Run independent collectors against the same logging root. Paper runs use public
 references and outcomes; live runs also require account execution evidence:
@@ -200,6 +207,12 @@ Before either leg, the engine checks the pair mapping, pool existence, venue,
 mode, retirement/reserve status, optional exact/prefix market scopes, existing
 holdings and orders, and both allocations' ability to fund the full repriced
 basket at its limits. A mismatch on the second venue produces zero submissions.
+Market scopes are optional pool metadata created by open-sub --markets and are
+also enforced by the broker. Pools without that metadata have no pool-level market
+restriction; the strategy still enforces the selected pair and outcome mapping.
+Insufficient limit-price funding, opposite inventory, or a reconciliation pause
+records a rejection and leaves the process running. Invalid pool, scope, or pair
+configuration raises an error before submission.
 The broker still owns final reservations and accounting. Separate venue orders
 are not atomic; prices, available cash and execution can change after validation.
 
@@ -212,8 +225,10 @@ Restart reloads cash, positions, reservations, pending/unknown/acknowledged orde
 standing halts and the last order's cooldown. It never retries uncertain orders
 with new IDs. Keep the same file and pools while reconciling. Acknowledged live
 orders can still require the account monitor to book fills and release reserves.
-Incomplete inventory also halts until reviewed, except when an already executed
-basket is partway through settlement.
+These orders pause entries without a persistent halt and resume after reconciliation.
+Pending or unknown writes still halt. Inventory completeness is checked after the
+trade's outstanding orders are reconciled; incomplete inventory then halts until
+reviewed, except when an already executed basket is partway through settlement.
 
 A complete basket's settlement loss, a monitor discrepancy, or a KILL file under
 STRATEGY_RUNS_DIR/diagnostics/cross-market-polymarket/<kalshi-pool>/<polymarket-pool>/

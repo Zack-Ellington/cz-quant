@@ -6,6 +6,7 @@ from decimal import Decimal as D
 import httpx
 import pytest
 from czquant import Store
+from czquant.live import KalshiLive
 from czquant.paper import Paper
 from czquant.polymarket_us import PolymarketUSPaper
 
@@ -190,9 +191,79 @@ def test_complete_basket_limit_cost_must_fit_both_allocations(setup, monkeypatch
             leg["limit"] = "0.99"
     store.append("transaction", {"reason": "funding", "cash_delta": "-44", "external_delta": "-44", "legs": []}, engine.kalshi_broker.pool_id)
     monkeypatch.setattr(engine, "recheck", lambda *_: (basket, "ok"))
-    with pytest.raises(ValueError, match="full basket"):
-        engine.execute(basket, pair, league)
+    assert engine.venue_shortfall(basket) is None
+    engine.execute(basket, pair, league)
     assert not store.events(kinds=("order", "execution"))
+    rejects = store.events(kinds=("observation",), observations=("reject",))
+    assert "full basket" in rejects[-1]["data"]["reason"]
+    # A later scan remains usable once funding is restored.
+    store.append("transaction", {"reason": "funding", "cash_delta": "44", "external_delta": "44", "legs": []}, engine.kalshi_broker.pool_id)
+    engine.cooldown_until.clear()
+    engine.step()
+    assert engine.counters["baskets"] == 1
+
+
+@pytest.mark.parametrize("block", ["halted", "stale_account_monitor"])
+def test_preflight_reconciliation_change_rejects_without_crashing(setup, monkeypatch, block):
+    store, create, build = setup
+    engine = build(create())
+    engine.discover()
+    basket, pair, league = engine.scan()[0]
+    monkeypatch.setattr(engine, "live_block", lambda: block)
+    engine.execute(basket, pair, league)
+    assert not store.events(kinds=("order", "execution"))
+    assert store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["reason"] == block
+
+
+@pytest.mark.parametrize("reconcile_quantity", ["10", "9"])
+def test_live_kalshi_acknowledgement_pauses_until_monitor_books_fills(setup, reconcile_quantity):
+    store, create, build = setup
+    spec = create(mode="live")
+    engine = build(spec, cooldown=0)
+
+    class FilledKalshi:
+        def create_order(self, order):
+            return {"order": {"order_id": "venue-order", "status": "executed", "fill_count_fp": order["count"]}}
+
+    engine.kalshi_broker.adapter = KalshiLive(FilledKalshi())
+    engine.step()
+    order = engine.kalshi_broker.orders()[0]
+    assert order["status"] == "acknowledged" and order["filled"] == 0
+    reserved = store.reserved(spec.kalshi_pool)
+    assert reserved > 0 and not engine.halted
+    assert engine.live_block() == "awaiting_reconciliation"
+    orders = store.events(kinds=("order",))
+    engine.step()
+    restarted = build(spec, cooldown=0)
+    restarted.step()
+    assert not restarted.halted
+    assert store.events(kinds=("order",)) == orders
+    assert store.reserved(spec.kalshi_pool) == reserved
+    # Emulate authoritative account-monitor ingestion, not a strategy fill.
+    broker = restarted.kalshi_broker
+    broker.fill(order["client_order_id"], reconcile_quantity, "0.55", "0", "fixture-fill", {"fixture": "account monitor"})
+    broker.finish(order["client_order_id"], "filled")
+    restarted.resume()
+    if reconcile_quantity == "9":
+        assert restarted.halted and "incomplete inventory" in restarted.halted
+    else:
+        assert not restarted.halted and restarted.live_block() is None
+        restarted.poly.depth = "20"  # replenish the fixture's consumed paper liquidity
+        restarted.step()
+        assert restarted.counters["baskets"] == 1
+
+
+def test_same_market_opposite_basket_legs_are_rejected_before_submission(setup, monkeypatch):
+    store, create, build = setup
+    engine = build(create(), require_cross=False)
+    engine.discover()
+    basket, pair, league = engine.scan()[0]
+    for leg in basket.legs:
+        leg.update(ticker="PMUS:" + SLUG, venue="polymarket_us", contract=pair.legs[leg["role"]])
+    monkeypatch.setattr(engine, "recheck", lambda *_: (basket, "ok"))
+    engine.execute(basket, pair, league)
+    assert not store.events(kinds=("order", "execution"))
+    assert "opposite" in store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["reason"]
 
 
 @pytest.mark.parametrize("mode", ["paper", "live"])
@@ -351,3 +422,24 @@ def test_run_provenance_contains_full_pin_mapping(setup):
     Engine(Config(experiment=spec, venue=spec.venue), GameKalshi(), leagues=LEAGUES,
            pairs=pins, revision="full-config", us=GameUS(spec.pair.polymarket_event, spec.pair.polymarket_market))
     assert store.events(kinds=("run",))[0]["data"]["config"]["pairs"]["pinned"] == pins["pairs"]
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_pin_is_used_but_cannot_override_experiment_mapping(setup, swapped):
+    _, create, build = setup
+    engine = build(create())
+    engine.discover()
+    # Abbreviations differ, so this reviewed pair needs an explicit pin.
+    for team in engine.games["nba"][0].teams:
+        team["abbr"] = "unmatched-" + team["abbr"]
+    assert engine.pair_league("nba", {}) == []
+    outcomes = engine.experiment.pair.outcomes
+    engine.pairs = {"pairs": {engine.experiment.pair.kalshi_event: {
+        "slug": engine.experiment.pair.polymarket_event,
+        "legs": {outcomes[0].kalshi: "sac" if swapped else "bos",
+                 outcomes[1].kalshi: "bos" if swapped else "sac"}}}, "blocked": set()}
+    if swapped:
+        with pytest.raises(ValueError, match="outcome mapping"):
+            engine.pair_league("nba", {})
+    else:
+        assert engine.pair_league("nba", {})[0].evidence["method"] == "pinned"
