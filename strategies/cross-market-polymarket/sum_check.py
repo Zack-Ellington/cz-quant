@@ -16,6 +16,7 @@ to 5 decimals. Both are what the shared paper adapters charge.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, Decimal
 from itertools import product
@@ -159,12 +160,14 @@ def _sizes(offers: tuple[Offer, ...], top: int) -> list[int]:
 
 def best(offers: dict[str, list[Offer]], days: float, risk_free: float, max_sets: int, max_capital: Decimal,
          min_net: Decimal, min_edge: Decimal, max_apr: float | None = None,
-         require_cross: bool = True) -> tuple[Basket | None, str]:
+         require_cross: bool = True, fundable: Callable[[Basket], bool] | None = None) -> tuple[Basket | None, str]:
     """The most profitable basket above the hurdle, or (None, why).
 
     Every combination of one offer per team (with legs on both venues when
     `require_cross`) is sized from one set up to the depth, max_sets and max_capital,
     at each size where a leg's price changes, keeping the largest profit above the hurdle.
+    The optional fundable check further bounds size by the selected broker pools;
+    it must be nonbinding and monotone in quantity for a fixed combination.
     """
     found, why = None, "no_edge"
     for combo in product(*offers.values()):
@@ -176,7 +179,7 @@ def best(offers: dict[str, list[Offer]], days: float, risk_free: float, max_sets
         while lo < hi:  # capital grows with size: the largest size within max_capital
             mid = (lo + hi + 1) // 2
             b = price(combo, mid, days, risk_free)
-            if b is not None and b.capital <= max_capital:
+            if b is not None and b.capital <= max_capital and (fundable is None or fundable(b)):
                 lo = mid
             else:
                 hi = mid - 1
@@ -185,7 +188,7 @@ def best(offers: dict[str, list[Offer]], days: float, risk_free: float, max_sets
             continue
         for size in _sizes(combo, lo):
             b = price(combo, size, days, risk_free)
-            if b is None:
+            if b is None or (fundable is not None and not fundable(b)):
                 continue
             if b.edge < min_edge or b.net < min_net:
                 why = why if found else ("below_min_edge" if b.net > 0 else why)
