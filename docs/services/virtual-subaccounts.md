@@ -62,6 +62,37 @@ Which market goes to which sub is the strategy's own choice. The `markets` scope
 assertion, like the broker's `venue` keyword: an order outside it is refused, and
 nothing is routed.
 
+## Market scope
+
+`--markets` (`open_sub(..., markets=[...])`) limits which tickers a sub's broker may
+trade. Each entry is either:
+
+| Entry | Matches | Example |
+| --- | --- | --- |
+| Exact ticker (no `*`) | That ticker only | `KXNBAGAME-26NOV26BOSSAC-BOS` |
+| Prefix ending in `*` | Every ticker starting with the text before `*` | `KXNBA*` (a series), `KXNBAGAME-26NOV26BOSSAC*` (one event) |
+
+Entries can be mixed, and an order is allowed if its ticker matches any entry:
+
+```bash
+uv run czquant open-sub bos-sac --account main --markets KXNBAGAME-26NOV26BOSSAC-BOS 'KXNFL*'
+```
+
+- **Matching:** it compares ticker strings only. A "group" is just a shared prefix;
+  nothing looks up the venue's event or series structure.
+- **Polymarket US:** use the full `PMUS:<slug>` ticker or a prefix of it, such as
+  `PMUS:aec-nba-*`.
+- **Default:** without `--markets`, a sub can trade any market at its venue.
+- **Refusals:** an order outside the scope raises `ValueError` before anything is
+  recorded or sent. The scope is an assertion, not routing; the strategy still decides
+  which broker (sub) each order goes to.
+- **Fixed at opening:** the scope is stored in the pool's metadata when the sub is
+  opened, and no command changes it. To change it, move the sub's lots (`move-lots`)
+  or let them settle, close it, and open a new sub.
+- **Moved lots:** `move-lots` doesn't check the receiving sub's scope. A sub can hold
+  a moved lot outside its scope, but its broker can't trade that market, so it can't
+  close the lot either; the lot can only settle or be moved again.
+
 ## Rules and limits
 
 - **Mode and scope.** A sub has its account's venue and mode. Live Kalshi subs carry
