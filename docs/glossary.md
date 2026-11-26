@@ -14,8 +14,11 @@ for the full rules.
 | Virtual subaccount | A cash pool on a registered account, funded by allocation from its reserve; loaded and unloaded without venue actions. |
 | Broker | Thin wrapper bound to exactly one cash pool; the only mandatory strategy integration surface. See [shared broker interface](design-principles.md#shared-broker-interface). |
 | Adapter | The venue- and mode-specific execution implementation a broker uses. |
+| Portfolio (strategy) | Selected funded cash pools, independent of runs. |
 | Portfolio (reporting) | A flat reporting selection of cash pools. It owns no cash and executes no orders. |
-| Run | One strategy revision and configuration using a pool, recorded by `start`. |
+| Run | Strategy revision and configuration using selected pools. |
+| Prepared input | Recorded preprocessing output or immutable reference. |
+| Preflight | Broker validation without submission or reservation. |
 | Context | Optional, opaque JSON attached to an order and carried into its economic records. |
 | Economic record | The shared event log from which reporting reconstructs cash and positions. See [event envelope](design-principles.md#event-envelope-and-economic-schema). |
 | Reconciliation gap | An account difference not explained by recorded evidence; never booked as profit. |

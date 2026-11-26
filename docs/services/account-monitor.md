@@ -84,6 +84,29 @@ Account responses and logs are private. Send operational logs under the shared
 root, keep credentials outside Git, and use a full database backup for
 recovery. Implementation: [monitor.py](../../packages/czquant/src/czquant/monitor.py).
 
+### Cross-market run policy
+
+The [cross-market strategy](../../strategies/cross-market-polymarket/#live-preparation-and-recovery)
+distinguishes configuration errors, runtime refusals and uncertain execution.
+Invalid pool, scope or pair configuration raises before submission. Insufficient
+funding, opposite inventory or a reconciliation pause records a rejection and
+leaves the process running. These are strategy policies; the monitor records
+evidence without imposing them on other strategies.
+
+Acknowledged orders pause new entries until the monitor books their fills and
+releases their reservations. This pause survives restart without creating a
+persistent halt. Inventory completeness is checked after the trade's outstanding
+orders reconcile, so delayed accounting alone is not treated as an incomplete
+basket. Missing or stale monitor health also pauses entries.
+
+Pending or unknown writes halt new entries and retain reservations for recovery.
+A known later-leg failure permits repair of known excess fills; an uncertain
+execution outcome stops further entry and repair submissions. Incomplete
+reconciled inventory, failed repairs and monitor discrepancies can leave a
+persistent halt. Resolve the underlying condition before clearing that halt;
+a new order identity or a new pool is not a recovery mechanism.
+
+
 ## Polymarket US recovery
 
 Run its component alongside the Kalshi collector when both venues are mapped:

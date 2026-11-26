@@ -26,8 +26,8 @@ and a common economic record. Keep research choices inside each strategy.
 
 1. Optimize for experimentation. Rewrites and duplication are valid design
    choices. Do not preserve an abstraction merely because several strategies
-   currently resemble one another. A strategy directory and its recorded
-   run configuration should be enough to reproduce a run. Variants are
+   currently resemble one another. The recorded code revision, run configuration
+   and prepared inputs should be enough to reproduce a run. Variants are
    separate strategy copies or separate runs with distinct revisions and
    configurations.
 2. Measure strategies consistently. Record actual or simulated executions,
@@ -36,8 +36,8 @@ and a common economic record. Keep research choices inside each strategy.
    assumptions and evidence coverage made explicit. Comparability comes from
    the broker's economic record, not from shared strategy configuration;
    configuration is recorded opaquely for provenance.
-3. Keep every strategy independent. A strategy owns its models, market
-   readers, matching, sizing, execution sequence, configuration, dependencies,
+3. Keep every strategy independent. A strategy owns its research choices, models,
+   market readers, sizing, execution sequence, configuration, dependencies,
    and schedule. It must be possible to change or retire it without changing
    another strategy. Do not import from another strategy, subclass its engine,
    or require a shared strategy framework. Copy useful code into the experiment
@@ -53,7 +53,12 @@ and a common economic record. Keep research choices inside each strategy.
    strategy must make every trade through a broker, including exits, repairs, and retries. Use a broker for each venue
    and allocation being traded. Shared accounts and allocation management belong
    in broker infrastructure and must preserve ownership of every cash and
-   position change. Pools may be sized unevenly; see
+   position change. The broker is authoritative for venue ownership, allocation
+   scope, reservations and available cash. Strategies use these checks through
+   the broker instead of copying its execution constraints. Preflight and
+   submission use the same rules; preflight does not reserve funds or guarantee
+   execution. Strategies retain sizing and coordination across legs.
+   Pools may be sized unevenly; see
    [fair comparison](#storage-and-fair-comparison) for how totals combine them.
 6. Keep reporting observation independent of strategy decisions. Account and
    market monitors collect references for accounting and comparison. Strategies
@@ -66,6 +71,17 @@ and a common economic record. Keep research choices inside each strategy.
    their brokers and may attach diagnostics or arbitrary context; they do not
    maintain a second P&L ledger or implement reporting views. Reporting must
    not import strategy code or require the strategy process to remain running.
+8. Separate preprocessing from execution. Discovery, matching, aliases and
+   reviewed overrides produce explicit inputs before a run starts. These tools
+   can evolve independently of the execution loop. Record their resolved output
+   or an immutable artifact reference with the run. Current market reads inform
+   execution within the selected scope; they do not silently expand that scope.
+9. Prefer explicit contracts and simple runtimes. Keep one authoritative source
+   for each configuration choice. Validate external inputs at their boundaries;
+   remove duplicate checks, silent fallbacks and obsolete configuration adapters.
+   Retain checks needed for ownership, changing execution state and uncertain
+   outcomes. Historical economic records remain readable and auditable; handle
+   their compatibility or migration separately from runtime configuration.
 
 The broker is the only mandatory strategy integration surface. Installing it
 may install accounting and venue dependencies internally. That does not impose
@@ -87,7 +103,12 @@ same cash twice. A broker binds to exactly one pool; its state and available
 cash exclude every other pool, including other pools at the same venue.
 
 A strategy operates on an explicitly selected portfolio of funded cash pools
-through their brokers. These cash pools exist independently of a strategy run.
+through their brokers. Portfolio and run lifetimes are independent. Creating or
+funding pools is an explicit allocation operation outside strategy startup.
+Starting a run or changing its configuration does not fund pools or reset their
+history. Pools are not permanently bound to a strategy, experiment ID or market
+pair. A later run may reuse them when their holdings, orders and allocation scope
+are compatible; otherwise reconcile the existing state before changing use.
 
 A reporting portfolio is a flat selection of cash pools. It owns no additional cash,
 executes no orders, and does not make its pools' balances interchangeable.
@@ -110,7 +131,9 @@ recorded completion, including simulated timing when supported in paper mode.
 
 ```mermaid
 flowchart LR
-    D[Strategy-selected data] --> S[Independent strategy]
+    P[Discovery and preprocessing] --> I[Explicit prepared inputs]
+    I --> S[Independent strategy]
+    D[Current market data within selected scope] --> S
     S -->|native orders and optional context| B[Broker bound to venue and allocation]
     B --> E[Venue API or paper execution]
     B --> L[(Shared local economic log)]
@@ -127,6 +150,13 @@ Data a strategy uses to decide, including historical data, is selected and
 owned by that strategy; market monitors supply reference data for reporting
 only. The strategy controls order sequencing and partial-fill handling. A common
 trade identifier does not promise atomic execution across venues.
+
+For example, the [cross-market strategy](../strategies/cross-market-polymarket/)
+considers exactly one prepared market pair per run. Independent experiments on
+other pairs run in parallel with distinct cash pools. Its
+[preprocessing tools](../scripts/cross-market-pairs/) discover and prepare those
+pairs separately. This is that strategy's unit of execution, not a universal
+limit on the number of markets a strategy or broker may consider.
 
 Several experimental allocations may share one real account. The account is
 the venue's balance; an allocation is the portion assigned in our ledger.
