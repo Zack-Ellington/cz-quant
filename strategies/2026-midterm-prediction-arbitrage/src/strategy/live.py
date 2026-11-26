@@ -1,7 +1,7 @@
 """Live execution through the shared broker: real Kalshi orders, with hard limits.
 
 Paper trading is untouched; this module is used only with ``--mode live`` and a
-portfolio mapped to a Kalshi subaccount (``czquant map-live``). Without
+cash pool mapped to a Kalshi subaccount (``czquant map-live``). Without
 ``--send-orders`` a live run is a dry run: it reads the live account and logs
 every order it would send, and sends none.
 
@@ -57,13 +57,11 @@ def open_baskets(broker: Broker) -> dict[str, str]:
     """Baskets held as lots, plus baskets with an order the monitor hasn't reconciled."""
     held = {lot["context"]["basket"]: lot["context"]["position_id"] for lot in broker.state().lots.values()
             if "basket" in lot["context"]}
-    rows = broker.store.db.execute(
-        "SELECT context FROM orders WHERE portfolio_id=? AND (status IN (%s) OR CAST(filled AS REAL) > 0)"
-        % ",".join("?" * len(OPEN_ORDER_STATUSES)), (broker.portfolio, *OPEN_ORDER_STATUSES)).fetchall()
-    for (raw,) in rows:
-        context = json.loads(raw or "{}")
-        if context.get("basket"):
-            held.setdefault(context["basket"], context.get("position_id", "unreconciled order"))
+    for order in broker.orders():
+        if order["status"] in OPEN_ORDER_STATUSES or order["filled"] > 0:
+            context = order["context"]
+            if context.get("basket"):
+                held.setdefault(context["basket"], context.get("position_id", "unreconciled order"))
     return held
 
 
@@ -167,9 +165,7 @@ def execute(broker: Broker, api: Any, run: Any, legs: list, quantity: int, outla
 
 
 def order_status(broker: Broker, client_order_id: str) -> str | None:
-    row = broker.store.db.execute("SELECT status FROM orders WHERE id=? AND portfolio_id=?",
-                                  (client_order_id, broker.portfolio)).fetchone()
-    return row[0] if row else None
+    return next((o["status"] for o in broker.orders() if o["client_order_id"] == client_order_id), None)
 
 
 def unwind(broker: Broker, api: Any, run: Any, leg: Any, count: int, context: dict[str, Any],

@@ -61,7 +61,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WS_RUNS = os.path.join(os.environ.get("STRATEGY_RUNS_DIR", os.path.join(REPO_ROOT, "runs")), "diagnostics", os.environ.get("CZQUANT_PORTFOLIO", "sum"))
-VOID_DIR = os.path.join(WS_RUNS, "VOID")  # void_trade.py drops requests here
 APPROVALS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approvals.json")
 MIN_DAYS = 1 / 24
 APR_CAP = 1e6  # keeps the ledger valid JSON for very short holds
@@ -110,27 +109,6 @@ class Config:
     # On the REST feed the legs are re-fetched in one call just before filling.
     max_leg_skew: float = 2.0
     duration_minutes: float | None = None
-
-
-# --------------------------------------------------------------------------- ledger
-
-class Ledger:
-    """Append-only JSONL, flushed and fsync'd per record."""
-
-    def __init__(self, path: str, run_id: str):
-        self.path, self.run_id = path, run_id
-        self._f = open(path, "a", encoding="utf-8")
-
-    def write(self, kind: str, **fields):
-        rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-               "run": self.run_id, "type": kind, **fields}
-        self._f.write(json.dumps(rec, separators=(",", ":"), default=str) + "\n")
-        self._f.flush()
-        os.fsync(self._f.fileno())
-        return rec
-
-    def close(self):
-        self._f.close()
 
 
 def load_approvals(path: str = APPROVALS) -> dict:
@@ -187,22 +165,6 @@ def rebuild_consumed(store, positions: dict):
         for leg in p.get("legs", []):
             for price, qty in leg.get("levels", []):
                 store.consume(leg["ticker"], "ask" if p["side"] == "long" else "bid", price, qty)
-
-
-def read_ledgers(root: str = WS_RUNS):
-    """Every record from every run, oldest run first."""
-    if not os.path.isdir(root):
-        return
-    for run in sorted(os.listdir(root)):
-        path = os.path.join(root, run, "ledger.jsonl")
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        try:
-                            yield json.loads(line)
-                        except json.JSONDecodeError:
-                            pass  # a partial last line from a crash
 
 
 # --------------------------------------------------------------------------- pricing
@@ -416,7 +378,7 @@ class Engine:
         self.account = Store()
         portfolio = os.environ.get("CZQUANT_PORTFOLIO")
         if not portfolio:
-            raise ValueError("Set CZQUANT_PORTFOLIO to an explicitly created paper portfolio")
+            raise ValueError("Set CZQUANT_PORTFOLIO to an explicitly created paper cash pool")
         self.broker = Broker(self.account, portfolio, Paper(Kalshi(authenticated=False), latency=cfg.latency), self.run_id)
         if self.broker.mode != "paper":
             raise ValueError("This strategy entry point is paper only")

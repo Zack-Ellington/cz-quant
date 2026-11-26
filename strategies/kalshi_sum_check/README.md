@@ -2,13 +2,12 @@
 
 ## Shared broker execution
 
-Create a paper portfolio with the shared czquant CLI. Export STRATEGY_RUNS_DIR
-and CZQUANT_PORTFOLIO, then run `uv run python paper_ws.py --preset low --feed rest`
+Create a paper cash pool with `czquant pool ID --venue kalshi --cash N`. Export
+STRATEGY_RUNS_DIR and CZQUANT_PORTFOLIO (the pool ID), then run `uv run python paper_ws.py --preset low --feed rest`
 or preset high. Export credentials explicitly when using WebSockets; code does
 not read .env. Both presets use independent per-leg IOC simulation. Start the
 separate market monitor to settle positions. Use the
-[shared report](../../docs/services/reporting.md) for portfolio results.
-The JSONL dashboard and void commands below apply only to historical ledgers.
+[shared report](../../docs/services/reporting.md) for results.
 
 
 Scans every open **mutually-exclusive** Kalshi event and checks whether the YES
@@ -77,7 +76,6 @@ order.**
 uv sync                                            # websockets + cryptography
 uv run python paper_ws.py                          # WebSocket if a key is set, else REST polling
 uv run python paper_ws.py --feed rest --duration 1:00
-uv run python ledger_dash.py                       # dashboard at http://localhost:8780
 ```
 
 Credentials come from exported environment variables. Use KALSHI_API_KEY_ID
@@ -122,8 +120,8 @@ instead of milliseconds.
   outcomes and remain in P&L; they do not halt the paper experiment. The
   basket_settled observation records the fill classification and net P&L.
 - Use the shared report for cash, open positions, realized and unrealized P&L,
-  fees, drawdown, and coverage. Historical JSONL dashboards and void requests
-  do not apply to broker portfolios.
+  fees, drawdown, and coverage. To void a fill, use an audited broker
+  correction rather than editing strategy files.
 
 ## Caveats (read before trading anything this flags)
 
@@ -156,9 +154,7 @@ instead of milliseconds.
 - `pricing.py`: book parsing (NO bids converted to YES asks), book walking, fees, ticks
 - `kalshi_client.py`: stdlib HTTP client with pagination, batching, retry and rate limiting, plus optional signing
 - `classifier.py`: decides whether exactly one outcome must win
-- `paper_ws.py`: WebSocket paper trader (engine, sizing, limits, settlement, ledger)
+- `paper_ws.py`: WebSocket paper trader (engine, sizing, limits, settlement, diagnostics)
 - `feeds.py`: order-book store, Kalshi WebSocket feed, REST polling fallback
 - `check_auth.py`: read-only check of the key, signed REST and the WebSocket
-- `void_trade.py`: void a paper fill
-- `ledger_dash.py`, `dashboard/ledger.html`: local paper-trade dashboard
 - `tests/`: unit tests on synthetic books, the classifier and the paper trader

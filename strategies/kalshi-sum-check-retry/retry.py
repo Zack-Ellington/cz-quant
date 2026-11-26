@@ -19,14 +19,12 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-import sys
 import uuid
 from dataclasses import dataclass
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kalshi_sum_check"))
 
-from paper_ws import Config, Engine, Quote, leg_cost, log, main as run_main  # noqa: E402
-from pricing import taker_fee  # noqa: E402
+from paper_ws import Config, Engine, Quote, leg_cost, log, main as run_main
+from pricing import taker_fee
 
 TICK = 0.01
 

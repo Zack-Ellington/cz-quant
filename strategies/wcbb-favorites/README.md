@@ -16,7 +16,7 @@ market monitor.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CZQUANT_PORTFOLIO` | (required) | paper portfolio on the shared ledger |
+| `CZQUANT_PORTFOLIO` | (required) | paper cash pool on the shared ledger |
 | `WCBB_LOW`, `WCBB_HIGH` | 0.80, 0.90 | favorite midpoint range, inclusive |
 | `WCBB_MAX_SPREAD` | 0.02 | widest YES spread accepted |
 | `WCBB_STAKE` | 25 | dollars of contracts per game |
@@ -40,7 +40,7 @@ portfolio tests it forward on paper.
 
 ```bash
 uv sync
-cd ../../packages/czquant && uv run czquant portfolio wcbb-favorites --cash 1000 && cd -
+cd ../../packages/czquant && uv run czquant pool wcbb-favorites --venue kalshi --cash 1000 && cd -
 export STRATEGY_RUNS_DIR=/absolute/runs CZQUANT_PORTFOLIO=wcbb-favorites
 uv run strategy --once   # one scan
 uv run strategy          # continuous

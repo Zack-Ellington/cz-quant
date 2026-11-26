@@ -409,3 +409,16 @@ def test_amend_cannot_exceed_the_pools_budget(tmp_path):
     with pytest.raises(ValueError, match='insufficient cash'):
         broker.amend('o1', {'count': '3000', 'price': '0.60'})
     assert store.reserved('live') == before and adapter.amended == sent
+
+
+def test_orders_lists_only_this_pools_orders_with_context(tmp_path):
+    store, broker, _ = paper(tmp_path, {"K-A": ([(0.40, 10)], [(0.55, 10)])})
+    broker.submit({"ticker": "K-A", "side": "bid", "count": "2", "price": "0.45",
+                   "client_order_id": "o1"}, {"basket": "b1"})
+    [order] = broker.orders()
+    assert order["client_order_id"] == "o1" and order["context"] == {"basket": "b1"}
+    assert order["filled"] == D("2")
+    assert broker.orders(statuses=(order["status"],)) == [order]
+    assert broker.orders(statuses=("no-such-status",)) == []
+    store.create("q", "100")
+    assert Broker(store, "q").orders() == []

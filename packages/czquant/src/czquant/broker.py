@@ -98,6 +98,17 @@ class Broker:
             "SELECT COUNT(*) FROM orders WHERE portfolio_id=? AND status IN ('unknown','pending')",
             (self.pool_id,)).fetchone()[0]
 
+    def orders(self, statuses: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        """This pool's broker-owned orders: client ID, status, booked fill and context.
+
+        Read-only. Strategies use this instead of the private orders table.
+        """
+        rows = self.store.db.execute("SELECT id, status, filled, context FROM orders WHERE portfolio_id=?",
+                                     (self.pool_id,)).fetchall()
+        result = [{"client_order_id": r[0], "status": r[1], "filled": decimal(r[2] or "0"),
+                   "context": json.loads(r[3] or "{}")} for r in rows]
+        return [o for o in result if statuses is None or o["status"] in statuses]
+
     def observe(self, kind: str, data: dict[str, Any]) -> str:
         return self.store.append("observation", {"kind": kind, **data}, self.pool_id, self.run_id)
 

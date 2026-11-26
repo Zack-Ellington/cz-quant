@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--contracts", type=int, default=DEFAULT_CONTRACTS,
                         help=f"largest order per leg shown in checks and EV (default: {DEFAULT_CONTRACTS})")
     parser.add_argument("--mode", choices=("paper", "live"), default="paper",
-                        help="paper (default) simulates fills; live trades a portfolio mapped with "
+                        help="paper (default) simulates fills; live trades a cash pool mapped with "
                         "czquant map-live, as a dry run unless --send-orders is given")
     parser.add_argument("--no-trade", action="store_true",
                         help="scan and report only; still writes the run directory")

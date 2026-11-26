@@ -1,7 +1,7 @@
 """Paper trading: signals, sizing, a confirming second scan, fills, settlement.
 
 Paper mode is the default: fills are simulated at quoted prices and written to
-the ledger labeled ``simulated``. Live execution, for a portfolio mapped to a Kalshi
+the ledger labeled ``simulated``. Live execution, for a cash pool mapped to a Kalshi
 subaccount, is in ``strategy.live`` and only runs when ``trade`` is given limits.
 
 What the strategy wants to trade (``signal`` events):
@@ -324,19 +324,19 @@ def trade(
 ) -> None:
     """Settle, generate signals, confirm, fill, and mark the open book.
 
-    With ``live`` the orders go to Kalshi through a portfolio mapped to a subaccount
+    With ``live`` the orders go to Kalshi through a cash pool mapped to a subaccount
     (see ``strategy.live``); without it nothing changes: paper fills as before.
     """
     broker, api = None, None
     if live is not None and not os.environ.get("CZQUANT_PORTFOLIO"):
-        raise ValueError("live mode needs CZQUANT_PORTFOLIO set to a portfolio mapped with czquant map-live")
+        raise ValueError("live mode needs CZQUANT_PORTFOLIO set to a cash pool mapped with czquant map-live")
     if os.environ.get("CZQUANT_PORTFOLIO") and live is not None:
         api = Kalshi()
         if live.send_orders and not api.key_id:
             raise ValueError("--send-orders needs KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH exported in this shell")
         broker = Broker(Store(), os.environ["CZQUANT_PORTFOLIO"], api, run.run_id)
         if broker.mode != "live":
-            raise ValueError("live mode needs a portfolio mapped with czquant map-live, not a paper portfolio")
+            raise ValueError("live mode needs a cash pool mapped with czquant map-live, not a paper cash pool")
         live.halted = live_exec.standing_halt(broker)
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         broker.start(run.strategy, revision, {"run_metadata": run.meta, "model": model.name, "mode": "live",
