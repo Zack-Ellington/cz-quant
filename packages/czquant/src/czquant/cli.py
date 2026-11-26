@@ -28,6 +28,12 @@ def main() -> None:
     dashboard.add_argument('--port', type=int, default=8790)
     dashboard.add_argument('--interval', type=float, default=5, help='seconds between updates')
     dashboard.add_argument('--step', type=float, default=300, help='seconds between chart points')
+    quotes = commands.add_parser('cross-market-quotes', help='record public quotes for selected cross-market games; no orders')
+    quotes.add_argument('--interval', type=float, default=5)
+    quotes.add_argument('--once', action='store_true')
+    cross_dashboard = commands.add_parser('cross-market-dashboard', help='read-only game, opportunity and execution dashboard')
+    cross_dashboard.add_argument('--host', default='127.0.0.1')
+    cross_dashboard.add_argument('--port', type=int, default=8791)
     report = commands.add_parser('report')
     report.add_argument('--since', required=True)
     report.add_argument('--until', required=True)
@@ -106,6 +112,15 @@ def main() -> None:
     transfer.add_argument('--exchange-index',type=int,default=0)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    if args.command == 'cross-market-dashboard':
+        import os
+        from .cross_market_dashboard import serve
+        serve(args.runs_dir or os.environ.get('STRATEGY_RUNS_DIR', 'runs'), args.host, args.port)
+        return
+    if args.command == 'cross-market-quotes':
+        from .cross_market_monitor import run
+        run(args.runs_dir, args.interval, args.once)
+        return
     store = Store(args.runs_dir)
     if args.command == 'pool':
         store.create_pool(args.id, args.venue.replace('-', '_'), args.cash, label=args.label)

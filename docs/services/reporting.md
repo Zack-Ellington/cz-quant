@@ -174,6 +174,61 @@ an operational view, not the frozen comparison
 artifact produced by the report command. A heartbeat indicates activity,
 not profitability or complete evidence.
 
+## Cross-market operations dashboard
+
+The game dashboard separates execution evidence from sampled price opportunities.
+It reads the same ledger as the strategies. Start its public quote collector and
+web server as separate processes, with STRATEGY_RUNS_DIR pointing to that ledger:
+
+```bash
+uv run czquant cross-market-quotes --interval 5
+```
+
+```bash
+uv run czquant cross-market-dashboard
+```
+
+Open http://127.0.0.1:8791/. Both commands require no credentials. The collector
+discovers explicit selections from recorded cross-market run configurations,
+reads public Kalshi and Polymarket US books and fee schedules, and appends market
+and quote observations. It does not submit orders, fund pools, or reconcile
+accounts. The dashboard opens SQLite in read-only mode and refreshes every five
+seconds. Existing strategy and authenticated account-monitor processes stay
+independent.
+
+Each game shows venue cash, reservations, available cash, both outcomes' buy
+prices, and both complementary cross-venue combinations. Gross gap is $1 minus
+the two purchase prices. Fee calculations use rounded taker fees and walk depth
+for integer sizes up to the recorded max_sets. A sampled opportunity requires
+positive net at a size funded by both venue pools and within the recorded capital
+limits. Strategy edge, return, cooldown, and execution checks are separate;
+an observed opportunity is not an execution recommendation or a guaranteed fill.
+
+Windows report the first and last positive samples, sample count, and peak quoted
+net. Errors and collection gaps break windows. History begins with collection;
+earlier no-edge scan logs contain no leg prices. Charts retain the latest 3,000
+samples per game, while the ledger retains all observations. Times are Pacific.
+
+Trade attempts count recorded preflight/recheck refusals plus distinct submitted
+baskets. Rate-limited diagnostic logs cannot establish every unrecorded retry.
+Executed trades count baskets with at least one booked fill; order acknowledgements
+alone do not count. Details retain actual execution prices, quantities, fees, and
+repair orders. Expected profit is realized profit plus the conditional $1 payout
+of complete open sets minus their FIFO cost, including fees. It is unavailable
+for incomplete inventory. NFL tie and cancellation rules can invalidate the $1
+assumption; quoted profits and expected profits are not realized returns.
+
+Totals count each selected cash pool once. Venue-reported balances are shown
+separately from recorded ledger cash, allocated game cash, and reserves. Polymarket
+US buying power, pending deposits, bonuses, and withdrawable funds come from the
+authenticated monitor's existing evidence. Missing or stale account observations
+remain visible; the dashboard does not repair or reallocate balances.
+
+Implementation: cross_market_dashboard.py, cross_market.html, and
+cross_market_monitor.py in packages/czquant/src/czquant. Regression cases cover
+fee rounding, depth, insufficient cash, missing samples, incomplete inventory,
+actual fills, aggregate deduplication, and observation-only quote collection.
+
 ## Export
 
 Create an output directory first. Export produces the common JSONL event
