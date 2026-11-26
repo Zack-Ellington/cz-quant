@@ -198,12 +198,13 @@ def test_reports_sum_dollar_results_and_compute_returns_from_total_capital(tmp_p
 
 def test_shared_account_allocation_is_not_portfolio_profit_or_external_funding(tmp_path):
     from czquant.operator import allocate
+    from test_shared_account import Kalshi
     store = Store(tmp_path)
     pool(store, 'a', 'kalshi', '600', 'live')
     pool(store, 'b', 'kalshi', '400', 'live')
     store.create_portfolio('account-experiment', ['a', 'b'])
     start = utc()
-    allocate(store, 'a', 'b', D(100))
+    allocate(store, 'a', 'b', D(100), api=Kalshi(cents=100000))
     store.append('health', {'component': 'account', 'status': 'healthy'})
     metrics = {m['portfolio']: m for m in compare(store, start, utc())[0]}
     assert metrics['a']['external_flows'] == -100 and metrics['b']['external_flows'] == 100
@@ -260,6 +261,7 @@ def test_portfolio_membership_is_explicit_unique_and_same_mode(tmp_path):
 
 def test_concurrent_shared_account_allocations_cannot_spend_the_same_cash(tmp_path):
     from czquant.operator import allocate
+    from test_shared_account import Kalshi
     store = Store(tmp_path)
     for identifier, cash in [('a', '100'), ('b', '0'), ('c', '0')]:
         pool(store, identifier, 'kalshi', cash, 'live')
@@ -268,7 +270,7 @@ def test_concurrent_shared_account_allocations_cannot_spend_the_same_cash(tmp_pa
     def move(target):
         connection = Store(tmp_path)
         try:
-            allocate(connection, 'a', target, D(80))
+            allocate(connection, 'a', target, D(80), api=Kalshi(cents=10000))
             return True
         except ValueError:
             return False

@@ -140,7 +140,7 @@ def register_polymarket_us(store: Store, api: Any, identifier: str) -> None:
 
 
 def open_sub(store: Store, identifier: str, account_id: str, cash: Any = "0",
-             markets: list[str] | None = None, source: str | None = None) -> None:
+             markets: list[str] | None = None, source: str | None = None, *, api: Any = None) -> None:
     """Load a virtual subaccount: a new pool on the account, funded by allocation from
     the reserve (or `source`, another pool on the account). Works while other pools on
     the account trade, since nothing changes at the venue.
@@ -161,7 +161,7 @@ def open_sub(store: Store, identifier: str, account_id: str, cash: Any = "0",
         store.append("observation", {"kind": "sub_opened", "account": account_id, "parent": parent,
                                      "cash": str(amount), **extra}, identifier)
         if amount:
-            allocate(store, parent, identifier, amount)
+            allocate(store, parent, identifier, amount, api=api)
 
 
 def free_cash(store: Store, p: dict[str, Any]) -> Decimal:
@@ -169,7 +169,40 @@ def free_cash(store: Store, p: dict[str, Any]) -> Decimal:
     return state.venue_cash.get(p["venue"], ZERO) - store.reserved(p["id"])
 
 
-def allocate(store: Store, source: str, target: str, dollars: Any) -> None:
+def _check_live_cash(store: Store, p: dict[str, Any], api: Any = None) -> dict[str, Any] | None:
+    """Read current account backing without making monitor health a strategy API.
+
+    Run under the allocation transaction. Unrecorded cash is not allocated here;
+    a shortfall must be reconciled before any recorded ownership is reassigned.
+    """
+    if p["mode"] != "live":
+        return
+    group = [q for q in active_pools(store) if store.account_key(q) == store.account_key(p)]
+    balances = [portfolio_state(store, q["id"]).venue_cash.get(p["venue"], ZERO) for q in group]
+    if p["venue"] == "kalshi":
+        from .broker import scope
+        from .kalshi import Kalshi
+        from .operator import _balance
+        api = api or Kalshi()
+        if not api.key_id:
+            raise ValueError("live allocation requires Kalshi credentials")
+        balance, observed = _balance(api, {**scope(p["metadata"]),
+                                          "exchange_index": p["metadata"].get("exchange_index", 0)})
+    elif p["venue"] == "polymarket_us":
+        from .polymarket_us import PolymarketUS
+        api = api or PolymarketUS.from_env(authenticated=True)
+        balance = api.balance()
+        observed = _pmus_cash(balance)
+    else:
+        raise ValueError(f"live allocation is unsupported for {p['venue']}")
+    recorded = sum(balances, ZERO)
+    if observed < recorded or any(cash < 0 for cash in balances):
+        raise ValueError(f"account cash ${observed} does not back its pools (${recorded}): reconcile first")
+    return {"balance": balance, "recorded_cash": str(recorded), "observed_cash": str(observed),
+            "pools": [q["id"] for q in group], "observed_at": utc()}
+
+
+def allocate(store: Store, source: str, target: str, dollars: Any, *, api: Any = None) -> None:
     """Move recorded cash between two pools on one account (any venue, either mode).
     No money moves at the venue; only each pool's share of the account changes."""
     dollars = decimal(dollars)
@@ -184,20 +217,22 @@ def allocate(store: Store, source: str, target: str, dollars: Any) -> None:
         if dollars > free:
             label = "Kalshi " if a["venue"] == "kalshi" else ""
             raise ValueError(f"{source} has ${free} of free {label}cash")
+        backing = _check_live_cash(store, a, api)
         tag, at = uuid.uuid4().hex, utc()
         for pid, delta in ((source, -dollars), (target, dollars)):
             store.append("transaction", {"reason": "funding", "purpose": "allocation", "venue": a["venue"],
                 "cash_delta": str(delta), "external_delta": str(delta), "fee": "0", "legs": [],
-                "evidence": {"from": source, "to": target}}, pid, source=f"allocate:{tag}:{pid}", at=at)
+                "evidence": {"from": source, "to": target, **({"backing": backing} if backing else {})}},
+                pid, source=f"allocate:{tag}:{pid}", at=at)
 
 
 def move_lots(store: Store, source: str, target: str, market: str, side: str,
               quantity: Any = None) -> Decimal:
     """Hand open contracts from one pool to another on the same account, at cost basis.
 
-    Each moved lot is a pair of position_transfer transactions: the source retires it
-    with a prepaid credit equal to its basis (no realized P&L) and the target opens it
-    with that basis. The venue position is unchanged. Returns the quantity moved."""
+    Each moved lot is a pair of position_transfer transactions: capital leaves the
+    source and enters the target at the lot's basis, without cash or realized P&L.
+    The venue position is unchanged. Returns the quantity moved."""
     if side not in ("yes", "no"):
         raise ValueError("side is yes or no")
     with store.transaction():
@@ -228,10 +263,10 @@ def move_lots(store: Store, source: str, target: str, market: str, side: str,
             price = str(basis / take)
             common = {"reason": "position_transfer", "venue": a["venue"], "cash_delta": "0", "fee": "0",
                       "context": lot["context"], "evidence": {"from": source, "to": target, "lot_id": lot["record_id"]}}
-            store.append("transaction", {**common, "prepaid_delta": str(basis), "legs": [
+            store.append("transaction", {**common, "external_delta": str(-basis), "legs": [
                 {"market": market, "side": side, "quantity_delta": str(-take), "price": price,
                  "lot_id": lot["record_id"]}]}, source, source=f"move:{tag}:{lot['record_id']}:out", at=at)
-            store.append("transaction", {**common, "prepaid_delta": str(-basis), "legs": [
+            store.append("transaction", {**common, "external_delta": str(basis), "legs": [
                 {"market": market, "side": side, "quantity_delta": str(take), "price": price}]},
                 target, source=f"move:{tag}:{lot['record_id']}:in", at=at)
             remaining -= take
@@ -239,7 +274,7 @@ def move_lots(store: Store, source: str, target: str, market: str, side: str,
         return moved
 
 
-def close_sub(store: Store, identifier: str, to: str | None = None) -> Decimal:
+def close_sub(store: Store, identifier: str, to: str | None = None, *, api: Any = None) -> Decimal:
     """Unload a virtual subaccount: it must have no orders open and hold nothing (let
     lots settle, or move them with `move_lots`). Its cash is allocated to `to`, its
     parent, or the reserve, and it is retired. Its records stay. Returns the cash moved."""
@@ -250,7 +285,9 @@ def close_sub(store: Store, identifier: str, to: str | None = None) -> Decimal:
         acct_id = p["metadata"].get("account")
         if not acct_id:
             raise ValueError(f"{identifier} is not a virtual subaccount")
-        if store.reserved(identifier):
+        pending = store.db.execute("SELECT 1 FROM orders WHERE portfolio_id=? AND "
+                                   "status IN ('pending','unknown','acknowledged') LIMIT 1", (identifier,)).fetchone()
+        if pending or store.reserved(identifier):
             raise ValueError(f"{identifier} has orders open")
         held = sorted({l["market"] for l in portfolio_state(store, identifier).lots.values()})
         if held:
@@ -262,7 +299,7 @@ def close_sub(store: Store, identifier: str, to: str | None = None) -> Decimal:
         if cash < 0:
             raise ValueError(f"{identifier} records negative cash ${cash}: reconcile first")
         if cash:
-            allocate(store, identifier, target, cash)
+            allocate(store, identifier, target, cash, api=api)
         metadata = {**p["metadata"], "retired_at": utc()}
         store.db.execute("UPDATE portfolios SET metadata=? WHERE id=?", (encode(metadata), identifier))
         store.append("observation", {"kind": "sub_closed", "to": target, "cash": str(cash)}, identifier)
@@ -280,28 +317,29 @@ def book_reserve_difference(store: Store, api: Any, account_id: str, note: str) 
     from .operator import _balance, kalshi_cash, kalshi_positions
     if not note:
         raise ValueError("say what the difference is (the deposit or withdrawal) in the note")
-    acct = account(store, account_id)
-    if acct["venue"] != "kalshi" or acct["mode"] != "live":
-        raise ValueError("only live Kalshi accounts need this; other venues report their funding")
-    group = members(store, account_id)
-    ids = tuple(p["id"] for p in group)
-    pending = store.db.execute(f"SELECT COUNT(*) FROM orders WHERE status IN ('pending','unknown','acknowledged') "
-                               f"AND portfolio_id IN ({','.join('?' for _ in ids)})", ids).fetchone()[0]
-    if pending:
-        raise ValueError("orders on the account are unresolved: let the monitor book them first")
-    params = {**scope(acct["metadata"]), "exchange_index": acct["metadata"].get("exchange_index", 0)}
-    positions = list(api.pages("/portfolio/positions", "market_positions", **params))
-    held = {r["ticker"]: decimal(r.get("position_fp", "0")) for r in positions if decimal(r.get("position_fp", "0"))}
-    if held != kalshi_positions(store, group):
-        raise ValueError("positions do not reconcile: the difference may be a trade, not funding")
-    balance, observed = _balance(api, params)
-    difference = observed - sum((kalshi_cash(store, p) for p in group), ZERO)
-    if difference:
-        store.append("transaction", {"reason": "funding", "purpose": "deposit" if difference > 0 else "withdrawal",
-            "venue": "kalshi", "cash_delta": str(difference), "external_delta": str(difference), "fee": "0",
-            "legs": [], "evidence": {"balance": balance, "note": note}},
-            reserve_id(account_id), source=f"reserve-difference:{account_id}:{uuid.uuid4().hex}")
-    return difference
+    with store.transaction():
+        acct = account(store, account_id)
+        if acct["venue"] != "kalshi" or acct["mode"] != "live":
+            raise ValueError("only live Kalshi accounts need this; other venues report their funding")
+        group = members(store, account_id)
+        ids = tuple(p["id"] for p in group)
+        pending = store.db.execute(f"SELECT COUNT(*) FROM orders WHERE status IN ('pending','unknown','acknowledged') "
+                                   f"AND portfolio_id IN ({','.join('?' for _ in ids)})", ids).fetchone()[0]
+        if pending:
+            raise ValueError("orders on the account are unresolved: let the monitor book them first")
+        params = {**scope(acct["metadata"]), "exchange_index": acct["metadata"].get("exchange_index", 0)}
+        positions = list(api.pages("/portfolio/positions", "market_positions", **params))
+        held = {r["ticker"]: decimal(r.get("position_fp", "0")) for r in positions if decimal(r.get("position_fp", "0"))}
+        if held != kalshi_positions(store, group):
+            raise ValueError("positions do not reconcile: the difference may be a trade, not funding")
+        balance, observed = _balance(api, params)
+        difference = observed - sum((kalshi_cash(store, p) for p in group), ZERO)
+        if difference:
+            store.append("transaction", {"reason": "funding", "purpose": "deposit" if difference > 0 else "withdrawal",
+                "venue": "kalshi", "cash_delta": str(difference), "external_delta": str(difference), "fee": "0",
+                "legs": [], "evidence": {"balance": balance, "note": note}},
+                reserve_id(account_id), source=f"reserve-difference:{account_id}:{uuid.uuid4().hex}")
+        return difference
 
 
 def summary(store: Store, account_id: str) -> dict[str, Any]:
@@ -324,27 +362,20 @@ def market_in_scope(markets: list[str] | None, ticker: str) -> bool:
 
 
 def netting_conflict(store: Store, p: dict[str, Any], ticker: str, opening_side: str) -> str | None:
-    """Another pool on the same live account that holds, or is buying, the opposite side
+    """Another pool on the same account that holds, or may buy, the opposite side
     of `ticker`. The venue would net the two positions away, so the ledger's lots
     would no longer match the account."""
     key = store.account_key(p)
-    if key is None or p["mode"] != "live":
+    if key is None:
         return None
     opposite = "no" if opening_side == "yes" else "yes"
     for other in active_pools(store):
         if other["id"] == p["id"] or store.account_key(other) != key:
             continue
-        lots = portfolio_state(store, other["id"]).lots.values()
-        if any(l["market"] == ticker and l["side"] == opposite for l in lots):
+        from .broker import Broker
+        net, bids, asks = Broker(store, other["id"])._inventory(ticker)
+        if (opposite == "no" and net - asks < 0) or (opposite == "yes" and net + bids > 0):
             return other["id"]
-        holds = {l["side"] for l in lots if l["market"] == ticker}
-        for r in store.db.execute("SELECT request FROM orders WHERE portfolio_id=? AND "
-                                  "status IN ('pending','unknown','acknowledged')", (other["id"],)):
-            req = json.loads(r["request"])
-            buys = "yes" if req["side"] == "bid" else "no"
-            closes = "no" if buys == "yes" else "yes"
-            if req["ticker"] == ticker and buys == opposite and closes not in holds:
-                return other["id"]
     return None
 
 

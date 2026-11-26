@@ -202,10 +202,10 @@ def remap_kalshi(store: Store, api: Any, portfolio: str, subaccount: int, exchan
             source=f'opening-live:{portfolio}:{tag}')
 
 
-def allocate(store: Store, source: str, target: str, dollars: Decimal) -> None:
+def allocate(store: Store, source: str, target: str, dollars: Decimal, *, api: Any = None) -> None:
     """Move recorded cash between two pools on one account. See `accounts.allocate`."""
     from .accounts import allocate as allocate_any
-    allocate_any(store, source, target, dollars)
+    allocate_any(store, source, target, dollars, api=api)
 
 
 def _settle_for_retirement(store: Store, api: Any, portfolio: str, params: dict[str, Any], sub: int,
@@ -289,7 +289,7 @@ def retire_live(store: Store, api: Any, portfolio: str, book_difference: bool = 
                 portfolio, source=f'reconcile:{portfolio}:{tag}')
         released = {v: c for v, c in portfolio_state(store, portfolio).venue_cash.items() if c}
         if to is not None and released.get('kalshi'):
-            allocate(store, portfolio, to, released.pop('kalshi'))
+            allocate(store, portfolio, to, released.pop('kalshi'), api=api)
         for venue, cash in released.items():
             _release(store, portfolio, venue, cash, 'retirement', {'balance': balance} if venue == 'kalshi' else {}, tag)
         result = {'settled': booked, 'difference': str(difference),

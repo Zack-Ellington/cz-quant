@@ -388,6 +388,15 @@ def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any],
         if _booked(store, source) is not None:
             continue
         if kind == "ACTIVITY_TYPE_TAKER_FEE_REBATE":
+            if p["metadata"].get("reserve"):
+                # Without pool ownership evidence, preserve the rebate without
+                # making a trading return available to
+                # fund another experiment. A sole legacy owner is unambiguous.
+                discrepancies.append({"portfolio": p["id"], "kind": "unattributed_rebate",
+                                      "transaction": body.get("transactionId")})
+                store.append("quarantine", {"kind": "rebate", "raw": activity}, p["id"],
+                             source=source + ":quarantine", at=at)
+                continue
             store.append("transaction", {"reason": "rebate", "venue": "polymarket_us", "cash_delta": str(abs(value)),
                          "fee": "0", "legs": [], "evidence": activity}, p["id"], source=source, at=at)
         else:

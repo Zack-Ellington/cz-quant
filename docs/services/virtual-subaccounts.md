@@ -2,9 +2,11 @@
 
 A virtual subaccount is a cash pool that holds a recorded share of one registered
 account. Subaccounts work the same way at every venue and in paper mode, because
-nothing moves at the venue: only recorded ownership changes. A sub can therefore
-be loaded or unloaded while other pools on the account keep trading. Each venue's
-own subaccount mechanism (Kalshi's numbered subaccounts, for example) remains
+the operations change recorded ownership rather than moving money at the venue.
+A sub can be loaded while other pools trade when current account cash backs the
+recorded allocations. Closing a sub also requires that it has no unresolved orders
+or positions. Each venue's own subaccount mechanism (Kalshi's numbered
+subaccounts, for example) remains
 optional, as a way to get isolation at the venue.
 
 This follows [principle 5](../design-principles.md#core-principles): each broker
@@ -16,7 +18,7 @@ twice, and every allocation change is recorded and reconciled.
 | Piece | What it is |
 | --- | --- |
 | Account | One real venue account (a Kalshi subaccount on one exchange, or the Polymarket US account), or one hypothetical paper account. Stored in the `accounts` table. |
-| Reserve | `<account>:reserve`, created at registration. It holds the account's unallocated cash. The monitor books venue-level funding (transfers, deposits, Polymarket US advances) here. It cannot trade. |
+| Reserve | `<account>:reserve`, created at registration. It holds the account's unallocated cash. It receives supported venue funding. It cannot trade. |
 | Sub | Any other pool on the account, funded by allocation from the reserve or from another sub. Brokers bind to subs. |
 
 For each live account, the monitor checks:
@@ -101,19 +103,49 @@ uv run czquant open-sub bos-sac --account main --markets KXNBAGAME-26NOV26BOSSAC
   including `--share-account`) become members of the account. The reserve opens with
   whatever cash they don't record.
 - **Cross-pool netting.** Kalshi and Polymarket US net one market's YES and NO within
-  one account. On a live account, a broker therefore refuses an order that would open
-  the opposite side of a market another pool on the account holds or is buying (reason
-  `cross_pool_netting`). Closing a pool's own position is allowed. Paper accounts don't
-  net, so the guard is live-only. `move-lots` never moves lots onto the opposite side.
+  one account. A broker refuses an order that would open the opposite side of a
+  market another pool on the account holds or may buy (reason cross_pool_netting).
+  Registered paper accounts enforce the same rule; independent paper accounts remain
+  independent. Confirmed fills establish closing ownership before exact receipts are
+  booked. Outstanding orders reserve closing quantities. Amendments expose their
+  maximum possible quantity before the venue call, including unknown outcomes.
+  Moving lots onto the opposite side is refused.
 - **Moving lots.** `position_transfer` transactions move lots at their basis. The
-  source retires a lot with a prepaid credit equal to its basis; the target opens it
-  with the same basis. Realized P&L is unchanged.
+  source records an external capital outflow at basis; the target records the matching
+  inflow and opens the lot with that basis. Cash, prepaid collateral, and realized P&L
+  are unchanged. The capital flows cancel when both pools belong to a reporting group.
 - **Reporting.** A reporting portfolio can add a pool that has only funding (a newly
   loaded sub) with `portfolio-add`. Pools never leave. A closed sub keeps its realized
   P&L at zero equity, and allocations between member pools are internal.
-- **Buying power.** No venue-level check runs at submission. Each pool's `available`
-  is limited to its own recorded cash, and the pools' total is reconciled against the
-  venue, so overspending shows up as a mismatch that halts traders that check health.
-- **Polymarket US.** The monitor books account activity to the reserve and settles
-  lots only when the whole account reconciles. Several pools on Polymarket US require
-  a registered account (`unregistered_shared_account` otherwise).
+- Live allocation. Opening a funded sub, allocating cash, and returning cash at
+  closure read the current venue balance under the ledger write transaction. A cash
+  shortfall or negative pool balance refuses the operation: reconcile first. These
+  operations need venue credentials but do not require a monitor process or strategy
+  health polling. The allocation records retain the balance evidence. Paper
+  allocation checks the hypothetical account's recorded cash.
+  Python callers may inject a venue client with the keyword api for these operations.
+- Buying power. Each broker spends only its pool's unreserved cash. Allocation-time
+  account reads do not make later external withdrawals or venue operations atomic
+  with local orders. Monitors retain responsibility for ongoing reconciliation.
+- Closing. A sub must have no inventory, reservations, or pending, unknown, or
+  acknowledged orders. Zero reserved dollars do not establish order completion.
+  Existing brokers re-read retirement before recording an intent or amendment.
+- Polymarket US. Supported account funding goes to the reserve. Trading rebates
+  without pool ownership evidence are quarantined as unattributed_rebate and remain
+  unavailable for allocation. They remain reconciliation gaps until ownership is
+  resolved; do not book them as deposits. A legacy account with one owner can retain
+  its rebates directly. Settlement requires account-wide cash reconciliation. Several
+  pools require a registered account (unregistered_shared_account otherwise).
+
+## Validation
+
+From packages/czquant, run:
+
+```bash
+uv run pytest -q tests/test_portfolio_isolation.py
+```
+
+The offline cases use fake venues and temporary stores. They cover the five $10
+allocations and $12 winner, live backing checks, rebate quarantine, confirmed-fill
+repairs, pending orders and amendments, lot-transfer basis, retirement, and matching
+paper/live ownership constraints. No real orders or money movements are needed.

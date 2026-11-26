@@ -142,8 +142,8 @@ def test_a_sub_opened_mid_run_joins_a_reporting_portfolio(tmp_path):
 def test_a_live_kalshi_account_reconciles_reserve_and_subs_together(tmp_path):
     store, api = Store(tmp_path), Kalshi("1000")
     register_kalshi(store, api, "main", 0, primary=True)
-    open_sub(store, "a", "main", "400", markets=["M"])
-    open_sub(store, "b", "main", "100")
+    open_sub(store, "a", "main", "400", markets=["M"], api=api)
+    open_sub(store, "b", "main", "100", api=api)
     assert members(store, "main")[1]["metadata"]["subaccount"] == 0
     assert account_pass(store, api)["status"] == "healthy"
 
@@ -173,15 +173,15 @@ def test_registration_adopts_pools_mapped_before_it(tmp_path):
     assert cash(store, "main:reserve") == 200
     with pytest.raises(ValueError, match="already registered"):
         register_kalshi(store, api, "again", 0, primary=True)
-    allocate(store, "old", "main:reserve", "300")
+    allocate(store, "old", "main:reserve", "300", api=api)
     assert account_pass(store, api)["status"] == "healthy"
 
 
 def test_live_subs_cannot_hold_opposite_sides_of_one_market(tmp_path):
     store, api = Store(tmp_path), Kalshi("1000")
     register_kalshi(store, api, "main", 0, primary=True)
-    open_sub(store, "a", "main", "100")
-    open_sub(store, "b", "main", "100")
+    open_sub(store, "a", "main", "100", api=api)
+    open_sub(store, "b", "main", "100", api=api)
     Broker(store, "a", Fills(mode="live")).submit(order(side="bid"))  # a holds YES
     b = Broker(store, "b", Fills(mode="live"))
     result = b.submit(order(side="ask"))  # would buy NO: Kalshi nets it against a's YES
@@ -189,21 +189,20 @@ def test_live_subs_cannot_hold_opposite_sides_of_one_market(tmp_path):
     assert b.submit(order(side="bid"))["status"] == "executed"  # the same side is fine
     a = Broker(store, "a", Fills(mode="live"))
     assert a.submit(order(side="ask", count="10", price="0.50"))["status"] == "executed"  # a closing is fine
-    # Paper accounts don't net at a venue, so the guard is live-only.
+    # Registered paper accounts use the same ownership constraints as live accounts.
     register_paper(store, "p", "kalshi", "100")
     open_sub(store, "x", "p", "50")
     open_sub(store, "y", "p", "50")
     Broker(store, "x", Fills()).submit(order(side="bid"))
-    assert Broker(store, "y", Fills()).submit(order(side="ask"))["status"] == "executed"
-    # Lots never move onto the opposite side of the same market.
-    with pytest.raises(ValueError, match="opposite side"):
-        move_lots(store, "x", "y", "M", "yes")
+    assert Broker(store, "y", Fills()).submit(order(side="ask"))["status"] == "rejected"
+    # An unscoped receiver can take owned lots explicitly without inventing a fill.
+    assert move_lots(store, "x", "y", "M", "yes") == 10
 
 
 def test_polymarket_us_subs_share_the_account_and_its_activity_goes_to_the_reserve(tmp_path):
     store, us = Store(tmp_path), FakeUS()
     register_polymarket_us(store, us, "pmus")
-    open_sub(store, "game", "pmus", "200", markets=[TICKER])
+    open_sub(store, "game", "pmus", "200", markets=[TICKER], api=us)
     assert polymarket_us_pass(store, us)["status"] == "healthy"
     us.cash += 40
     deposit = {"type": "ACTIVITY_TYPE_ACCOUNT_DEPOSIT", "accountBalanceChange": {
