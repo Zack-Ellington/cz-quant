@@ -209,8 +209,7 @@ def test_known_second_leg_failure_repairs_first_fill(setup, monkeypatch, mode):
         response = httpx.Response(400, request=httpx.Request("POST", "https://fixture.invalid/orders"))
         raise httpx.HTTPStatusError("known rejection", request=response.request, response=response)
     monkeypatch.setattr(engine.kalshi_broker.adapter, "create_order", reject)
-    with pytest.raises(httpx.HTTPStatusError):
-        engine.step()
+    engine.step()
     assert not engine.poly_broker.state().lots and not engine.kalshi_broker.state().lots
     assert engine.counters["unwinds"] == 1
     assert engine.poly_broker.available < 50  # repair loss remains with this allocation
@@ -247,8 +246,7 @@ def test_unknown_later_leg_keeps_known_fill_and_halts_for_reconciliation(setup, 
     def timeout(*_):
         raise TimeoutError("reply lost")
     monkeypatch.setattr(engine.kalshi_broker.adapter, "create_order", timeout)
-    with pytest.raises(TimeoutError):
-        engine.step()
+    engine.step()
     assert engine.poly_broker.state().lots and engine.halted
     assert engine.counters["unwinds"] == 0
     assert store.reserved(spec.portfolio["kalshi"]) > 0
@@ -299,19 +297,19 @@ def test_foreign_inventory_is_rejected_before_run_start(setup):
     assert not store.events(kinds=("run", "order"))
 
 
-def test_incomplete_repair_halts_and_survives_restart(setup, monkeypatch):
+def test_incomplete_repair_is_retried_after_restart(setup, monkeypatch):
     store, create, build = setup
     spec = create()
     engine = build(spec)
     monkeypatch.setattr(engine.kalshi_broker.adapter, "create_order", lambda *_: (_ for _ in ()).throw(ValueError("rejected")))
     monkeypatch.setattr(engine, "unwind", lambda *args: {"status": "canceled", "sold": "0"})
-    with pytest.raises(ValueError, match="rejected"):
-        engine.step()
+    engine.step()
     assert engine.halted and engine.poly_broker.state().lots
     restarted = build(spec)
     orders = store.events(kinds=("order",))
     restarted.step()
-    assert restarted.halted and store.events(kinds=("order",)) == orders
+    assert not restarted.halted and len(store.events(kinds=("order",))) > len(orders)
+    assert not restarted.poly_broker.state().lots
 
 
 def test_loader_records_all_resolved_parameters_and_rejects_unknown_keys(tmp_path):
@@ -328,7 +326,7 @@ def test_loader_records_all_resolved_parameters_and_rejects_unknown_keys(tmp_pat
 
 @pytest.mark.parametrize("parameters", [
     {"max_sets": 0}, {"cooldown": -1},
-    {"unwind_slippage": 2}, {"live": True}, {"dry_run": True},
+    {"unwind_slippage": 0.05}, {"live": True}, {"dry_run": True},
 ])
 def test_invalid_parameters_fail_before_any_engine_exists(tmp_path, parameters):
     path = tmp_path / "bad.json"
@@ -399,7 +397,10 @@ def test_live_kalshi_acknowledgement_pauses_until_monitor_books_fills(setup, rec
     broker.finish(order["client_order_id"], "filled")
     restarted.resume()
     if reconcile_quantity == "9":
-        assert restarted.halted and "incomplete inventory" in restarted.halted
+        assert restarted.halted and "unmatched inventory" in restarted.halted
+        restarted.step()
+        assert not restarted.halted
+        assert sum(lot["quantity"] for lot in restarted.poly_broker.state().lots.values()) == 9
     else:
         assert not restarted.halted and restarted.live_block() is None
         restarted.poly.depth = "20"  # replenish the fixture's consumed paper liquidity
@@ -418,3 +419,154 @@ def test_same_market_opposite_basket_legs_are_rejected_before_submission(setup, 
     engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
     assert "opposite" in store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["detail"]
+
+
+def pool_sizing_engine(setup, mode='paper', kalshi_price='.16', us_price='.79', us_cash='10'):
+    store, create, build = setup
+    engine = build(create(mode=mode), max_sets=20, min_net=.01, pmus_theta=.11)
+    for broker, cash in ((engine.kalshi_broker, '10'), (engine.poly_broker, us_cash)):
+        delta = D(cash) - broker.state().cash
+        store.append('transaction', {'reason': 'funding', 'cash_delta': str(delta),
+                                    'external_delta': str(delta), 'legs': []}, broker.pool_id)
+    engine.kalshi.asks = {'BOS': kalshi_price, 'SAC': '.99'}
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+        'bids': [{'px': {'value': str(1-D(us_price))}, 'qty': '100'}],
+        'offers': [{'px': {'value': str(1-D(us_price)+D('.02'))}, 'qty': '100'}]}}
+    return engine
+
+
+@pytest.mark.parametrize('mode', ['paper', 'live'])
+@pytest.mark.parametrize('kalshi_price,us_price', [('.16', '.79'), ('.79', '.16')])
+def test_sizing_fits_each_pool_and_executes_smaller_profitable_basket(setup, mode, kalshi_price, us_price):
+    engine = pool_sizing_engine(setup, mode, kalshi_price, us_price)
+    engine.cfg.min_net = .25  # An explicit basket-profit floor remains enforceable.
+    before = engine.store.events(kinds=('transaction', 'order', 'execution'))
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 12 and basket.net >= D('.25')
+    assert engine.check_basket(basket) is None
+    assert engine.store.events(kinds=('transaction', 'order', 'execution')) == before
+    assert all(b.available == 10 for b in engine.brokers.values())
+    engine.execute(basket)  # Offline fixtures only, including the fake live adapters.
+    assert engine.counters['baskets'] == 1
+    assert all(b.available >= 0 for b in engine.brokers.values())
+    assert all(sum(lot['quantity'] for lot in b.state().lots.values()) == 12 for b in engine.brokers.values())
+    assert not engine.poly.sent
+
+
+def test_sizing_uses_broker_fee_buffer_and_respects_profit_hurdle(setup):
+    engine = pool_sizing_engine(setup, us_cash='9.70')
+    # Twelve NO contracts cost 9.48 + quoted fee .22, but the broker reserves 9.78.
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 11
+    assert engine.check_basket(basket) is None
+    engine.cfg.min_net = .26  # The affordable basket earns .24; do not relax the hurdle.
+    assert engine.scan() is None
+
+
+def test_sizing_subtracts_pending_reservations_and_ignores_other_pools(setup):
+    store, create, build = setup
+    engine = pool_sizing_engine(setup)
+    other = build(create('b'))
+    other_before = [b.available for b in other.brokers.values()]
+    broker = engine.poly_broker
+    # Reserve 1.80 with a fake acknowledged order, without a fill or cash transfer.
+    broker.adapter.create_order = lambda order, b: b.finish(order['client_order_id'], 'acknowledged', release=False)
+    broker.submit({'ticker': 'PMUS:'+engine.pair.polymarket_market, 'side': 'ask', 'price': '.125', 'count': '2'})
+    assert broker.available == D('8.20')
+    before = store.events(kinds=('transaction', 'order', 'execution'))
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 10
+    assert engine.budget_block(basket) is None
+    assert store.events(kinds=('transaction', 'order', 'execution')) == before
+    assert [b.available for b in other.brokers.values()] == other_before
+    assert broker.available == D('8.20')
+
+
+def test_sizing_uses_limit_cost_when_depth_crosses_a_price_level(setup):
+    engine = pool_sizing_engine(setup, kalshi_price='.10', us_cash='5')
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+        'bids': [{'px': {'value': '.80'}, 'qty': '5'}, {'px': {'value': '.20'}, 'qty': '100'}],
+        'offers': [{'px': {'value': '.82'}, 'qty': '100'}]}}
+    # Seven cost only 2.60 at VWAP but require >5 at the .80 limit. Six fit.
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 6
+    assert engine.check_basket(basket) is None
+
+
+def test_sizing_returns_no_basket_when_neither_route_can_fund_one_set(setup):
+    engine = pool_sizing_engine(setup, us_cash='.01')
+    basket, reason = engine.price_pair()
+    assert basket is None and reason == 'capital_limit'
+    assert not engine.store.events(kinds=('order', 'execution'))
+
+
+def test_sizing_aggregates_multiple_legs_on_the_same_venue(setup):
+    engine = pool_sizing_engine(setup)
+    engine.cfg.require_cross = False
+    engine.kalshi.asks = {'BOS': '.4', 'SAC': '.4'}
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+        'bids': [{'px': {'value': '.5'}, 'qty': '100'}],
+        'offers': [{'px': {'value': '.5'}, 'qty': '100'}]}}
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 11  # Twelve reserve 2 × 5.01 > 10.
+    assert all(leg['venue'] == 'kalshi' for leg in basket.legs)
+    assert engine.check_basket(basket) is None
+
+
+def test_execution_reprices_size_after_selected_pool_cash_changes(setup):
+    engine = pool_sizing_engine(setup)
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 12
+    engine.store.append('transaction', {'reason': 'funding', 'cash_delta': '-3',
+                        'external_delta': '-3', 'legs': []}, engine.poly_broker.pool_id)
+    engine.execute(basket)
+    assert engine.counters['baskets'] == 1
+    assert all(sum(lot['quantity'] for lot in b.state().lots.values()) == 8 for b in engine.brokers.values())
+
+
+@pytest.mark.parametrize("second_leg", ["filled", "rejected"])
+@pytest.mark.parametrize("first_fill", ["10.00", "4.00", "0.00"])
+def test_kalshi_v2_first_leg_is_hedged_or_unwound(setup, monkeypatch, second_leg, first_fill):
+    store, create, build = setup
+    engine = build(create(mode="live"))
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 10
+    for leg in basket.legs:
+        leg["depth"] = "10" if leg["venue"] == "kalshi" else "100"
+    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    sent = []
+
+    class V2Kalshi:
+        def create_order(self, order):
+            sent.append(order)
+            return {"order_id": "venue-" + order["client_order_id"],
+                    "client_order_id": order["client_order_id"],
+                    "fill_count": order["count"] if order.get("reduce_only") else first_fill,
+                    "remaining_count": "0.00"}
+
+    engine.kalshi_broker.adapter = KalshiLive(V2Kalshi())
+    original_book = engine.kalshi.book
+    monkeypatch.setattr(engine.kalshi, "book", lambda ticker: {"orderbook_fp": {
+        **original_book(ticker)["orderbook_fp"], "yes_dollars": [["0.20", "100"]]}})
+    if second_leg == "rejected":
+        def reject(order, broker):
+            broker.finish(order["client_order_id"], "rejected")
+            return {"status": "rejected", "filled": "0"}
+        monkeypatch.setattr(engine.poly_broker.adapter, "create_order", reject)
+    engine.execute(basket)
+    record = store.events(kinds=("observation",), observations=("basket_execution",))[-1]["data"]
+    assert record["outcomes"][0]["venue"] == "kalshi"
+    assert D(record["outcomes"][0]["filled"]) == D(first_fill)
+    assert not engine.halted
+    if D(first_fill) == 0:
+        assert not engine.poly_broker.orders() and len(sent) == 1
+    elif second_leg == "filled":
+        assert sum(lot["quantity"] for lot in engine.poly_broker.state().lots.values()) == D(first_fill)
+        assert len(sent) == 1
+    else:
+        assert len(sent) == 2 and sent[1]["reduce_only"] and D(sent[1]["count"]) == D(first_fill)
+        assert sent[1]["side"] != sent[0]["side"]
+        assert D(record["outcomes"][-1]["sold"]) == D(first_fill)
+        assert not engine.poly_broker.state().lots
+    # Kalshi's account monitor still owns authoritative fill booking.
+    assert not engine.kalshi_broker.state().lots

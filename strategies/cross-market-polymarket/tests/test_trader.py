@@ -164,7 +164,7 @@ def test_a_short_later_leg_has_the_extras_sold_back(engine_for, monkeypatch):
     assert held == {f"{EVENT}-BOS": 10, "PM:tok-sac": 10}  # 30 Sacramento tokens sold back at 0.36
     record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
     unwind = [o for o in record["outcomes"] if "unwind" in o][0]
-    assert (unwind["ticker"], unwind["unwind"], unwind["sold"], unwind["floor"]) == ("PM:tok-sac", "30", "30", "0.33")
+    assert (unwind["ticker"], unwind["unwind"], unwind["sold"], unwind["floor"]) == ("PM:tok-sac", "30", "30", "0.36")
 
 
 def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):
@@ -186,13 +186,15 @@ def test_restart_recovers_both_venues_without_refunding(engine_for):
     assert len(restarted.kalshi_broker.state().lots) == len(restarted.poly_broker.state().lots) == 1
 
 
-def test_paper_rejects_a_basket_when_only_the_other_venue_has_enough_cash(engine_for):
+def test_paper_sizes_to_the_venue_with_less_cash(engine_for):
     engine = engine_for()
     engine.store.append('transaction', {'reason': 'funding', 'cash_delta': '-390',
                                       'external_delta': '-390', 'legs': []}, engine.poly_broker.pool_id)
     engine.step()
-    assert engine.kalshi_broker.available == 600 and engine.poly_broker.available == 10
-    assert not engine.store.events(kinds=('order',))
+    assert engine.counters['baskets'] == 1
+    assert 0 <= engine.poly_broker.available < 10
+    assert 0 <= engine.kalshi_broker.available < 600
+    assert all(sum(lot['quantity'] for lot in b.state().lots.values()) == 25 for b in engine.brokers.values())
 
 
 def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch):
@@ -215,3 +217,17 @@ def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch
         with pytest.raises(Captured):
             trader.main(["--experiment", str(path), "--once"])
     assert [(c.max_sets, c.max_basket_dollars, c.max_total_dollars) for c in configs] == [(20, 25, 100)] * 2
+    assert [(c.min_net, c.min_edge) for c in configs] == [(0, .01)] * 2
+
+
+def test_defaults_allow_small_profitable_baskets_but_keep_per_pair_threshold(engine_for):
+    engine = engine_for()
+    engine.cfg.max_sets = 1
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 1
+    assert D('.01') <= basket.net < D('.25')
+    engine.cfg.min_net = .25
+    assert engine.scan() is None  # Explicit basket minima still apply.
+    engine.cfg.min_net = 0
+    engine.poly.asks['tok-sac'] = '.415'  # Positive after fees, but below 1 cent per pair.
+    assert engine.scan() is None
