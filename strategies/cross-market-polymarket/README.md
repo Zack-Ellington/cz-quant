@@ -278,3 +278,11 @@ the unmatched inventory until fresh repair bids are available.
 `execution_quote` observations record the source, exchange timestamp, and quote
 ages immediately before each basket submission. Dashboard quote collection is
 independent and is not changed by this setting.
+
+Every scan records its input books, source timestamps, fee parameters, four raw
+buy prices, and both fee-adjusted cross-venue gaps in the scan_complete quote
+payload. Gaps use the execution pricer and broker funding checks across integer
+sizes up to max_sets; max_gap selects profit per pair, best selects total profit.
+Positive gaps do not bypass the configured execution thresholds. Missing, stale,
+or closed quotes record an empty gap sample and a reason. These observations
+are read-only reporting inputs for an independent dashboard, not fills.

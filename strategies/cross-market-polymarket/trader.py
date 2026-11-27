@@ -32,6 +32,7 @@ from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive,
 from czquant.store import decimal
 
 from experiments import Experiment, Outcome, SelectedPair
+from scan_capture import measure
 from stream_book import StreamBook, QuoteUnavailable
 from slippage import split_limits, second_limit, cost
 from sum_check import Basket, best, kalshi_offer, polymarket_offer, polymarket_us_offer
@@ -360,6 +361,10 @@ class Engine:
     def price_pair(self) -> tuple[Basket | None, str]:
         """Read only the prepared pair. No listings, league scans or matching."""
         pair = self.pair
+        self.scan_quote = {"experiment_id": self.experiment.id, "status": "error",
+                           "legs": [], "routes": [], "books": {},
+                           "interval": self.cfg.interval_seconds,
+                           "started_at": datetime.now(timezone.utc).isoformat()}
         markets = {name: self.kalshi.market(name) for name, _ in pair.contracts("kalshi")}
         for name, market in markets.items():
             if market["ticker"] != name or market["event_ticker"] != pair.kalshi_event:
@@ -371,6 +376,9 @@ class Engine:
             return None, "unsupported_kalshi_fees"
         multiplier = decimal(schedule.get("fee_multiplier", "1"))
         kbooks = {name: self.kalshi.book(name) for name in markets}
+        self.scan_quote["fee_multiplier"] = multiplier
+        self.scan_quote["books"] = {"kalshi": kbooks}
+        self.scan_quote["kalshi_received_at"] = datetime.now(timezone.utc).isoformat()
         offers: dict[str, list] = {}
         if self.us:
             market = self.poly.market_raw(pair.polymarket_market)
@@ -382,7 +390,10 @@ class Engine:
                 pbook = self.us_execution_book()
             except QuoteUnavailable as exc:
                 return None, str(exc)
+            self.scan_quote["books"]["polymarket"] = pbook
+            self.scan_quote["source"] = pbook.get("execution_quote", {"source": "polymarket_us_rest"})
             theta = self.theta_override if self.theta_override is not None else decimal(market.get("feeCoefficient", DEFAULT_THETA))
+            self.scan_quote["fee_coefficient"] = theta
         else:
             market = self.poly.market_by_slug(pair.polymarket_event)
             if str(market["id"]) != pair.polymarket_market:
@@ -390,6 +401,8 @@ class Engine:
             self.poly.remember(market)
             tokens = [o.polymarket.removeprefix("PM:") for o in pair.outcomes]
             pbooks = {token: kalshi_layout(raw) for token, raw in self.poly.books(tokens).items()}
+            self.scan_quote["books"]["polymarket"] = pbooks
+            self.scan_quote["source"] = {"source": "polymarket_rest"}
         for index, outcome in enumerate(pair.outcomes):
             role = str(index)
             ways = [kalshi_offer(role, outcome.kalshi, kbooks[outcome.kalshi], multiplier, outcome.kalshi_side)]
@@ -403,6 +416,12 @@ class Engine:
                     return None, "polymarket_not_trading"
                 ways.append(polymarket_offer(role, outcome.polymarket, pbooks[token], normalized["fee_schedule"]))
             offers[role] = ways
+        if len(pair.outcomes) == 2:
+            names = {alias: name for name, alias in pair.evidence.get("kalshi", [])}
+            self.scan_quote.update(measure(offers,
+                [names.get(o.kalshi.rsplit("-", 1)[-1], o.kalshi.rsplit("-", 1)[-1]) for o in pair.outcomes],
+                self.cfg.max_sets, self.limits(), lambda b: self.budget_block(b) is None))
+        self.scan_quote["status"] = "ok"
         days = max((datetime.fromisoformat(pair.resolves_at).timestamp() - time.time()) / 86400, 1 / 24)
         return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, self.limits(),
                     Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr,
@@ -410,9 +429,13 @@ class Engine:
 
     def scan(self) -> Basket | None:
         self.counters["scans"] += 1
-        basket, reason = self.price_pair()
-        self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
-                                  "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None})
+        basket, reason = None, "scan_error"
+        try:
+            basket, reason = self.price_pair()
+        finally:
+            self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
+                                      "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
+                                      "quote": {**self.scan_quote, "reason": reason}})
         return basket
 
     # -- execution -------------------------------------------------------------
