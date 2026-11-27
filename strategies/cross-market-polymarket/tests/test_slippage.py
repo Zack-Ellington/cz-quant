@@ -124,3 +124,25 @@ def test_empty_ioc_cooldown_survives_ledger_resume_and_restart(setup, monkeypatc
     assert restarted.cooldown_until == deadline
     monkeypatch.setattr("trader.time.time", lambda: deadline + .01)
     assert restarted.risk_block() is None
+
+
+
+@pytest.mark.parametrize("block", ["recheck", "profit_floor", "preflight", "capital"])
+def test_pre_submission_rejection_does_not_start_cooldown(setup, monkeypatch, block):
+    store, create, build = setup
+    engine = build(create(), profit_slippage=True, max_basket_dollars=50)
+    basket = engine.scan()
+    assert basket is not None
+    if block == "recheck":
+        monkeypatch.setattr(engine, "price_pair", lambda: (None, "no_edge"))
+    elif block == "profit_floor":
+        monkeypatch.setattr("trader.split_limits", lambda *a: None)
+    elif block == "preflight":
+        monkeypatch.setattr(engine, "check_basket", lambda *a: "insufficient pool cash")
+    else:
+        monkeypatch.setattr("trader.split_limits", lambda legs, *a: [{**l, "fee": "100"} for l in legs])
+    engine.execute(basket)
+    assert engine.cooldown_until == 0
+    assert engine.risk_block() is None
+    assert not store.events(kinds=("order", "execution"))
+    assert store.events(kinds=("observation",), observations=("reject",))

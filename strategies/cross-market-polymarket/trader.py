@@ -404,7 +404,6 @@ class Engine:
 
     def execute(self, basket: Basket) -> None:
         event = self.pair.kalshi_event
-        self.cooldown_until = time.time() + self.cfg.cooldown
         intended = {(leg["ticker"], leg["contract"]) for leg in basket.legs}
         current, why = self.price_pair()
         if current is None or {(leg["ticker"], leg["contract"]) for leg in current.legs} != intended:
@@ -457,6 +456,8 @@ class Engine:
                         "first_price_bound": str(first_price), "first_fees": str(first_fees), "sets": int(target)})
                 identifier = str(uuid.uuid4())
                 attempted = (leg, identifier)
+                if index == 0:
+                    self.cooldown_until = time.time() + self.cfg.cooldown
                 result = self.brokers[venue_of(leg["ticker"])].submit({"client_order_id": identifier, "ticker": leg["ticker"], **buy(leg), "count": str(int(target)),
                                              "time_in_force": "immediate_or_cancel",
                                              "self_trade_prevention_type": "taker_at_cross"}, context)

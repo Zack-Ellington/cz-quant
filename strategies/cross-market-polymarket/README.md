@@ -250,6 +250,9 @@ completed-basket profit floor. Slippage does not guarantee execution.
 fees, and matched target quantity. The original expected profit remains the
 book-price estimate; order requests record the actual submitted limits.
 
+Price rechecks and preflight rejections before submission do not start a
+cooldown; the next scan may evaluate a new candidate.
+
 A confirmed zero-fill canceled/expired IOC uses a one-second cooldown before
 another freshly priced attempt. Rejections, transport errors, uncertain orders,
 and attempts with fills retain the configured cooldown and recovery rules.
