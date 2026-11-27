@@ -105,6 +105,10 @@ Both brokers record the full resolved configuration and code revision at run
 start. Each order includes the experiment ID, selected pair and shared trade ID.
 Reporting reads the economic log without importing the strategy.
 
+The optional [live launcher](../../scripts/cross-market-launch/) funds missing
+pools once, can retire flat previous pools, and supervises the trader and both
+account monitors. It preserves balances and history on restart.
+
 ## Fund once and run
 
 From this strategy directory, create the two paper pools after preparing the

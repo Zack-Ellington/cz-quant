@@ -26,7 +26,7 @@ dev = ["pytest>=8", "basedpyright>=1.30"]
 typeCheckingMode = "basic"
 venvPath = "."
 venv = ".venv"
-include = [".", "../../scripts/cross-market-pairs"]
+include = [".", "../../scripts/cross-market-pairs", "../../scripts/cross-market-launch"]
 extraPaths = ["../../scripts/cross-market-pairs"]
 exclude = ["tests", ".venv"]
 
