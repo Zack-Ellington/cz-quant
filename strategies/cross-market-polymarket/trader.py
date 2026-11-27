@@ -123,6 +123,7 @@ class Engine:
         self.repairs: list[tuple[dict[str, Any], Decimal, dict[str, Any]]] = []
         self.positions: dict[str, dict[str, Any]] = {}
         self.counters = {"scans": 0, "baskets": 0, "rejects": 0, "unwinds": 0}
+        self.last_quotes: list[dict[str, Any]] = []
         self._last_logged: dict[tuple, float] = {}
         self.resume()
 
@@ -364,7 +365,7 @@ class Engine:
         priced, at recheck_min_edge and no min_net: the second read decides whether the
         chosen basket is still profitable, not whether it still clears the entry bar."""
         pair = self.pair
-        self.last_quotes: list[dict[str, str]] = []
+        self.last_quotes = []
         markets = {name: self.kalshi.market(name) for name, _ in pair.contracts("kalshi")}
         for name, market in markets.items():
             if market["ticker"] != name or market["event_ticker"] != pair.kalshi_event:
@@ -425,7 +426,7 @@ class Engine:
         basket, reason = self.price_pair()
         self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
                                   "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
-                                  "quotes": getattr(self, "last_quotes", [])})
+                                  "quotes": self.last_quotes})
         return basket
 
     # -- execution -------------------------------------------------------------

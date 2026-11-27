@@ -98,6 +98,6 @@ def test_children_get_a_stop_signal_this_platform_supports():
     import subprocess
     if launch.WINDOWS:
         assert launch.STOP_SIGNAL == signal.CTRL_BREAK_EVENT
-        assert launch.CHILD_GROUP == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        assert launch.CREATION_FLAGS == subprocess.CREATE_NEW_PROCESS_GROUP and not launch.NEW_SESSION
     else:
-        assert launch.STOP_SIGNAL == signal.SIGINT and launch.CHILD_GROUP == {"start_new_session": True}
+        assert launch.STOP_SIGNAL == signal.SIGINT and launch.CREATION_FLAGS == 0 and launch.NEW_SESSION

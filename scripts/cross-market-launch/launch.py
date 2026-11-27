@@ -106,8 +106,8 @@ def _try_lock(lock: Any) -> bool:
 
 # Children run in their own process group so a stop request reaches only them.
 # Windows has no SIGINT for child processes: they get CTRL_BREAK_EVENT instead.
-CHILD_GROUP = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS
-               else {"start_new_session": True})
+CREATION_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if WINDOWS else 0
+NEW_SESSION = not WINDOWS
 STOP_SIGNAL = signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGINT
 
 
@@ -122,7 +122,8 @@ def supervise(config_paths: list[Path], logs: Path) -> None:
         for name, command, monitor in commands:
             with (logs / f"{name}.log").open("a") as output:
                 proc = subprocess.Popen(command, cwd=STRATEGY, stdout=output,
-                                        stderr=subprocess.STDOUT, **CHILD_GROUP)
+                                        stderr=subprocess.STDOUT, creationflags=CREATION_FLAGS,
+                                        start_new_session=NEW_SESSION)
             children.append((name, proc, monitor))
             print(f"Started {name}: PID {proc.pid}; log {logs / (name + '.log')}", flush=True)
         (logs / "processes.json").write_text(json.dumps(
