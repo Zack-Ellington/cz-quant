@@ -175,6 +175,11 @@ store.close()
 ```
 
 Strategies select the broker for each leg and own sequencing and repairs.
+The US client logs terminal HTTP errors with the request method, path, status,
+and up to 8,192 characters of the response body, with a truncation flag.
+Request headers and request bodies are not included. Inspect this log entry
+for the venue's explanation of a rejected order; the original HTTP exception
+still reaches the broker, and failed writes are not retried.
 US live orders support integer-quantity taker IOC/FOK. The adapter books fills
 from synchronous execution reports, including their reported commissions.
 Cancel and amend are not exposed by this adapter. Missing final state retains

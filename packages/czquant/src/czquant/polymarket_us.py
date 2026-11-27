@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import time
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -50,6 +51,7 @@ API = "https://api.polymarket.us"
 CENT = Decimal("0.01")
 DEFAULT_THETA = Decimal("0.095")  # lowest taker tier; a market's feeCoefficient wins when present
 VENUE = "polymarket_us"
+log = logging.getLogger(__name__)
 TERMINAL = {"ORDER_STATE_FILLED": "filled", "ORDER_STATE_CANCELED": "canceled",
             "ORDER_STATE_REJECTED": "rejected", "ORDER_STATE_EXPIRED": "canceled"}
 
@@ -191,7 +193,13 @@ class PolymarketUS:
             if method == "GET" and response.status_code in (429, 500, 502, 503, 504) and attempt < 4:
                 time.sleep(0.5 * 2 ** attempt)
                 continue
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                text = response.text
+                log.error("Polymarket US HTTP error: method=%s path=%s status=%s body=%r truncated=%s",
+                          method, path, response.status_code, text[:8192], len(text) > 8192)
+                raise
             return response.json() if response.content else {}
         raise RuntimeError("read retry exhausted")
 
