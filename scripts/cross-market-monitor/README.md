@@ -73,4 +73,3 @@ Implementation: cross_market_dashboard.py, cross_market.html, and
 cross_market_monitor.py in this bundle. Regression cases cover
 fee rounding, depth, insufficient cash, missing samples, incomplete inventory,
 actual fills, aggregate deduplication, and observation-only quote collection.
-
