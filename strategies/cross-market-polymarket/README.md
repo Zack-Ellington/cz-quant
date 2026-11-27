@@ -259,25 +259,38 @@ and attempts with fills retain the configured cooldown and recovery rules.
 
 ### Streaming execution quotes
 
-Set `parameters.execution_websocket` to `true` to use the authenticated
-Polymarket US full-book stream for entry pricing, rechecks, and repair bids.
-`parameters.quote_max_age` defaults to 2 seconds and bounds both exchange
-snapshot age and local time since receipt. Missing, stale, future-dated, or
-non-open snapshots block execution. Freshness is checked again before either
-basket leg is submitted. REST remains the source of market metadata; execution
-books do not fall back to REST when streaming is enabled. Kalshi books continue
-to use their existing REST transport.
+Set parameters.execution_websocket to true to use authenticated Kalshi and
+Polymarket US order books for entry pricing, rechecks, and repair bids. Both
+venue credentials are required. REST remains the source of market metadata and
+fee schedules. Streaming execution never falls back to REST books. Paper and
+explicitly non-streaming runs retain REST readers.
 
-The connection subscribes without debouncing, clears its book on disconnect,
-and reconnects with a new signature. A reconnect must deliver a fresh full
-snapshot before execution resumes. Duplicate/older snapshots do not refresh
-quote age. A quiet market with no updates beyond the age limit is conservatively
-ineligible. If the feed fails after a fill, the existing recovery path retains
-the unmatched inventory until fresh repair bids are available.
+Kalshi starts with full snapshots for both selected tickers and applies deltas
+in subscription sequence order. A missing or repeated sequence number, invalid
+delta, subscription error, or disconnect invalidates both books. Reconnection
+signs a new handshake and requires both snapshots before execution resumes.
+The stream uses immediate updates, without conflation. See Kalshi's
+[order-book protocol](https://docs.kalshi.com/websockets/orderbook-updates).
 
-`execution_quote` observations record the source, exchange timestamp, and quote
-ages immediately before each basket submission. Dashboard quote collection is
-independent and is not changed by this setting.
+Kalshi book age and connection health are separate. A quiet book remains usable
+while sequence continuity holds and client-initiated ping/pong checks succeed.
+quote_max_age (default 2 seconds) bounds time since a confirmed pong and the
+transmission age of timestamped incoming messages. Pings run at half that
+interval; an unanswered ping reconnects after half that interval. A missing
+server timestamp is retained as unknown, never invented. Snapshot and delta
+receipt ages remain in the log even when a quiet book is valid. Kalshi documents
+client pings in its [keep-alive protocol](https://docs.kalshi.com/websockets/connection-keep-alive).
+
+Polymarket US sends full snapshots without debouncing. Its existing conservative
+policy requires exchange and receipt ages within quote_max_age; duplicate or
+older snapshots do not renew freshness. This differs from Kalshi's sequenced
+incremental feed. Both connections clear cached books on disconnect.
+
+Both feeds are checked immediately before each basket submission. If a feed
+fails after the first fill, reconciliation and recovery retain unmatched
+inventory until usable repair bids are available. execution_quote observations
+record each venue's source and freshness evidence before submission. Kalshi
+records subscription ID, sequence, connection age, and last book receipt age.
 
 Every scan records its input books, source timestamps, fee parameters, four raw
 buy prices, and both fee-adjusted cross-venue gaps in the scan_complete quote
@@ -286,3 +299,8 @@ sizes up to max_sets; max_gap selects profit per pair, best selects total profit
 Positive gaps do not bypass the configured execution thresholds. Missing, stale,
 or closed quotes record an empty gap sample and a reason. These observations
 are read-only reporting inputs for an independent dashboard, not fills.
+
+The experiment companion reads these scan captures and the existing broker and
+account-monitor records. It makes no exchange connections and does not recompute
+gaps from reference marks. Generic market collectors remain independent sources
+for valuation and settlement; their marks are not substituted for decision data.

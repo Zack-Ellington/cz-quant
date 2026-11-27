@@ -6,6 +6,12 @@ supported paper positions. They run outside strategy processes and continue
 after strategies stop. Strategy authors may use their own market readers;
 they need not call these collectors.
 
+The current shared collectors poll REST. Their marks support valuation and
+settlement, not a replay of a strategy decision. Cross-market streaming
+execution owns separate authenticated subscriptions and records its input books
+in scan observations. Its dashboard reads those observations without an exchange
+connection. See the [connection contract](../design-principles.md#service-connections-and-decision-capture).
+
 Use the [shared setup](../../README.md#shared-services). Run commands from
 packages/czquant with the same STRATEGY_RUNS_DIR as execution. The common
 record types and time semantics are in the
