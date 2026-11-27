@@ -438,7 +438,7 @@ def pool_sizing_engine(setup, mode='paper', kalshi_price='.16', us_price='.79', 
 @pytest.mark.parametrize('kalshi_price,us_price', [('.16', '.79'), ('.79', '.16')])
 def test_sizing_fits_each_pool_and_executes_smaller_profitable_basket(setup, mode, kalshi_price, us_price):
     engine = pool_sizing_engine(setup, mode, kalshi_price, us_price)
-    engine.cfg.min_net = .25  # Preserve the production profit hurdle.
+    engine.cfg.min_net = .25  # An explicit basket-profit floor remains enforceable.
     before = engine.store.events(kinds=('transaction', 'order', 'execution'))
     basket = engine.scan()
     assert basket is not None and basket.sets == 12 and basket.net >= D('.25')

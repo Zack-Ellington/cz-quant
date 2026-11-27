@@ -49,7 +49,7 @@ class Config:
     max_capital_frac: float = 0.10
     max_sets: int = 20
     risk_free: float = 0.05
-    min_net: float = 0.25
+    min_net: float = 0.0  # no separate basket-profit floor unless explicitly configured
     min_edge: float = 0.01  # per $1 set: margin for rule and settlement risk between venues
     max_apr: float | None = None
     require_cross: bool = True  # baskets need a leg on each venue

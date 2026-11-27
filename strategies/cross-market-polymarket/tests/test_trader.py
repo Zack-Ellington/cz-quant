@@ -217,3 +217,17 @@ def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch
         with pytest.raises(Captured):
             trader.main(["--experiment", str(path), "--once"])
     assert [(c.max_sets, c.max_basket_dollars, c.max_total_dollars) for c in configs] == [(20, 25, 100)] * 2
+    assert [(c.min_net, c.min_edge) for c in configs] == [(0, .01)] * 2
+
+
+def test_defaults_allow_small_profitable_baskets_but_keep_per_pair_threshold(engine_for):
+    engine = engine_for()
+    engine.cfg.max_sets = 1
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 1
+    assert D('.01') <= basket.net < D('.25')
+    engine.cfg.min_net = .25
+    assert engine.scan() is None  # Explicit basket minima still apply.
+    engine.cfg.min_net = 0
+    engine.poly.asks['tok-sac'] = '.415'  # Positive after fees, but below 1 cent per pair.
+    assert engine.scan() is None

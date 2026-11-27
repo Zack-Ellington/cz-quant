@@ -90,6 +90,8 @@ Parameters omitted from the file use [Config defaults](trader.py):
   max_sets limits basket size. max_basket_dollars and max_total_dollars impose
   absolute limits; null disables the respective dollar cap.
 - risk_free, min_net, min_edge and max_apr control the return hurdle.
+  min_edge defaults to $0.01 net profit per matched pair after fees. min_net
+  defaults to zero, so there is no separate basket-profit floor unless specified.
 - require_cross defaults to true. False permits both outcomes at one venue.
   Opposite sides of the same market are refused because their fills would net.
 - unwind_slippage limits repair prices. kalshi_latency and polymarket_latency
