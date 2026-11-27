@@ -46,6 +46,16 @@ def split_limits(legs: list[dict[str, Any]], quantity: int, edge: Decimal,
         if price is None:
             return None
         result.append({**leg, "limit": str(price), "fee": str(fee_bound(leg, price, quantity))})
+    # Spend residual allowance in submission order, keeping the other leg's
+    # already allocated limit. Tick rounding and pool caps can leave usable slack.
+    for i in sorted(range(len(result)), key=lambda i: D(result[i].get("depth", "0"))):
+        leg = result[i]
+        def remaining(n: int) -> Decimal:
+            return n * (1 - edge) - sum(cost(other, D(other["limit"]), n)
+                                        for j, other in enumerate(result) if j != i)
+        price = limit_for(leg, quantity, remaining, lambda p: fundable(leg, p), D(leg["limit"]))
+        if price is not None:
+            result[i] = {**leg, "limit": str(price), "fee": str(fee_bound(leg, price, quantity))}
     return result
 
 

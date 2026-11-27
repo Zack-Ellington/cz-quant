@@ -75,3 +75,28 @@ def test_no_safe_second_limit_repairs_first_fill(setup, monkeypatch):
     assert len(repairs) == 1 and repairs[0][1] == 10
     records = store.events(kinds=("observation",), observations=("basket_execution",))
     assert records[-1]["data"]["outcomes"][1]["status"] == "profit_floor"
+
+
+
+def test_unused_kalshi_tick_allowance_moves_to_first_us_leg():
+    pair = [{"limit": "0.55", "tick": "0.01", "fee_coefficient": "0.07", "depth": "1000"},
+            {"limit": "0.3775", "tick": "0.0025", "fee_coefficient": "0.11", "depth": "100"}]
+    result = split_limits(pair, 35, D("0.01"), lambda l, p: 35 * (p + D("0.02") if l["fee_coefficient"] == "0.07" else p + D("0.025")) <= 20)
+    assert result is not None
+    assert D(result[1]["limit"]) > D("0.3825")
+    for n in range(1, 36):
+        assert sum(cost(l, D(l["limit"]), n) for l in result) <= n * D("0.99")
+
+
+@pytest.mark.parametrize("status,expected", [("canceled", 1), ("rejected", 300), ("unknown", 300)])
+def test_only_confirmed_empty_ioc_gets_short_cooldown(setup, monkeypatch, status, expected):
+    store, create, build = setup
+    engine = build(create(), profit_slippage=True, max_basket_dollars=50)
+    import time
+    now = time.time()
+    monkeypatch.setattr("trader.time.time", lambda: now)
+    for broker in engine.brokers.values():
+        monkeypatch.setattr(broker, "submit", lambda *a, **k: {"status": status, "filled": "0"})
+    engine.step()
+    assert engine.cooldown_until == now + expected
+    assert not store.events(kinds=("execution",))

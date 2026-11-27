@@ -517,6 +517,12 @@ class Engine:
                 self.halt("basket repair failed; waiting for automatic sell recovery", recoverable=True)
                 failure = failure or exc
                 break
+        if (failure is None and not self.halted and len(outcomes) == 1
+                and outcomes[0].get("status") == "canceled"
+                and decimal(outcomes[0].get("filled", "-1")) == 0):
+            # A confirmed empty IOC has no inventory to protect. Retry only after
+            # a short backoff and the next scan's fresh prices and preflight.
+            self.cooldown_until = time.time() + 1.0
         self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
         self.resume()
         if failure is not None:

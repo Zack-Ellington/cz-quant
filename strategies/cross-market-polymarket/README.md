@@ -232,7 +232,9 @@ preprocessing bundle.
 Set `parameters.profit_slippage` to `true` for a Kalshi/Polymarket US
 experiment to let IOC orders cross beyond the observed book prices. The default
 is `false`. The strategy splits the remaining after-fee profit allowance equally
-between the legs, preserving `min_edge` at their limit prices and respecting
+between the legs, then reallocates unused allowance in submission order when
+price increments or pool caps leave room. It preserves `min_edge` at the limit
+prices and respects
 broker reservations and the basket capital cap. Limits use the market price
 increment (a conservative one-cent increment for Kalshi).
 
@@ -247,3 +249,7 @@ completed-basket profit floor. Slippage does not guarantee execution.
 `slippage_reprice` observations record the second limit, first-leg price bound,
 fees, and matched target quantity. The original expected profit remains the
 book-price estimate; order requests record the actual submitted limits.
+
+A confirmed zero-fill canceled/expired IOC uses a one-second cooldown before
+another freshly priced attempt. Rejections, transport errors, uncertain orders,
+and attempts with fills retain the configured cooldown and recovery rules.
