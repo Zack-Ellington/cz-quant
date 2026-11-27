@@ -60,7 +60,7 @@ def decimal(value: Any) -> Decimal:
 
 class Store:
     def __init__(self, root: str | Path | None = None):
-        self.root = Path(root or os.environ.get("STRATEGY_RUNS_DIR", "runs"))
+        self.root = Path(root or os.environ.get("STRATEGY_RUNS_DIR", "runs")).expanduser()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "accounting.sqlite3"
         self.db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
@@ -188,8 +188,8 @@ class Store:
         Pools never leave; a closed sub keeps its realized P&L at zero equity."""
         with self.transaction():
             group = next((g for g in self.reporting_portfolios() if g['id'] == identifier), None)
-            if group is None:
-                raise ValueError(f'no reporting portfolio {identifier}')
+            if group is None or group.get('retired_at'):
+                raise ValueError(f'no active reporting portfolio {identifier}')
             known = {p['id']: p for p in self.pools()}
             current = [known[p] for p in group['pools'] if p in known]
             if not pools or len(set(pools)) != len(pools) or not set(pools) <= known.keys() or set(pools) & set(group['pools']):
@@ -218,7 +218,10 @@ class Store:
         return None
 
     def reporting_portfolios(self) -> list[dict[str, Any]]:
-        return [{**dict(r), 'pools': json.loads(r['pools'])}
+        retired = {e['data']['portfolio']: e['effective_at'] for e in
+                   self.events(kinds=('observation',), observations=('portfolio_retired',))}
+        return [{**dict(r), 'pools': json.loads(r['pools']),
+                 **({'retired_at': retired[r['id']]} if r['id'] in retired else {})}
                 for r in self.db.execute('SELECT * FROM reporting_portfolios ORDER BY id')]
 
     def portfolios(self) -> list[dict[str, Any]]:

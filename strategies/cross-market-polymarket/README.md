@@ -20,7 +20,7 @@ and prices only for the pair in its configuration.
 Cash pools persist independently of runs. Brokers enforce venue, mode, ownership,
 market scope, reservations and available cash. Startup never creates or funds a
 pool. A new experiment ID does not reset cash, losses or positions. The
-czquant portfolio-create command creates a reporting group and can explicitly
+czquant portfolios create command creates a reporting group and can explicitly
 fund new paper pools. The strategy resolves that group by ID to its two venue
 pools. The group has no additional buying power.
 
@@ -117,15 +117,18 @@ Reporting reads the economic log without importing the strategy.
 
 ## Create a portfolio and run
 
+The [operator CLI guide](../../docs/cli.md) documents portfolio commands and
+retirement after positions and orders are cleared.
+
 Copy [portfolio.example.yaml](experiments/portfolio.example.yaml), edit its IDs
 and funding, and create it once through the operator CLI. From this directory:
 
 ```bash
 uv sync --locked
-uv run czquant portfolio-create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
-uv run czquant portfolios
+uv run czquant portfolios create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
+uv run czquant portfolios list
 uv run python runner.py --config "$STRATEGY_RUNS_DIR/experiments/config.yaml"
-uv run czquant portfolios game-a --events 20
+uv run czquant portfolios inspect game-a --events 20
 ```
 
 Repeat only the runner command on restart. Cash, positions, losses and
@@ -144,7 +147,7 @@ Live execution requires Polymarket US and pre-created live allocations. Follow
 the [virtual-subaccount guide](../../docs/services/virtual-subaccounts.md):
 register each venue account with czquant account, then use czquant open-sub to
 allocate two dedicated pools per experiment. Group their IDs with
-czquant portfolio-create using a config whose pools list contains those existing
+czquant portfolios create using a config whose pools list contains those existing
 IDs, then select that portfolio in the runner config. Optional --markets scopes are
 enforced by the brokers. Several US pools require account-wide reconciliation;
 repeating map-live cannot prepare these allocations. Registered accounts also

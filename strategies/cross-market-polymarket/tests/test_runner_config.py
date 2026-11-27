@@ -94,3 +94,14 @@ def test_configured_paper_run_reports_fills_and_preserves_state_on_restart(tmp_p
     engine.store.close()
     restarted.store.close()
     store.close()
+
+
+def test_retired_portfolio_cannot_start_another_run(tmp_path, monkeypatch):
+    from czquant.portfolios import delete
+
+    store, path = prepare(tmp_path, monkeypatch)
+    delete(store, 'game')
+    monkeypatch.setattr(trader, 'Engine', lambda *a: pytest.fail('engine must not start'))
+    with pytest.raises(SystemExit):
+        trader.main(['--config', str(path)])
+    store.close()

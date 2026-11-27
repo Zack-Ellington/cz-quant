@@ -23,24 +23,8 @@ one venue. A broker binds to that pool. A portfolio only groups existing pools
 for reporting; creating one neither funds anything nor changes buying power.
 The cross-market strategy uses two cash pools and two brokers in both modes.
 
-From packages/czquant, create paper pools once with explicit venue funding:
-
-```bash
-uv run czquant pool cross-kalshi --venue kalshi --cash 600
-uv run czquant pool cross-polymarket --venue polymarket-us --cash 400
-```
-
-These amounts are hypothetical and can be arbitrarily large. The Kalshi pool
-can spend only its $600, and the Polymarket pool only its $400. Both use the
-same budget and reservation rules as live pools. Repeating either creation
-fails instead of resetting or refunding it. Live pools are created by map-live;
-see the [live mapping guide](polymarket-broker.md#us-live-mapping-and-execution).
-
-Create an optional portfolio to compare the combined experiment:
-
-```bash
-uv run czquant portfolio cross-market --pools cross-kalshi cross-polymarket
-```
+Use the [operator CLI](../cli.md) to create, list, inspect and retire portfolios.
+Portfolio creation can explicitly fund new paper pools or select existing pools.
 
 Membership is a flat, fixed list of distinct pool IDs in one mode. Multiple
 pools at the same venue can be included. This selection can be defined after
@@ -73,52 +57,6 @@ opening balances, and all runs contributing to the window remain included.
 Returns and drawdown use the combined equity curve and funding boundaries;
 percentages from individual pools are not added or averaged. Allocations inside
 a reporting portfolio cancel as capital flows, while fees remain costs.
-
-## Portfolio CLI and configuration
-
-The shared CLI provides portfolio creation, listing and inspection without a
-strategy process. Run it from packages/czquant after uv sync, or from an installed
-broker-enabled strategy environment. Export STRATEGY_RUNS_DIR first.
-
-```bash
-uv run czquant portfolio-create --config portfolio.yaml
-uv run czquant portfolios
-uv run czquant portfolios game-a --events 20
-```
-
-The YAML or JSON creation config has id, optional label, and a pools list. Each
-item is either an existing pool ID or a new paper pool with id, venue and cash:
-
-```yaml
-id: game-a
-label: Paper comparison
-pools:
-  - id: game-a-kalshi
-    venue: kalshi
-    cash: 60
-  - id: game-a-us
-    venue: polymarket_us
-    cash: 40
-```
-
-Creation and initial paper funding share one transaction. Duplicate IDs or an
-invalid member roll back all changes. Repeating creation never adds funding.
-For live portfolios, register accounts and allocate pools with the existing
-account and open-sub commands, then list those IDs as strings under pools.
-The creation command cannot create live capital or mix paper and live pools.
-
-portfolios lists pool, portfolio and legacy rows with their IDs, mode and member
-pools. Supplying an ID returns open FIFO lots with their owning pool, current
-cash, contributed capital, reservations, fees, realized and unrealized P&L,
-equity and quote bounds using the dashboard's valuation policy. --events N
-includes the latest N ledger events belonging to those pools, plus their total
-count. Events include orders, fills, transactions and strategy observations;
-they are not a market-discovery listing. An unknown ID is an error.
-
-This is a current, lifetime operational view. Missing marks leave net P&L null;
-realized P&L and unmarked cost remain visible. It does not certify live account
-reconciliation or produce a frozen comparison. Use report for time-window
-metrics, evidence coverage and a reproducible snapshot.
 
 ## Deprecated pooled-capital records
 

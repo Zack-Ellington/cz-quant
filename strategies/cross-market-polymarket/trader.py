@@ -609,8 +609,8 @@ def load_experiment(path: str) -> Config:
         store = Store()
         try:
             group = next((p for p in store.reporting_portfolios() if p['id'] == portfolio_id), None)
-            if group is None:
-                raise ValueError(f'unknown portfolio {portfolio_id}; create it with czquant portfolio-create first')
+            if group is None or group.get('retired_at'):
+                raise ValueError(f'unknown or retired portfolio {portfolio_id}; select an active portfolio or use czquant portfolios create')
             pools = {p['id']: p for p in store.pools()}
             members = [pools[pid] for pid in group['pools']]
             if len(members) != 2 or {p['venue'] for p in members} != {'kalshi', selected['venue']}:

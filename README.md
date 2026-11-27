@@ -57,8 +57,8 @@ restarting a strategy preserves cash, positions, losses and pending orders.
 Discovery produces a candidate file before execution. Reporting reads the same
 ledger independently of the strategy.
 
-1. Copy the root environment example. Set STRATEGY_RUNS_DIR to a writable,
-   absolute private path outside this checkout. Public-data paper runs can leave
+1. Copy the root environment example. It sets STRATEGY_RUNS_DIR to
+   "$HOME/.czquant/runs", which is shared across working directories. Public-data paper runs can leave
    the four credential variables empty. Live account monitoring and execution
    require the corresponding venue keys.
 
@@ -84,8 +84,8 @@ ledger independently of the strategy.
 
    ```bash
    cp experiments/portfolio.example.yaml "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
-   uv run czquant portfolio-create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
-   uv run czquant portfolios
+   uv run czquant portfolios create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
+   uv run czquant portfolios list
    ```
 
    Creation is atomic. Existing pool IDs can be listed in the config instead of
@@ -134,7 +134,7 @@ ledger independently of the strategy.
    P&L. Portfolio totals overlap pool rows; do not add them together.
 
    ```bash
-   uv run czquant portfolios game-a --events 20
+   uv run czquant portfolios inspect game-a --events 20
    ```
 
    Open positions need fresh recorded market data for a complete valuation.
@@ -145,13 +145,15 @@ ledger independently of the strategy.
    ```bash
    uv run czquant monitor market --once
    uv run czquant monitor polymarket-us --once
-   uv run czquant portfolios game-a
+   uv run czquant portfolios inspect game-a
    ```
 
    For a frozen time-window report, use czquant report as documented in the
    [reporting guide](docs/services/reporting.md). Run czquant dashboard for a
    browser view of the same ledger. The [strategy guide](strategies/cross-market-polymarket/README.md)
-   covers live preparation, monitor requirements and recovery.
+   covers live preparation, monitor requirements and recovery. The
+   [operator CLI guide](docs/cli.md) covers retiring a flat portfolio with
+   czquant portfolios delete game-a.
 
 The older election strategy has its own [quickstart](strategies/2026-midterm-prediction-arbitrage/README.md).
 
@@ -165,12 +167,11 @@ cd packages/czquant
 uv sync
 ```
 
-Select an absolute state directory outside the checkout. Replace the example
-path with a writable private directory, and export the same value in every
-strategy, monitor, and reporting shell:
+Use the suggested state directory outside the checkout, and export the same
+value in every strategy, monitor, and reporting shell:
 
 ```bash
-export STRATEGY_RUNS_DIR=/absolute/path/to/czquant-runs
+export STRATEGY_RUNS_DIR="$HOME/.czquant/runs"
 mkdir -p "$STRATEGY_RUNS_DIR"
 ```
 
@@ -178,6 +179,8 @@ The directory holds accounting.sqlite3 and supporting artifacts. Services do
 not load .env files; export their variables explicitly. The --runs-dir option
 on the shared CLI can select a different root for inspection or restore.
 
+- [Operator CLI](docs/cli.md): portfolio creation, listing, inspection, retirement,
+  and state-directory setup.
 - [Kalshi broker](docs/services/kalshi-broker.md): paper orders, authentication,
   live mapping, allocation operations, and recovery.
 - [Polymarket broker](docs/services/polymarket-broker.md): international outcome

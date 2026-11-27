@@ -6,7 +6,7 @@ from typing import Any
 from .accounting import active_events, combine_states, portfolio_state
 from .dashboard import measure
 from .report import reporting_units
-from .store import Store, decimal
+from .store import Store, decimal, encode, utc
 
 
 def create(store: Store, config: dict[str, Any]) -> str:
@@ -26,6 +26,9 @@ def create(store: Store, config: dict[str, Any]) -> str:
         members = []
         for item in pools:
             if isinstance(item, str):
+                pool = next((p for p in store.pools() if p['id'] == item), None)
+                if pool is not None and pool['metadata'].get('retired_at'):
+                    raise ValueError(f'cash pool is retired: {item}')
                 members.append(item)
                 continue
             if not isinstance(item, dict) or set(item) != {'id', 'venue', 'cash'}:
@@ -41,6 +44,54 @@ def create(store: Store, config: dict[str, Any]) -> str:
             members.append(item['id'])
         store.create_portfolio(identifier, members, label=config.get('label', ''))
     return identifier
+
+
+def delete(store: Store, identifier: str) -> None:
+    """Retire flat, unshared allocations atomically; retain all economic history."""
+    from .accounts import close_sub, reserve_id
+
+    with store.transaction():
+        groups = store.reporting_portfolios()
+        group = next((p for p in groups if p['id'] == identifier), None)
+        if group is None:
+            raise ValueError(f'unknown portfolio: {identifier}; delete requires a portfolio, not a pool ID')
+        if group.get('retired_at'):
+            return
+        members = set(group['pools'])
+        shared = [p['id'] for p in groups if p['id'] != identifier and not p.get('retired_at')
+                  and members.intersection(p['pools'])]
+        if shared:
+            raise ValueError(f'cash pools are shared with active portfolios: {", ".join(shared)}')
+        pools = [p for p in store.pools() if p['id'] in members]
+        for pool in pools:
+            pid, metadata = pool['id'], pool['metadata']
+            state = portfolio_state(store, pid)
+            pending = store.db.execute("SELECT 1 FROM orders WHERE portfolio_id=? AND "
+                                       "status IN ('pending','unknown','acknowledged') LIMIT 1", (pid,)).fetchone()
+            if state.lots or state.prepaid or pending or store.reserved(pid):
+                raise ValueError(f'{pid} has positions, prepaid capital or unresolved orders; reconcile and flatten before deletion')
+            if state.cash < 0:
+                raise ValueError(f'{pid} has negative cash; reconcile before deletion')
+            if metadata.get('reserve'):
+                raise ValueError(f'{pid} is an account reserve and cannot be retired')
+            if pool['mode'] == 'live' and not metadata.get('account') and not metadata.get('retired_at'):
+                raise ValueError(f'{pid} is a directly mapped live pool; retire its venue mapping before deleting the portfolio')
+        for pool in pools:
+            pid, metadata = pool['id'], pool['metadata']
+            if metadata.get('retired_at'):
+                continue
+            if metadata.get('account'):
+                close_sub(store, pid, to=reserve_id(metadata['account']))
+            else:
+                cash = portfolio_state(store, pid).cash
+                if cash:
+                    store.append('transaction', {'reason': 'funding', 'purpose': 'retirement',
+                                 'cash_delta': str(-cash), 'external_delta': str(-cash), 'fee': '0', 'legs': []}, pid)
+                store.db.execute('UPDATE portfolios SET metadata=? WHERE id=?',
+                                 (encode({**metadata, 'retired_at': utc()}), pid))
+                store.append('observation', {'kind': 'retired', 'portfolio': identifier}, pid)
+        store.append('observation', {'kind': 'portfolio_retired', 'portfolio': identifier,
+                                    'pools': group['pools']})
 
 
 def details(store: Store, identifier: str, event_limit: int = 0) -> dict[str, Any]:
