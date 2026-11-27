@@ -51,6 +51,10 @@ class Config:
     risk_free: float = 0.05
     min_net: float = 0.0  # no separate basket-profit floor unless explicitly configured
     min_edge: float = 0.01  # per $1 set: margin for rule and settlement risk between venues
+    # The recheck just before sending reprices the chosen legs. The spread often narrows
+    # between the two reads; the basket still commits while its after-fee edge is at least
+    # this much per $1 set (0.0001 = 0.01 cents), with no separate basket-profit floor.
+    recheck_min_edge: float = 0.0001
     max_apr: float | None = None
     require_cross: bool = True  # baskets need a leg on each venue
     kalshi_latency: float = 0.30
@@ -69,6 +73,8 @@ class Config:
             raise ValueError("capital fraction, basket size and scan interval must be positive")
         if self.cooldown < 0:
             raise ValueError("invalid cooldown")
+        if not 0 <= self.recheck_min_edge <= self.min_edge:
+            raise ValueError("recheck_min_edge must be between 0 and min_edge")
         if self.dry_run and self.experiment.mode != "live":
             raise ValueError("dry_run requires live mode")
 
@@ -330,8 +336,12 @@ class Engine:
 
     # -- selected market data and pricing ------------------------------------
 
-    def price_pair(self) -> tuple[Basket | None, str]:
-        """Read only the prepared pair. No listings, league scans or matching."""
+    def price_pair(self, recheck: set[tuple[str, str]] | None = None) -> tuple[Basket | None, str]:
+        """Read only the prepared pair. No listings, league scans or matching.
+
+        With `recheck` (the (ticker, contract) legs already chosen), only those legs are
+        priced, at recheck_min_edge and no min_net: the second read decides whether the
+        chosen basket is still profitable, not whether it still clears the entry bar."""
         pair = self.pair
         self.last_quotes: list[dict[str, str]] = []
         markets = {name: self.kalshi.market(name) for name, _ in pair.contracts("kalshi")}
@@ -372,6 +382,8 @@ class Engine:
                 if normalized["status"] != "active":
                     return None, "polymarket_not_trading"
                 ways.append(polymarket_offer(role, outcome.polymarket, pbooks[token], normalized["fee_schedule"]))
+            if recheck is not None:
+                ways = [w for w in ways if (w.ticker, w.contract) in recheck]
             offers[role] = ways
         # Diagnostics only: each outcome's best ask (price, size) at each venue.
         self.last_quotes = [{"role": way.role, "venue": way.venue, "ticker": way.ticker, "contract": way.contract,
@@ -379,8 +391,12 @@ class Engine:
                              "size": str(way.asks[0][1]) if way.asks else None}
                             for ways in offers.values() for way in ways]
         days = max((datetime.fromisoformat(pair.resolves_at).timestamp() - time.time()) / 86400, 1 / 24)
-        return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, self.limits(),
-                    Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr,
+        # The entry read already cleared every bar. The recheck only asks whether the
+        # chosen basket is still profitable: no basket floor and no return hurdle.
+        min_net, min_edge, hurdle = ((0, self.cfg.recheck_min_edge, 0.0) if recheck is not None
+                                     else (self.cfg.min_net, self.cfg.min_edge, self.cfg.risk_free))
+        return best(offers, days, hurdle, self.cfg.max_sets, self.limits(),
+                    Decimal(str(min_net)), Decimal(str(min_edge)), self.cfg.max_apr,
                     self.cfg.require_cross, fundable=lambda basket: self.budget_block(basket) is None)
 
     def scan(self) -> Basket | None:
@@ -404,7 +420,7 @@ class Engine:
         event = self.pair.kalshi_event
         self.cooldown_until = time.time() + self.cfg.cooldown
         intended = {(leg["ticker"], leg["contract"]) for leg in basket.legs}
-        current, why = self.price_pair()
+        current, why = self.price_pair(recheck=intended)
         if current is None or {(leg["ticker"], leg["contract"]) for leg in current.legs} != intended:
             self.reject(event, "recheck_failed", why=why if current is None else "legs_changed")
             return

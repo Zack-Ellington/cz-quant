@@ -189,7 +189,7 @@ def test_complete_basket_limit_cost_must_fit_both_allocations(setup, monkeypatch
         if leg["venue"] == "kalshi":
             leg["limit"] = "0.99"
     store.append("transaction", {"reason": "funding", "cash_delta": "-44", "external_delta": "-44", "legs": []}, engine.kalshi_broker.pool_id)
-    monkeypatch.setattr(engine, "price_pair", lambda *_: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **__: (basket, "ok"))
     engine.execute(basket)
     rejected = [e["data"] for e in store.events(kinds=("observation",)) if e["data"].get("kind") == "reject"]
     assert rejected[-1]["reason"] == "basket_preflight"
@@ -341,7 +341,7 @@ def test_selected_basket_cannot_substitute_an_unrelated_contract(setup, monkeypa
     basket = engine.scan()
     assert basket is not None
     basket.legs[0]["ticker"] = "KXOTHER-GAME-BOS"
-    monkeypatch.setattr(engine, "price_pair", lambda *_: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **__: (basket, "ok"))
     with pytest.raises(ValueError, match="outside the selected pair"):
         engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
@@ -415,7 +415,7 @@ def test_same_market_opposite_basket_legs_are_rejected_before_submission(setup, 
     assert basket is not None
     for leg in basket.legs:
         leg.update(ticker="PMUS:" + SLUG, venue="polymarket_us", contract=engine.pair.outcomes[int(leg["role"])].polymarket_side)
-    monkeypatch.setattr(engine, "price_pair", lambda *_: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **__: (basket, "ok"))
     engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
     assert "opposite" in store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["detail"]
@@ -533,7 +533,7 @@ def test_kalshi_v2_first_leg_is_hedged_or_unwound(setup, monkeypatch, second_leg
     assert basket is not None and basket.sets == 10
     for leg in basket.legs:
         leg["depth"] = "10" if leg["venue"] == "kalshi" else "100"
-    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **__: (basket, "ok"))
     sent = []
 
     class V2Kalshi:

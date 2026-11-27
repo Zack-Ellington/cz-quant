@@ -156,7 +156,7 @@ def test_a_short_later_leg_has_the_extras_sold_back(engine_for, monkeypatch):
     engine = engine_for(kalshi=kalshi, poly=poly)
     basket = engine.scan()
     assert basket is not None
-    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **__: (basket, "ok"))
     kalshi.fill_depth = "10"  # reprice at 100, but only 10 remain when the order lands
     engine.execute(basket)
     state = combine_states([b.state() for b in engine.brokers.values()])
@@ -231,3 +231,43 @@ def test_defaults_allow_small_profitable_baskets_but_keep_per_pair_threshold(eng
     engine.cfg.min_net = 0
     engine.poly.asks['tok-sac'] = '.415'  # Positive after fees, but below 1 cent per pair.
     assert engine.scan() is None
+
+
+def _narrow_until(engine, poly, accept):
+    """Raise Polymarket's Sacramento ask a tick at a time until `accept(...)` holds."""
+    basket = engine.scan()
+    intended = {(leg["ticker"], leg["contract"]) for leg in basket.legs}
+    for quarter in range(4 * 38 + 1, 4 * 70):
+        poly.asks["tok-sac"] = str(D(quarter) / 400)
+        full, why = engine.price_pair()
+        again, why_again = engine.price_pair(recheck=intended)
+        if accept(full, why, again, why_again):
+            return basket, again, why_again
+    raise AssertionError("no price met the condition")
+
+
+def test_a_narrower_but_still_profitable_spread_commits_at_recheck(engine_for):
+    poly = FakePoly()
+    engine = engine_for(poly=poly)
+    basket, again, _ = _narrow_until(engine, poly, lambda full, why, again, _w:
+                                     full is None and why == "below_min_edge" and again is not None)
+    assert D("0.0001") <= again.edge < D("0.01")  # under the 1c entry bar, still positive
+    engine.execute(basket)
+    state = combine_states([b.state() for b in engine.brokers.values()])
+    assert {lot["market"] for lot in state.lots.values()} == {f"{EVENT}-BOS", "PM:tok-sac"}
+
+
+def test_a_spread_that_fees_now_exceed_is_still_refused_at_recheck(engine_for):
+    poly = FakePoly()
+    engine = engine_for(poly=poly)
+    basket, again, why = _narrow_until(engine, poly, lambda full, _w, again, _a: again is None)
+    assert why in ("no_edge", "below_min_edge")
+    engine.execute(basket)
+    assert not any(b.state().lots for b in engine.brokers.values())
+    rejects = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "reject"]
+    assert rejects[-1]["reason"] == "recheck_failed"
+
+
+def test_recheck_edge_cannot_exceed_the_entry_edge():
+    with pytest.raises(ValueError, match="recheck_min_edge"):
+        Config(experiment=experiment(), min_edge=0.01, recheck_min_edge=0.02)
