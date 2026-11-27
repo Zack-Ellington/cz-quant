@@ -40,7 +40,7 @@
     "require_cross": true,
     "kalshi_latency": 0.3,
     "polymarket_latency": 0.5,
-    "cooldown": 300,
+    "cooldown": 0,
     "duration_minutes": null,
     "dry_run": false,
     "pmus_theta": null,

@@ -85,7 +85,12 @@ return hurdle. evidence retains the matching method and reviewed rules.
 Parameters omitted from the file use [Config defaults](trader.py):
 
 - interval_seconds, cooldown and duration_minutes control timing. A null duration
-  runs until stopped.
+  runs until stopped. cooldown defaults to 0 (the pair can be traded on the next scan).
+- Polymarket US books come from the market WebSocket (full snapshots, about ten a
+  second in play), using the exported credentials. A snapshot older than 2 s, or no
+  credentials, falls back to a REST read that bypasses the gateway's 30 s CDN cache.
+- recheck_min_edge (default 0.0001, i.e. 0.01c per $1 set) is the after-fee edge a
+  basket needs on the second read just before sending; min_edge applies to the first.
 - max_capital_frac limits outstanding cost relative to contributed capital.
   max_sets limits basket size. max_basket_dollars and max_total_dollars impose
   absolute limits; null disables the respective dollar cap.

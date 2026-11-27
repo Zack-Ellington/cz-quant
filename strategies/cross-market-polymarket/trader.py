@@ -59,7 +59,7 @@ class Config:
     require_cross: bool = True  # baskets need a leg on each venue
     kalshi_latency: float = 0.30
     polymarket_latency: float = 0.50
-    cooldown: float = 300.0
+    cooldown: float = 0.0  # seconds before trading the pair again after an attempt; 0: none
     duration_minutes: float | None = None
     dry_run: bool = False  # live, but build and sign orders without sending them
     pmus_theta: float | None = None  # Polymarket US taker coefficient; None: each market's own
@@ -95,6 +95,8 @@ class Engine:
         self.kalshi = kalshi or Kalshi(authenticated=False)
         if self.us:
             self.poly: Any = us or PolymarketUS.from_env(authenticated=self.live, dry_run=cfg.dry_run)
+            if us is None:
+                self.start_book_stream()
             poly_adapter: Any = (PolymarketUSLive(self.poly) if self.live else
                                  PolymarketUSPaper(self.poly, latency=cfg.polymarket_latency,
                                                    theta=self.theta_override))
@@ -335,6 +337,25 @@ class Engine:
             self.kalshi_broker.observe("reject", {"event": event, "reason": reason, **extra})
 
     # -- selected market data and pricing ------------------------------------
+
+    def start_book_stream(self) -> None:
+        """Read this pair's Polymarket US book from the market WebSocket (live snapshots,
+        ~10/s in play) instead of the CDN-cached REST book. Paper runs use the exported
+        credentials if present; without them, or while the stream is stale, books come
+        from REST."""
+        try:
+            streamer = self.poly if self.poly.authenticated else PolymarketUS.from_env(authenticated=True)
+            self.poly.stream = streamer.start_stream([self.pair.polymarket_market])
+        except (ValueError, OSError) as exc:
+            log.warning("Polymarket US book stream unavailable (%s); reading books over REST", exc)
+            self.poly.stream = None
+
+    def stream_status(self) -> dict[str, Any] | None:
+        stream = getattr(self.poly, "stream", None) if self.us else None
+        if stream is None:
+            return None
+        return {"connected": stream.connected, "messages": stream.messages, "fallbacks": stream.fallbacks,
+                "reconnects": stream.reconnects, "last_error": stream.last_error}
 
     def price_pair(self, recheck: set[tuple[str, str]] | None = None) -> tuple[Basket | None, str]:
         """Read only the prepared pair. No listings, league scans or matching.
@@ -586,6 +607,7 @@ class Engine:
                 started = time.monotonic()
                 self.step()
                 self.kalshi_broker.observe("heartbeat", {"cash": str(self.cash), "exposure": str(self.exposure()),
+                                                  "book_stream": self.stream_status(),
                                                   "open_trades": len(self.positions), "halted": self.halted,
                                                   "counters": dict(self.counters)})
                 if once or (deadline and time.monotonic() >= deadline):

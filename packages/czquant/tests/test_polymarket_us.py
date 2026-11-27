@@ -1,4 +1,5 @@
 """Polymarket US: signing, books, fees, orders, the two-venue live portfolio and its monitor."""
+import json
 import base64
 from decimal import Decimal as D
 
@@ -437,3 +438,71 @@ def test_book_reads_bypass_the_gateway_cache():
     client.book_raw(SLUG)
     assert [p for p, _ in seen] == [f"/v1/markets/{SLUG}/book"] * 2
     assert all(params and params.get("_") for _, params in seen) and seen[0][1] != seen[1][1]
+
+
+class FakeSocket:
+    """A market WebSocket that replays canned messages, then drops the connection."""
+
+    def __init__(self, messages, sent):
+        self.messages, self.sent = list(messages), sent
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def send(self, data):
+        self.sent.append(json.loads(data))
+
+    def recv(self, timeout=None):
+        if not self.messages:
+            raise ConnectionError("closed")
+        return self.messages.pop(0)
+
+
+def snapshot(bid, offer, slug=SLUG):
+    return json.dumps({"requestId": "md-1", "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+                       "marketData": {"marketSlug": slug, "bids": [{"px": {"value": bid}, "qty": "10"}],
+                                      "offers": [{"px": {"value": offer}, "qty": "10"}],
+                                      "state": "MARKET_STATE_OPEN", "transactTime": "2100-01-01T00:00:00Z"}})
+
+
+def test_stream_books_are_served_while_fresh_then_rest_takes_over():
+    from czquant.polymarket_us import BookStream
+    client, now = FakeUS(), [0.0]
+    stream = BookStream(client, [SLUG], max_age=2.0, clock=lambda: now[0])
+    stream.handle(snapshot("0.40", "0.42"))
+    stream.handle(snapshot("0.41", "0.43"))  # each message is a full book: the newest wins
+    client.stream = stream
+    rest = []
+    client.public = lambda path, params=None: rest.append(path) or {"marketData": {"bids": [], "offers": []}}
+    assert client.book_raw(SLUG)["marketData"]["offers"][0]["px"]["value"] == "0.43" and rest == []
+    now[0] = 2.5  # no update for 2.5 s: the snapshot is stale and REST is read instead
+    client.book_raw(SLUG)
+    assert rest == [f"/v1/markets/{SLUG}/book"] and stream.fallbacks == 1
+    assert stream.book("other-slug") is None
+
+
+def test_stream_resubscribes_after_a_reconnect_and_records_errors():
+    from czquant.polymarket_us import BookStream
+    sent, sockets = [], [[snapshot("0.40", "0.42")], [json.dumps({"error": "rate limited"}), snapshot("0.5", "0.6")]]
+    stream = BookStream(FakeUS(), [SLUG], connect=lambda: FakeSocket(sockets.pop(0) if sockets else [], sent))
+    stream._stop.wait = lambda seconds: stream._stop.set() if not sockets else None  # no real backoff sleeps
+    stream._run()
+    subscribes = [m["subscribe"] for m in sent]
+    assert len(subscribes) >= 2 and all(s["marketSlugs"] == [SLUG] for s in subscribes)
+    assert all(s["subscriptionType"] == "SUBSCRIPTION_TYPE_MARKET_DATA" for s in subscribes)
+    assert stream.reconnects >= 1 and stream.last_error and stream.messages == 2
+    assert stream.book(SLUG)["marketData"]["offers"][0]["px"]["value"] == "0.6"
+
+
+def test_stream_splits_subscriptions_at_one_hundred_markets():
+    from czquant.polymarket_us import BookStream
+    stream = BookStream(FakeUS(), [f"m{i}" for i in range(250)])
+    assert [len(json.loads(r)["subscribe"]["marketSlugs"]) for r in stream.subscriptions()] == [100, 100, 50]
+
+
+def test_starting_a_stream_needs_credentials():
+    with pytest.raises(ValueError, match="credentials"):
+        PolymarketUS("", None).start_stream([SLUG])

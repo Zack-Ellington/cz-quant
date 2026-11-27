@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+import threading
 import time
 import uuid
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -224,11 +226,26 @@ class PolymarketUS:
         return self.public(f"/v1/market/slug/{slug}")["market"]
 
     def book_raw(self, slug: str) -> dict[str, Any]:
-        """The current book. The gateway serves books through a CDN with
+        """The current book: from the market WebSocket when it has a fresh snapshot,
+        else a REST read. The gateway serves REST books through a CDN with
         Cache-Control max-age=30, so a plain read can return a book up to 30 s old:
         in a live game that showed edges that no longer existed (live IOCs expired
         unfilled; paper filled against them). A unique query string forces a fresh read."""
+        stream = getattr(self, "stream", None)
+        if stream is not None:
+            book = stream.book(slug)
+            if book is not None:
+                return book
+            stream.fallbacks += 1
         return self.public(f"/v1/markets/{slug}/book", {"_": uuid.uuid4().hex})
+
+    def start_stream(self, slugs: list[str], max_age: float = 2.0) -> "BookStream":
+        """Keep `slugs`' books current over the market WebSocket (needs credentials)."""
+        if not self.authenticated:
+            raise ValueError("the market WebSocket needs Polymarket US credentials")
+        self.stream = BookStream(self, slugs, max_age=max_age)
+        self.stream.start()
+        return self.stream
 
     def book(self, ticker_: str) -> dict[str, Any]:
         return kalshi_layout(self.book_raw(slug_of(ticker_)))
@@ -292,6 +309,97 @@ class PolymarketUS:
             cursor = data.get("nextCursor")
             if data.get("eof") or not cursor:
                 return
+
+
+log = logging.getLogger(__name__)
+
+class BookStream:
+    """Live books from wss://api.polymarket.us/v1/ws/markets.
+
+    Each SUBSCRIPTION_TYPE_MARKET_DATA message is a full snapshot of one market's book
+    (verified live: about ten a second during a game), so the newest message per slug is
+    the book. A background thread holds the connection, resubscribes after reconnecting
+    with exponential backoff, and records when each snapshot arrived. `book()` returns a
+    snapshot only while it is younger than `max_age` seconds; callers fall back to REST.
+    """
+
+    URL = "wss://api.polymarket.us/v1/ws/markets"
+    PATH = "/v1/ws/markets"
+    CHUNK = 100  # documented maximum markets per subscription
+
+    def __init__(self, client: "PolymarketUS", slugs: list[str], max_age: float = 2.0,
+                 connect: Any = None, clock: Any = time.monotonic):
+        self.client, self.slugs, self.max_age = client, list(dict.fromkeys(slugs)), max_age
+        self._connect, self._clock = connect, clock
+        self._lock = threading.Lock()
+        self._books: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.connected, self.reconnects, self.fallbacks, self.messages = False, 0, 0, 0
+        self.last_error: str | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="pmus-book-stream", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def book(self, slug: str) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self._books.get(slug)
+        if entry is None or self._clock() - entry[0] > self.max_age:
+            return None
+        return entry[1]
+
+    def handle(self, raw: str | bytes) -> None:
+        message = json.loads(raw)
+        data = message.get("marketData")
+        if isinstance(data, dict) and data.get("marketSlug"):
+            with self._lock:
+                self._books[str(data["marketSlug"])] = (self._clock(), {"marketData": data})
+            self.messages += 1
+        elif message.get("error"):
+            self.last_error = str(message["error"])[:300]
+            log.warning("Polymarket US market stream: %s", self.last_error)
+
+    def subscriptions(self) -> list[str]:
+        return [json.dumps({"subscribe": {"requestId": f"md-{uuid.uuid4().hex[:12]}",
+                                          "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+                                          "marketSlugs": self.slugs[i:i + self.CHUNK]}})
+                for i in range(0, len(self.slugs), self.CHUNK)]
+
+    def _open(self) -> Any:
+        if self._connect is not None:
+            return self._connect()
+        from websockets.sync.client import connect
+        headers = self.client.headers("GET", self.PATH)
+        headers.pop("Content-Type", None)
+        return connect(self.URL, additional_headers=headers, open_timeout=10)
+
+    def _run(self) -> None:
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                with self._open() as ws:
+                    for request in self.subscriptions():
+                        ws.send(request)
+                    self.connected, backoff = True, 1.0
+                    while not self._stop.is_set():
+                        try:
+                            raw = ws.recv(timeout=5)
+                        except TimeoutError:
+                            continue  # no update in 5 s: the books simply age out
+                        self.handle(raw)
+            except Exception as exc:  # network, handshake or protocol: reconnect
+                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                log.warning("Polymarket US market stream disconnected: %s", self.last_error)
+            self.connected = False
+            if self._stop.is_set():
+                return
+            self.reconnects += 1
+            self._stop.wait(backoff)
+            backoff = min(backoff * 2, 30.0)
 
 
 def position_quantity(position: dict[str, Any]) -> Decimal:

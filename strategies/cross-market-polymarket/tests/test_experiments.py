@@ -259,11 +259,11 @@ def test_unknown_later_leg_keeps_known_fill_and_halts_for_reconciliation(setup, 
 def test_restart_keeps_inventory_cash_and_cooldown_without_funding(setup):
     store, create, build = setup
     spec = create()
-    engine = build(spec)
+    engine = build(spec, cooldown=300)  # the default is now 0; a configured cooldown survives restart
     engine.step()
     orders = store.events(kinds=("order",))
     balances = [b.available for b in engine.brokers.values()]
-    restarted = build(spec)
+    restarted = build(spec, cooldown=300)
     restarted.step()
     assert [b.available for b in restarted.brokers.values()] == balances
     assert restarted.positions == engine.positions

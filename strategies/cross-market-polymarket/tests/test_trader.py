@@ -271,3 +271,11 @@ def test_a_spread_that_fees_now_exceed_is_still_refused_at_recheck(engine_for):
 def test_recheck_edge_cannot_exceed_the_entry_edge():
     with pytest.raises(ValueError, match="recheck_min_edge"):
         Config(experiment=experiment(), min_edge=0.01, recheck_min_edge=0.02)
+
+
+def test_there_is_no_cooldown_by_default(engine_for):
+    engine = engine_for()
+    assert engine.cfg.cooldown == 0
+    basket = engine.scan()
+    engine.execute(basket)
+    assert engine.risk_block() is None  # the pair can be traded again on the next scan
