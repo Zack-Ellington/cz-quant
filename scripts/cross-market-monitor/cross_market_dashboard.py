@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from czquant.accounting import State, active_events, combine_states
-from cross_market_monitor import measure_quotes, selections
+from cross_market_monitor import selections
 from czquant.store import decimal, encode
 
 ZERO = Decimal(0)
@@ -20,31 +20,6 @@ ZERO = Decimal(0)
 
 def seconds(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-
-
-def reprice_history(events: list[dict]) -> None:
-    """Reconstruct older gap samples from their recorded books, fees and pool cash."""
-    configs, books = {}, {}
-    for event in events:
-        d = event['data']
-        if event['type'] == 'run' and d.get('strategy') == 'cross-market-polymarket':
-            cfg = d['config']
-            configs[cfg['experiment']['id']] = cfg
-        if event['type'] == 'market' and d.get('source') == 'cross_market_quotes':
-            books[d['ticker']] = d['book']
-        if event['type'] != 'observation' or d.get('kind') != 'cross_market_quote':
-            continue
-        cfg = configs.get(d['experiment_id'])
-        if cfg and d['status'] == 'ok' and any('max_gap' not in r for r in d['routes']):
-            pair = cfg['experiment']['pair']
-            ktickers = [o['kalshi'] for o in pair['outcomes']]
-            pticker = 'PMUS:' + pair['polymarket_market']
-            if all(t in books for t in [*ktickers, pticker]):
-                event['data'] = {**d, **measure_quotes(cfg, {t: books[t] for t in ktickers}, books[pticker],
-                    decimal(d['fee_multiplier']), decimal(d['fee_coefficient']),
-                    {v: decimal(c) for v, c in d['available'].items()}, decimal(d['capital_limit']))}
-        # Only the books collected for this sample may reconstruct its gap.
-        books.clear()
 
 
 def windows(samples: list[dict], now: float) -> list[dict]:
@@ -152,9 +127,8 @@ def snapshot(root: Path) -> dict:
     try:
         db.execute("BEGIN")
         rows = db.execute("""SELECT * FROM events WHERE type IN ('run','transaction','correction','order','health','account_evidence')
-            OR (type='market' AND json_extract(data,'$.source')='cross_market_quotes')
             OR (type='observation' AND json_extract(data,'$.kind') IN
-            ('cross_market_quote','heartbeat','scan_complete','halt','halt_cleared','reject','error',
+            ('heartbeat','scan_complete','halt','halt_cleared','reject','error',
              'basket_execution','order_rejected')) ORDER BY sequence""").fetchall()
         events = [{**dict(r), "data": json.loads(r["data"])} for r in rows]
         pools = [{**dict(r), "metadata": json.loads(r["metadata"])} for r in db.execute(
@@ -164,7 +138,6 @@ def snapshot(root: Path) -> dict:
     finally:
         db.close()
     configs = selections([e for e in events if e["type"] == "run"], pools)
-    reprice_history(events)
     states = {p["id"]: State() for p in pools}
     cash_history = {c["experiment"]["id"]: [] for c in configs}
     memberships = {c["experiment"]["id"]: set(c["experiment"]["portfolio"].values()) for c in configs}
@@ -220,8 +193,9 @@ def snapshot(root: Path) -> dict:
         members = memberships[identifier]
         state = combine_states([states[p] for p in members if p in states])
         obs = [e for e in events if e["type"] == "observation" and e["portfolio_id"] in members]
-        quotes = [e for e in events if e["type"] == "observation" and e["data"].get("kind") == "cross_market_quote"
-                  and e["data"].get("experiment_id") == identifier]
+        quotes = [{**e, "data": e["data"]["quote"]} for e in obs
+                  if e["data"].get("kind") == "scan_complete" and e["data"].get("quote")
+                  and e["data"]["quote"].get("experiment_id") == identifier]
         last = {}
         for event in obs:
             last[event["data"]["kind"]] = {"at": event["effective_at"], **event["data"]}

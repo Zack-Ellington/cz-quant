@@ -5,26 +5,18 @@ This is an experiment companion, not a core reporting service. Run commands from
 It uses the shared czquant accounting library and existing ledger, without
 importing the strategy or owning execution.
 
-The game dashboard separates execution evidence from sampled price opportunities.
-It reads the same ledger as the strategies. Start its public quote collector and
-web server as separate processes, with STRATEGY_RUNS_DIR pointing to that ledger:
-
-```bash
-uv run python monitor.py quotes --interval 5
-```
+The dashboard reads strategy scan captures, broker orders and fills, and account
+monitor evidence from the existing ledger. It has no exchange connections and
+needs no credentials. Set STRATEGY_RUNS_DIR to that ledger, then run:
 
 ```bash
 uv run python monitor.py dashboard
 ```
 
-Open http://127.0.0.1:8791/. Both commands require no credentials. The collector
-discovers explicit selections from recorded cross-market run configurations whose
-pools are still active (retired experiments retain their ledger history),
-reads public Kalshi and Polymarket US books and fee schedules, and appends market
-and quote observations. It does not submit orders, fund pools, or reconcile
-accounts. The dashboard opens SQLite in read-only mode and refreshes every five
-seconds. Existing strategy and authenticated account-monitor processes stay
-independent.
+Open http://127.0.0.1:8791/. SQLite is opened read-only and charts refresh every
+five seconds. Strategy and authenticated account monitors remain independent.
+Stop any previously launched standalone quote collector; it is no longer used.
+The strategy must record scan_complete observations with a quote payload.
 
 The light dashboard has an Overall tab and one tab per game. Overall plots venue
 cash, allocated game cash, open contract counts, and expected return over time.
@@ -48,12 +40,10 @@ limits. Strategy edge, return, cooldown, and execution checks are separate;
 an observed opportunity is not an execution recommendation or a guaranteed fill.
 
 Windows report the first and last positive samples, sample count, and peak quoted
-net. Errors and collection gaps break windows. History begins with collection;
-earlier no-edge scan logs contain no leg prices. Charts grow with all collected
+net. Errors and collection gaps break windows. Price history begins with captured strategy scans; earlier scans have no prices. Charts grow with all collected
 samples and retain zoom across refreshes. Green chart regions use the maximum
-affordable gap per pair; the funded-window table reports the maximum total basket profit. Older samples are
-reconstructed from their recorded books, fees, pool cash, and run configuration;
-missing evidence leaves a gap instead of reusing stale books. Times are Pacific.
+affordable gap per pair; the funded-window table reports the maximum total basket profit. Independent REST collector history is excluded. Missing or blocked scan quotes
+leave a gap instead of reusing previous prices. Times are Pacific.
 
 Trade attempts count recorded preflight/recheck refusals plus distinct submitted
 baskets. Rate-limited diagnostic logs cannot establish every unrecorded retry.
@@ -72,5 +62,5 @@ remain visible; the dashboard does not repair or reallocate balances.
 
 Implementation: cross_market_dashboard.py, cross_market.html, and
 cross_market_monitor.py in this bundle. Regression cases cover
-fee rounding, depth, insufficient cash, missing samples, incomplete inventory,
-actual fills, aggregate deduplication, and observation-only quote collection.
+captured scan selection, missing samples, incomplete inventory,
+actual fills, aggregate deduplication, and read-only access.

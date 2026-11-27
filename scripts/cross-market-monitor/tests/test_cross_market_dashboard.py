@@ -4,8 +4,7 @@ import pytest
 
 from czquant import Store
 from czquant.accounting import State
-from cross_market_dashboard import conditional_profit, reprice_history, seconds, snapshot, trade_rows, windows
-from cross_market_monitor import asks, measure_quotes, quote_route, sample
+from cross_market_dashboard import conditional_profit, seconds, snapshot, trade_rows, windows
 
 
 def config(event="GAME1"):
@@ -17,94 +16,6 @@ def config(event="GAME1"):
                                                   "polymarket": 'PMUS:'+event, "polymarket_side": "YES"},
                                                  {"kalshi": event+'-B', "kalshi_side": "YES",
                                                   "polymarket": 'PMUS:'+event, "polymarket_side": "NO"}]}}}
-
-
-def book(yes="0.30", no="0.60", qty="20"):
-    return {"orderbook_fp": {"yes_dollars": [[yes, qty]], "no_dollars": [[no, qty]]}}
-
-
-def test_fees_round_per_order_and_depth_is_walked():
-    one = quote_route([(D('.4'), D('20'))], [(D('.4'), D('20'))], 1, D(1), D('.095'))
-    ten = quote_route([(D('.4'), D('20'))], [(D('.4'), D('20'))], 10, D(1), D('.095'))
-    assert one['fees'] == D('.04')
-    assert ten['fees'] == D('.40')
-    assert one['net'] == D('.16')
-    assert quote_route([(D('.4'), D('.5'))], [(D('.4'), D('20'))], 1, D(1), D('.095')) is None
-    walked = quote_route([(D('.4'), D(1)), (D('.5'), D(1))], [(D('.4'), D(2))], 2, D(1), D('.095'))
-    assert walked['kalshi_price'] == D('.45')
-
-
-def test_positive_window_has_a_negative_control_and_cash_constraint():
-    cfg = config()
-    k = {'GAME1-A': book(), 'GAME1-B': book()}
-    available = {'kalshi': D(10), 'polymarket_us': D(10)}
-    measured = measure_quotes(cfg, k, book('.5', '.5'), D(1), D('.095'), available, D(20))
-    assert all(r['opportunity'] for r in measured['routes'])
-    negative = measure_quotes(cfg, {t: book('.5', '.5') for t in k}, book('.5', '.5'),
-                              D(1), D('.095'), available, D(20))
-    assert not any(r['opportunity'] for r in negative['routes'])
-    no_cash = measure_quotes(cfg, k, book('.5', '.5'), D(1), D('.095'), {**available, 'kalshi': D('.1')}, D(20))
-    assert not any(r['opportunity'] for r in no_cash['routes'])
-    assert no_cash['routes'][0]['one_set']['net'] > 0
-
-
-def test_no_side_uses_complement_of_yes_bid():
-    cfg = config()
-    result = measure_quotes(cfg, {'GAME1-A': book(), 'GAME1-B': book()}, book('.7', '.2'),
-                            D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
-    assert result['legs'][0]['polymarket_ask'] == D('.8')
-    assert result['legs'][1]['polymarket_ask'] == D('.3')
-
-
-def test_max_gap_is_per_pair_not_total_basket_profit():
-    cfg = config()
-    stepped = {'orderbook_fp': {'yes_dollars': [['.3', '20']],
-                               'no_dollars': [['.6', '1'], ['.55', '19']]}}
-    result = measure_quotes(cfg, {'GAME1-A': stepped, 'GAME1-B': book()}, book('.6', '.4'),
-                            D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
-    route = result['routes'][0]
-    assert route['max_gap']['sets'] == 1
-    assert route['max_gap']['net_per_set'] == D('.16')
-    assert route['best']['sets'] == 20
-    assert route['best']['net'] > route['max_gap']['net']
-    assert route['best']['net_per_set'] < route['max_gap']['net_per_set']
-
-
-def test_max_gap_search_includes_fee_rounding_and_pool_reservations():
-    cfg = config()
-    result = measure_quotes(cfg, {'GAME1-A': book('.1', '.84'), 'GAME1-B': book()}, book('.21', '.77'),
-                            D(1), D('.11'), {'kalshi': D(10), 'polymarket_us': D('9.70')}, D(20))
-    route = result['routes'][0]
-    assert route['max_gap']['sets'] == 3
-    assert route['max_gap']['net_per_set'] == D('.07') / 3
-    assert route['max_gap']['net_per_set'] > route['one_set']['net_per_set']
-    assert route['best']['sets'] == 11  # Twelve need 9.78 with the broker's fee buffer.
-    assert route['max_gap']['polymarket_required'] <= D('9.70')
-
-
-def test_legacy_history_reprices_with_recorded_books_without_reusing_stale_books():
-    cfg = config()
-    kbooks = {'GAME1-A': book('.1', '.84'), 'GAME1-B': book()}
-    pbook = book('.21', '.77')
-    measured = measure_quotes(cfg, kbooks, pbook, D(1), D('.11'),
-                              {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
-    for route in measured['routes']:
-        route.pop('max_gap')
-    def observation():
-        return {'type': 'observation', 'data': {'kind': 'cross_market_quote', 'experiment_id': 'GAME1',
-                                               'status': 'ok', **measured}}
-    events = [{'type': 'run', 'data': {'strategy': 'cross-market-polymarket', 'config': cfg}}]
-    events += [{'type': 'market', 'data': {'source': 'cross_market_quotes', 'ticker': t, 'book': b}}
-               for t, b in {**kbooks, 'PMUS:GAME1': pbook}.items()]
-    events += [observation(), observation()]
-    reprice_history(events)
-    assert events[-2]['data']['routes'][0]['max_gap']['net_per_set'] == D('.07') / 3
-    assert 'max_gap' not in events[-1]['data']['routes'][0]
-
-
-def test_crossed_book_is_not_an_opportunity():
-    with pytest.raises(ValueError, match='crossed'):
-        asks(book('.6', '.6'), 'YES')
 
 
 def sample_at(second, positive=True, status='ok'):
@@ -206,46 +117,34 @@ def test_missing_ledger_is_not_created(tmp_path):
     assert not (tmp_path/'accounting.sqlite3').exists()
 
 
-def test_public_sampler_does_not_change_cash_or_orders(tmp_path):
-    from types import SimpleNamespace
-    store = Store(tmp_path)
-    cfg = config()
-    for venue, pid in cfg['experiment']['portfolio'].items():
-        store.create_pool(pid, venue, '10')
-    before = store.events(kinds=('transaction', 'order', 'execution'))
-    kalshi = SimpleNamespace(market=lambda ticker: {'ticker': ticker, 'event_ticker': 'GAME1', 'status': 'active'},
-                             book=lambda _: book(),
-                             get=lambda _: {'series': {'fee_type': 'quadratic', 'fee_multiplier': '1'}})
-    pmus = SimpleNamespace(market_raw=lambda slug: {'slug': slug, 'status': 'MARKET_STATUS_OPEN', 'feeCoefficient': '.095'},
-                           books=lambda slugs: {s: book('.5', '.5') for s in slugs})
-    result = sample(store, cfg, kalshi, pmus)
-    assert result['status'] == 'ok'
-    assert store.events(kinds=('transaction', 'order', 'execution')) == before
-    assert store.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0] == 0
-    store.close()
-
-
-def test_price_history_retains_all_samples_and_raw_prices(tmp_path):
+def test_only_scan_quotes_are_used_and_blocked_scans_break_history(tmp_path, monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("venue connection"))
     store = Store(tmp_path)
     cfg = config()
     for venue, pid in cfg['experiment']['portfolio'].items():
         store.create_pool(pid, venue, '10')
     store.append('run', {'strategy': 'cross-market-polymarket', 'config': cfg})
-    measured = measure_quotes(cfg, {'GAME1-A': book(), 'GAME1-B': book()}, book('.5', '.5'),
-                              D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
+    q = {'net': '.06', 'net_per_set': '.06', 'fee_per_set': '.04', 'sets': 1}
+    measured = {'experiment_id': 'GAME1', 'status': 'ok',
+        'legs': [{'name': 'A', 'kalshi_ask': '.4', 'polymarket_ask': '.5'},
+                 {'name': 'B', 'kalshi_ask': '.4', 'polymarket_ask': '.5'}],
+        'routes': [{'id': str(i), 'name': str(i), 'one_set': q, 'max_gap': q, 'best': q,
+                    'opportunity': True} for i in range(2)]}
+    store.append('observation', {'kind': 'cross_market_quote', **measured})
     for _ in range(3001):
-        store.append('observation', {'kind': 'cross_market_quote', 'experiment_id': 'GAME1',
-                                    'status': 'ok', **measured})
-    store.append('observation', {'kind': 'cross_market_quote', 'experiment_id': 'GAME1',
-                                'status': 'error', 'legs': [], 'routes': []})
+        store.append('observation', {'kind': 'scan_complete', 'quote': measured}, 'GAME1-k')
+    store.append('observation', {'kind': 'scan_complete', 'quote': {
+        'experiment_id': 'GAME1', 'status': 'error', 'reason': 'polymarket_websocket_stale',
+        'legs': [], 'routes': []}}, 'GAME1-k')
     store.close()
+    before = (tmp_path/'accounting.sqlite3').read_bytes()
     game = snapshot(tmp_path)['games'][0]
+    assert (tmp_path/'accounting.sqlite3').read_bytes() == before
     assert len(game['price_history']) == 3002
-    route = game['price_history'][0]['routes'][0]
-    assert D(route['kalshi_price']) == D('.4')
-    assert D(route['polymarket_price']) == D('.5')
-    assert D(route['net_per_set']) == D('.06')
+    assert game['price_history'][0]['routes'][0]['kalshi_price'] == '.4'
     assert game['price_history'][-1]['routes'] == []
+    assert game['quote']['reason'] == 'polymarket_websocket_stale'
     assert len(game['route_labels']) == 2
 
 

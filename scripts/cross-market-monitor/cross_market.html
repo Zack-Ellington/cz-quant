@@ -48,14 +48,14 @@ function render(s){
  $('account-note').textContent=pm?`Polymarket US: buying power ${money(pm.buying_power)}; pending deposit ${money(pm.pending_deposit)}; bonus ${money(pm.bonus)}; withdrawable ${money(pm.withdrawable)}. Venue cash and ledger cash are shown separately; this page does not change balances.`:'';
  const positions=s.games.flatMap(g=>g.positions.map(p=>[esc(g.name),esc(p.market),esc(p.side),esc(p.quantity),money(p.cost)]));
  $('positions').innerHTML=positions.length?table(['Game','Market','Side','Quantity','Cost incl. fees'],positions):'<p class="muted">No open positions.</p>';
- $('health').textContent=[['account','Kalshi',120],['polymarket_us','Polymarket US',120],['cross_market_quotes','Quotes',15]].map(([key,name,limit])=>{const h=s.health[key];return`${name}: ${!h?'not observed':h.age>limit?'stale':h.status}`}).join(' · ');
+ $('health').textContent=[['account','Kalshi',120],['polymarket_us','Polymarket US',120]].map(([key,name,limit])=>{const h=s.health[key];return`${name}: ${!h?'not observed':h.age>limit?'stale':h.status}`}).join(' · ');
  s.games.forEach((g,i)=>{
   const q=g.quote,beat=g.heartbeat;
   const scan=!beat?'not observed':beat.halted?'halted':(Date.now()-new Date(beat.at))/1000>45?'stale':'scanning';
   $('status-'+i).textContent=`Strategy ${scan} · Quotes ${!q?'waiting':q.age>q.stale_after?'stale':q.status} · ${g.event}`;
   $('metrics-'+i).innerHTML=metric('Game cash',money(g.total_cash))+metric('Open contracts',g.open_contracts)+metric('Expected profit',money(g.expected_profit))+metric('Attempts / executed',`${g.attempts} / ${g.executed_trades}`);
   $('cash-'+i).innerHTML=table(['Account','Cash','Reserved','Available'],g.cash.map(c=>[venue(c.venue),money(c.cash),money(c.reserved),money(c.available)]));
-  $('sampling-'+i).textContent=`${g.price_history.length} samples since ${when(g.quote_history_start)} PT. Last sample ${when(q?.at)} PT. All collected history remains on the chart. Double-click to reset zoom.`;
+  $('sampling-'+i).textContent=`${g.price_history.length} samples since ${when(g.quote_history_start)} PT. Last sample ${when(q?.at)} PT. Prices and gaps come from strategy scans. Historical independent REST samples are excluded. Double-click to reset zoom.`;
   $('trades-'+i).innerHTML=g.trades.length?table(['Time (PT)','State','Details','Fees'],g.trades.map(t=>[when(t.at),t.filled?'Executed':t.reason?'Preflight refused':'Attempted',`<div class="wrap">${esc(t.reason||t.orders.map(o=>`${o.market}: ${o.status}`).join('; '))}${t.executions.map(e=>`<br>${when(e.at)}: ${esc(e.quantity)} ${esc(e.side)} @ ${money(e.price)} (${esc(e.market)})`).join('')}</div>`,money(t.fees)])):'<p class="muted">No recorded trade attempts.</p>';
   $('windows-'+i).innerHTML=g.windows.length?table(['Combination','First / last (PT)','Samples','Peak net','State'],g.windows.map(w=>[`<div class="wrap">${esc(w.route)}</div>`,`${when(w.start)} / ${when(w.last_seen)}`,w.samples,money(w.peak_net),esc(w.status)])):'<p class="muted">No funded above-fee windows observed.</p>';
  });

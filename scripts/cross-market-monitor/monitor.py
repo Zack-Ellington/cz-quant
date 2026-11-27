@@ -8,9 +8,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=os.environ.get("STRATEGY_RUNS_DIR"))
     commands = parser.add_subparsers(dest="command", required=True)
-    quotes = commands.add_parser("quotes", help="collect public quotes; never trade")
-    quotes.add_argument("--interval", type=float, default=5)
-    quotes.add_argument("--once", action="store_true")
     dashboard = commands.add_parser("dashboard", help="serve read-only charts")
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8791)
@@ -18,12 +15,9 @@ def main() -> None:
     if not args.root:
         parser.error("set STRATEGY_RUNS_DIR or pass --root for the existing ledger")
     logging.basicConfig(level=logging.INFO)
-    if args.command == "quotes":
-        from cross_market_monitor import run
-        run(args.root, args.interval, args.once)
-    else:
-        from cross_market_dashboard import serve
-        serve(args.root, args.host, args.port)
+    from cross_market_dashboard import serve
+    serve(args.root, args.host, args.port)
+
 
 
 if __name__ == "__main__":
