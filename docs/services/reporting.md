@@ -50,9 +50,9 @@ for a different selection. Portfolio totals overlap their constituent pool
 rows; never sum all output rows as though they were independent holdings.
 
 Reuse the same STRATEGY_RUNS_DIR and pool IDs on every strategy restart. The
-cross-market strategy selects them through the portfolio venue-to-pool mapping
-in its --experiment JSON file. Each invocation records a new run ID and revision;
-existing cash, positions, fees, losses, orders and reservations persist.
+cross-market strategy selects them through the portfolio ID in its --config
+YAML file, or an explicit venue-to-pool mapping. Each invocation records a new
+run ID and revision; existing cash, positions, fees, losses, orders and reservations persist.
 Separate experiments need separate pools; a new run or reporting group does
 not create an independent allocation.
 
@@ -73,6 +73,52 @@ opening balances, and all runs contributing to the window remain included.
 Returns and drawdown use the combined equity curve and funding boundaries;
 percentages from individual pools are not added or averaged. Allocations inside
 a reporting portfolio cancel as capital flows, while fees remain costs.
+
+## Portfolio CLI and configuration
+
+The shared CLI provides portfolio creation, listing and inspection without a
+strategy process. Run it from packages/czquant after uv sync, or from an installed
+broker-enabled strategy environment. Export STRATEGY_RUNS_DIR first.
+
+```bash
+uv run czquant portfolio-create --config portfolio.yaml
+uv run czquant portfolios
+uv run czquant portfolios game-a --events 20
+```
+
+The YAML or JSON creation config has id, optional label, and a pools list. Each
+item is either an existing pool ID or a new paper pool with id, venue and cash:
+
+```yaml
+id: game-a
+label: Paper comparison
+pools:
+  - id: game-a-kalshi
+    venue: kalshi
+    cash: 60
+  - id: game-a-us
+    venue: polymarket_us
+    cash: 40
+```
+
+Creation and initial paper funding share one transaction. Duplicate IDs or an
+invalid member roll back all changes. Repeating creation never adds funding.
+For live portfolios, register accounts and allocate pools with the existing
+account and open-sub commands, then list those IDs as strings under pools.
+The creation command cannot create live capital or mix paper and live pools.
+
+portfolios lists pool, portfolio and legacy rows with their IDs, mode and member
+pools. Supplying an ID returns open FIFO lots with their owning pool, current
+cash, contributed capital, reservations, fees, realized and unrealized P&L,
+equity and quote bounds using the dashboard's valuation policy. --events N
+includes the latest N ledger events belonging to those pools, plus their total
+count. Events include orders, fills, transactions and strategy observations;
+they are not a market-discovery listing. An unknown ID is an error.
+
+This is a current, lifetime operational view. Missing marks leave net P&L null;
+realized P&L and unmarked cost remain visible. It does not certify live account
+reconciliation or produce a frozen comparison. Use report for time-window
+metrics, evidence coverage and a reproducible snapshot.
 
 ## Deprecated pooled-capital records
 

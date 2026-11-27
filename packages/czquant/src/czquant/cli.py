@@ -2,6 +2,8 @@
 from __future__ import annotations
 import argparse
 import logging
+import sqlite3
+from decimal import InvalidOperation
 from pathlib import Path
 from .store import Store, encode
 
@@ -19,6 +21,11 @@ def main() -> None:
     create.add_argument('id')
     create.add_argument('--pools', nargs='+', required=True)
     create.add_argument('--label', default='')
+    portfolios = commands.add_parser('portfolios', help='list portfolios and pools, or inspect positions and P&L by ID')
+    portfolios.add_argument('id', nargs='?')
+    portfolios.add_argument('--events', type=int, default=0, metavar='N', help='include the last N ledger events')
+    portfolio_create = commands.add_parser('portfolio-create', help='create a portfolio from YAML or JSON; funding is explicit')
+    portfolio_create.add_argument('--config', required=True)
     monitor = commands.add_parser('monitor')
     monitor.add_argument('component', choices=['market','account','polymarket','polymarket-us'])
     monitor.add_argument('--once', action='store_true')
@@ -111,6 +118,25 @@ def main() -> None:
         store.create_pool(args.id, args.venue.replace('-', '_'), args.cash, label=args.label)
     elif args.command == 'portfolio':
         store.create_portfolio(args.id, args.pools, label=args.label)
+    elif args.command in ('portfolios', 'portfolio-create'):
+        from . import portfolios
+        from .config import load_config
+        from .report import reporting_units
+        try:
+            if args.command == 'portfolio-create':
+                identifier = portfolios.create(store, load_config(args.config))
+                print(encode(portfolios.details(store, identifier)))
+            elif args.events < 0 or (args.events and args.id is None):
+                parser.error('--events requires an ID and a nonnegative count')
+            elif args.id:
+                print(encode(portfolios.details(store, args.id, args.events)))
+            else:
+                print(encode(reporting_units(store)))
+        except (OSError, ValueError, InvalidOperation, sqlite3.IntegrityError) as exc:
+            parser.error(str(exc))
+        finally:
+            store.close()
+        return
     elif args.command == 'monitor':
         from .monitor import run_monitor
         run_monitor(str(store.root), args.component, args.interval, args.once)

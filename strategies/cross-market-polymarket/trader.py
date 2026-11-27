@@ -1,6 +1,6 @@
 """Independent cross-market sum check using one broker per venue.
 
-Select one experiment with --experiment FILE; its mode selects paper or live.
+Select one experiment with --config FILE; its mode selects paper or live.
 The strategy reads one prepared pair and owns
 sizing, sequential IOC execution, partial-fill repairs, and monitor-health gates.
 Brokers retain execution evidence in the shared economic log. See README.md for
@@ -10,7 +10,6 @@ configuration, collectors, recovery, and the supported venue modes.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import subprocess
@@ -19,11 +18,13 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from czquant import Broker, Store
 from czquant.accounting import active_events, combine_states, venue_of
 from czquant.book import levels as book_levels
+from czquant.config import load_config
 from czquant.kalshi import Kalshi
 from czquant.live import KalshiLive
 from czquant.paper import Paper
@@ -62,9 +63,13 @@ class Config:
     max_basket_dollars: float | None = 25.0  # hard cap on one basket's capital
     max_total_dollars: float | None = 100.0  # hard cap on capital at risk across open trades
     monitor_max_age: float = 300.0  # live: seconds a monitor's last health check stays valid
+    once: bool = False
+    portfolio_id: str | None = None  # retains the operator's selection in run provenance
 
     def __post_init__(self) -> None:
         self.experiment.validate()
+        if not isinstance(self.once, bool):
+            raise ValueError('once must be true or false')
         if not 0 < self.max_capital_frac <= 1 or self.max_sets < 1 or self.interval_seconds <= 0:
             raise ValueError("capital fraction, basket size and scan interval must be positive")
         if self.cooldown < 0:
@@ -582,27 +587,57 @@ def buy(leg: dict[str, Any]) -> dict[str, str]:
 
 
 def load_experiment(path: str) -> Config:
-    with open(path, encoding="utf-8") as stream:
-        data = json.load(stream)
+    data = load_config(path)
+    once = data.pop('once', False)
+    if 'pair_file' in data:
+        if 'pair' in data:
+            raise ValueError('select pair or pair_file, not both')
+        pair_path = Path(path).resolve().parent / data.pop('pair_file')
+        candidates = load_config(pair_path)
+        index = data.pop('pair_index')
+        pairs = candidates.get('pairs')
+        if not isinstance(index, int) or isinstance(index, bool) or not isinstance(pairs, list) or not 0 <= index < len(pairs):
+            raise ValueError('pair_index must select an existing entry in the candidate pairs array')
+        data['pair'] = pairs[index]
     selected = dict(data.pop("pair"))
     selected["outcomes"] = tuple(Outcome(**o) for o in selected["outcomes"])
     parameters = data.pop("parameters", {})
+    portfolio_id = data.get('portfolio') if isinstance(data.get('portfolio'), str) else None
+    if portfolio_id is not None:
+        if not os.environ.get('STRATEGY_RUNS_DIR'):
+            raise ValueError('export STRATEGY_RUNS_DIR before selecting a portfolio')
+        store = Store()
+        try:
+            group = next((p for p in store.reporting_portfolios() if p['id'] == portfolio_id), None)
+            if group is None:
+                raise ValueError(f'unknown portfolio {portfolio_id}; create it with czquant portfolio-create first')
+            pools = {p['id']: p for p in store.pools()}
+            members = [pools[pid] for pid in group['pools']]
+            if len(members) != 2 or {p['venue'] for p in members} != {'kalshi', selected['venue']}:
+                raise ValueError('cross-market portfolio requires exactly one pool for each selected venue')
+            if any(p['mode'] != data['mode'] or p['metadata'].get('retired_at') for p in members):
+                raise ValueError('portfolio pools must be active and match the configured mode')
+            data['portfolio'] = {p['venue']: p['id'] for p in members}
+        finally:
+            store.close()
     experiment = Experiment(pair=SelectedPair(**selected), **data)
-    return Config(experiment=experiment, **parameters)
+    return Config(experiment=experiment, once=once, portfolio_id=portfolio_id, **parameters)
 
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--experiment", required=True, metavar="FILE.json",
-                   help="one pair, mode, parameters and two pre-created venue allocations; together these form the experiment portfolio")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument('--config', metavar='FILE.yaml', help='portfolio ID, prepared pair, mode and run parameters')
+    source.add_argument('--experiment', metavar='FILE.json', help='experiment configuration (also accepts YAML)')
     p.add_argument("--once", action="store_true", help="one scan, then stop; funding and holdings are retained")
     a = p.parse_args(argv)
     if not os.environ.get("STRATEGY_RUNS_DIR"):
         p.error("export STRATEGY_RUNS_DIR to the persistent shared logging directory before starting")
     try:
-        cfg = load_experiment(a.experiment)
+        cfg = load_experiment(a.config or a.experiment)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         p.error(f"invalid experiment: {exc}")
+    cfg.once = a.once or cfg.once
     engine = Engine(cfg)
     run_dir = os.path.join(engine.diagnostics, engine.run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -614,7 +649,7 @@ def main(argv: list[str] | None = None) -> None:
                     cfg.max_total_dollars, cfg.max_sets, engine.kalshi_broker.available,
                     engine.poly_broker.available)
     try:
-        engine.run(once=a.once)
+        engine.run(once=cfg.once)
     except KeyboardInterrupt:
         pass
 

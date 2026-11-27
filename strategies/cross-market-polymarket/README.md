@@ -19,9 +19,10 @@ and prices only for the pair in its configuration.
 
 Cash pools persist independently of runs. Brokers enforce venue, mode, ownership,
 market scope, reservations and available cash. Startup never creates or funds a
-pool. A new experiment ID does not reset cash, losses or positions. The optional
-`czquant portfolio` command creates a reporting group; that group is not used by
-the strategy and has no additional buying power.
+pool. A new experiment ID does not reset cash, losses or positions. The
+czquant portfolio-create command creates a reporting group and can explicitly
+fund new paper pools. The strategy resolves that group by ID to its two venue
+pools. The group has no additional buying power.
 
 ```mermaid
 flowchart LR
@@ -43,36 +44,45 @@ mapping, execution capabilities and explicit capital operations.
 
 ## Prepare configuration
 
-The runtime interface is `uv run python trader.py --experiment FILE.json`, with
-optional --once. The file specifies an ID, portfolio, mode, one pair and parameters.
-There are no environment pool selectors, discovery flags or parameter overrides.
-Secrets come from exported environment variables; no dotenv file is loaded.
+The runtime interface is `uv run python runner.py --config FILE.yaml` from this
+strategy directory. The file specifies an ID, an existing portfolio ID, mode,
+one prepared pair, once and parameters. JSON is also accepted. All run options
+can live in the file. Secrets come from exported environment variables; no
+dotenv file is loaded. The root [quickstart](../../README.md#run-a-cross-market-paper-experiment)
+walks through the complete paper workflow.
 
-From the repository root, prepare sports candidates using public endpoints:
+Copy [config.example.yaml](experiments/config.example.yaml) to your private
+experiment directory. Its pair_file points to a saved discovery candidate file,
+relative to the config. pair_index explicitly selects one element of its pairs
+array, starting at zero. Review that pair and the venue rules before running;
+the runner never discovers or changes pairs. Do not overwrite the candidate
+file for an experiment you intend to reproduce.
 
-```bash
-export STRATEGY_RUNS_DIR=/absolute/path/to/czquant-runs
-mkdir -p "$STRATEGY_RUNS_DIR/experiments"
-uv run --project strategies/cross-market-polymarket python scripts/cross-market-pairs/prepare.py \
-  --venue polymarket-us --leagues nba --out "$STRATEGY_RUNS_DIR/experiments/candidates.json"
+```yaml
+id: game-a
+portfolio: game-a
+mode: paper
+pair_file: candidates.json
+pair_index: 0
+once: true
+parameters:
+  max_sets: 20
+  max_basket_dollars: 25
+  duration_minutes: null
 ```
 
-Review the candidates and both venues' rules. Copy
-[game-a.example.json](experiments/game-a.example.json) to your private experiment
-directory. Replace its entire pair object with one reviewed object from the
-candidate file's pairs array. The example identifiers and resolution date are
-placeholders, not current listings. [game-b.example.json](experiments/game-b.example.json)
-uses different pool IDs for a second experiment.
+The portfolio must already exist, contain exactly one active pool at each
+selected venue, and match the configured mode. A missing or invalid portfolio
+fails before the engine starts. For an independent experiment, create another
+portfolio with distinct pools; changing only the experiment ID does not isolate
+capital. The resolved pool IDs and full selected pair are recorded with each run.
 
-The portfolio maps venue names to pre-created cash pool IDs:
-
-```json
-{
-  "id": "game-a",
-  "portfolio": {"kalshi": "game-a-kalshi", "polymarket_us": "game-a-us"},
-  "mode": "paper"
-}
-```
+An inline pair object can replace pair_file and pair_index. The complete
+[game-a JSON example](experiments/game-a.example.json) shows that shape, including
+the alternative portfolio mapping from venue names to existing pool IDs.
+The trader.py --experiment FILE.json entry point remains available to existing
+callers. Both entry points run the same engine; --once requests a single scan.
+For YAML inline pairs, quote resolves_at so it remains a string.
 
 The pair object has venue, kalshi_event, kalshi_series, polymarket_event,
 polymarket_market, resolves_at, outcomes and optional evidence. Preprocessing
@@ -105,51 +115,37 @@ Both brokers record the full resolved configuration and code revision at run
 start. Each order includes the experiment ID, selected pair and shared trade ID.
 Reporting reads the economic log without importing the strategy.
 
-The optional [live launcher](../../scripts/cross-market-launch/) funds missing
-pools once, can retire flat previous pools, and supervises the trader and both
-account monitors. It preserves balances and history on restart.
+## Create a portfolio and run
 
-## Fund once and run
-
-From this strategy directory, create the two paper pools after preparing the
-experiment file. Funding is an explicit operation outside the strategy:
+Copy [portfolio.example.yaml](experiments/portfolio.example.yaml), edit its IDs
+and funding, and create it once through the operator CLI. From this directory:
 
 ```bash
 uv sync --locked
-uv run czquant pool game-a-kalshi --venue kalshi --cash 60
-uv run czquant pool game-a-us --venue polymarket-us --cash 40
-uv run python trader.py --experiment "$STRATEGY_RUNS_DIR/experiments/game-a.json" --once
+uv run czquant portfolio-create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
+uv run czquant portfolios
+uv run python runner.py --config "$STRATEGY_RUNS_DIR/experiments/config.yaml"
+uv run czquant portfolios game-a --events 20
 ```
 
-Repeat only the run command on restart. Cash, positions, losses and reservations
-remain in the same pools. The pools can be used by a later run; unresolved orders
-or incompatible holdings must be reconciled first. Each run considers one pair.
+Repeat only the runner command on restart. Cash, positions, losses and
+reservations remain in the same pools. The pools can be used by a later run;
+unresolved orders or incompatible holdings must be reconciled first. Each run
+considers one pair. Use one process per experiment. Run additional processes
+with separate configs and distinct portfolios for independent experiments.
 
-For a second reviewed pair, prepare game-b.json and fund its separate pools once:
-
-```bash
-uv run czquant pool game-b-kalshi --venue kalshi --cash 60
-uv run czquant pool game-b-us --venue polymarket-us --cash 40
-```
-
-Run the two experiments in parallel from the same shell:
-
-```bash
-uv run python trader.py --experiment "$STRATEGY_RUNS_DIR/experiments/game-a.json" &
-uv run python trader.py --experiment "$STRATEGY_RUNS_DIR/experiments/game-b.json" &
-wait
-```
-
-Each experiment spends only its pools' cash. Use one process per experiment and
-distinct pool IDs for independent runs. Both processes use the same economic log;
-their diagnostic directories and KILL files are separated by pool IDs.
+The strategy owns execution only. Create, allocate, inspect and report using
+czquant commands in separate steps. For longer runs, set once to false; a null
+parameters.duration_minutes runs until Ctrl-C. Stopping does not close positions.
 
 ## Live preparation and recovery
 
 Live execution requires Polymarket US and pre-created live allocations. Follow
 the [virtual-subaccount guide](../../docs/services/virtual-subaccounts.md):
 register each venue account with czquant account, then use czquant open-sub to
-allocate two dedicated pools per experiment. Optional --markets scopes are
+allocate two dedicated pools per experiment. Group their IDs with
+czquant portfolio-create using a config whose pools list contains those existing
+IDs, then select that portfolio in the runner config. Optional --markets scopes are
 enforced by the brokers. Several US pools require account-wide reconciliation;
 repeating map-live cannot prepare these allocations. Registered accounts also
 prevent experiments from opening opposite sides of the same market.

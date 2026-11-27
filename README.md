@@ -49,47 +49,111 @@ git clone git@github.com:Zack-Ellington/cz-quant.git
 cd cz-quant
 ```
 
-### Install and run 2026-midterm-prediction-arbitrage
+### Run a cross-market paper experiment
 
-1. Go to the strategy directory.
+A portfolio groups existing venue cash pools. The operator CLI creates the
+portfolio and its paper funding once. The strategy selects that portfolio by ID;
+restarting a strategy preserves cash, positions, losses and pending orders.
+Discovery produces a candidate file before execution. Reporting reads the same
+ledger independently of the strategy.
 
-   ```bash
-   cd strategies/2026-midterm-prediction-arbitrage
-   ```
-
-2. Install. This creates `.venv/` in the strategy directory.
-
-   ```bash
-   uv sync
-   ```
-
-3. Create your `.env` from the example.
+1. Copy the root environment example. Set STRATEGY_RUNS_DIR to a writable,
+   absolute private path outside this checkout. Public-data paper runs can leave
+   the four credential variables empty. Live account monitoring and execution
+   require the corresponding venue keys.
 
    ```bash
    cp .env.example .env
    ```
 
-4. Create a Kalshi API key. Kalshi gives you a key ID and an RSA private key file. The example file points at the demo environment, so create the key in a demo account (https://demo.kalshi.co). Production keys do not work on demo.
-
-5. Fill in `.env`. Set `KALSHI_API_KEY_ID` to the key ID. Set `KALSHI_PRIVATE_KEY_PATH` to the path of the private key file.
-
-6. Export the variables into your shell. This strategy reads these settings from the environment. It does not read `.env`. Do this step in each new shell, and again after you change `.env`.
+   After editing .env, export it in each shell. No Python command loads .env.
 
    ```bash
    set -a; source .env; set +a
+   mkdir -p "$STRATEGY_RUNS_DIR/experiments"
+   cd strategies/cross-market-polymarket
+   uv sync --locked
    ```
 
-7. Run the strategy.
+   All remaining commands in this quickstart run from this strategy directory.
+   Its environment includes the shared czquant CLI.
+
+2. Create a portfolio config. The example creates game-a with $60 in a Kalshi
+   paper pool and $40 in a Polymarket US paper pool. Edit IDs and funding before
+   creation if needed. Creating the same ID again fails without adding cash.
 
    ```bash
-   uv run strategy
+   cp experiments/portfolio.example.yaml "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
+   uv run czquant portfolio-create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
+   uv run czquant portfolios
    ```
 
-This strategy is implemented: the command reads the live Kalshi markets, runs
-the model-free checks and the independent Monte Carlo, prints the
-model-vs-market table, and paper-trades into `runs/` (nothing is ever sent). See its
-[README](strategies/2026-midterm-prediction-arbitrage/README.md) for the method,
-a sample report, and the reproducible `--snapshot-in` run.
+   Creation is atomic. Existing pool IDs can be listed in the config instead of
+   new paper pool definitions, including live pools allocated separately with
+   czquant account and czquant open-sub. A portfolio cannot mix paper and live.
+
+3. Identify a market pair using the reusable discovery CLI. This requests
+   public market data and writes candidates; it does not trade.
+
+   ```bash
+   uv run python ../../scripts/cross-market-pairs/prepare.py \
+     --venue polymarket-us --leagues nba \
+     --out "$STRATEGY_RUNS_DIR/experiments/candidates.json"
+   ```
+
+   Inspect the pairs array in candidates.json. Review the selected event,
+   outcome mappings, deadlines, ties and postponement rules on both venues.
+   Matching names alone does not establish equivalent payouts. If no suitable
+   pair is returned, select another supported league using the
+   [discovery guide](scripts/cross-market-pairs/README.md).
+
+4. Copy the runner config. Set portfolio to the ID created above. Set pair_index
+   to the zero-based index of the reviewed pair in candidates.json. pair_file
+   resolves relative to the config, so these two files can move together.
+
+   ```bash
+   cp experiments/config.example.yaml "$STRATEGY_RUNS_DIR/experiments/config.yaml"
+   ```
+
+   The example uses mode: paper and once: true. After reviewing and editing it,
+   run one scan. The config supplies the portfolio, pair, timing and sizing;
+   no strategy funding arguments are needed.
+
+   ```bash
+   uv run python runner.py --config "$STRATEGY_RUNS_DIR/experiments/config.yaml"
+   ```
+
+   A scan can legitimately make no trades when no basket meets the configured
+   return hurdle. For repeated scans, set once to false and set
+   parameters.duration_minutes, or leave duration null to run until Ctrl-C.
+   Repeat only the runner command on restart. Use a new portfolio and distinct
+   pool IDs for an independent experiment.
+
+5. Inspect positions, P&L and the latest ledger events. The command returns JSON
+   with pool ownership, contributed capital, cash, fees, realized and unrealized
+   P&L. Portfolio totals overlap pool rows; do not add them together.
+
+   ```bash
+   uv run czquant portfolios game-a --events 20
+   ```
+
+   Open positions need fresh recorded market data for a complete valuation.
+   Missing or stale marks produce null net P&L and a list of missing markets;
+   they do not imply zero profit or loss. Refresh paper marks and settlement
+   evidence with the independent collectors, then inspect again:
+
+   ```bash
+   uv run czquant monitor market --once
+   uv run czquant monitor polymarket-us --once
+   uv run czquant portfolios game-a
+   ```
+
+   For a frozen time-window report, use czquant report as documented in the
+   [reporting guide](docs/services/reporting.md). Run czquant dashboard for a
+   browser view of the same ledger. The [strategy guide](strategies/cross-market-polymarket/README.md)
+   covers live preparation, monitor requirements and recovery.
+
+The older election strategy has its own [quickstart](strategies/2026-midterm-prediction-arbitrage/README.md).
 
 ## Shared services
 
@@ -141,7 +205,7 @@ and can attach diagnostics; they do not supply reporting implementations.
 See [reporting](docs/services/reporting.md) for commands and portfolio lifetime.
 
 The [cross-market strategy](strategies/cross-market-polymarket/#prepare-configuration)
-selects one pair and two pre-created allocations with --experiment FILE.json.
+selects one pair and an existing portfolio with runner.py --config FILE.yaml.
 Each experiment uses two venue cash pools and two brokers in both
 paper and live mode. A reporting portfolio groups those pools without merging
 their spending authority. Reusing a pool preserves its cash, positions, and
@@ -231,7 +295,7 @@ strategy starts with an empty `run()`.
 
 Secrets and API endpoint overrides come from exported environment variables.
 Strategy parameters use each strategy's documented CLI or configuration file;
-the cross-market strategy uses --experiment FILE.json. No code reads .env files,
+the cross-market strategy uses runner.py --config FILE.yaml. No code reads .env files,
 and no strategy depends on a dotenv library. An .env file is a shell convenience;
 export it before a run with `set -a; source .env; set +a`.
 

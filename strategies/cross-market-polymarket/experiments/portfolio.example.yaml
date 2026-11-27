@@ -1,0 +1,9 @@
+id: game-a
+label: Cross-market paper experiment
+pools:
+  - id: game-a-kalshi
+    venue: kalshi
+    cash: 60
+  - id: game-a-us
+    venue: polymarket_us
+    cash: 40
