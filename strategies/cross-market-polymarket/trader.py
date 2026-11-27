@@ -32,6 +32,7 @@ from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive,
 from czquant.store import decimal
 
 from experiments import Experiment, Outcome, SelectedPair
+from slippage import split_limits, second_limit, cost
 from sum_check import Basket, best, kalshi_offer, polymarket_offer, polymarket_us_offer
 
 STRATEGY = "cross-market-polymarket"
@@ -46,6 +47,7 @@ log = logging.getLogger("cross_market_polymarket")
 class Config:
     experiment: Experiment
     interval_seconds: float = 15.0
+    profit_slippage: bool = False
     max_capital_frac: float = 0.10
     max_sets: int = 20
     risk_free: float = 0.05
@@ -365,7 +367,8 @@ class Engine:
             role = str(index)
             ways = [kalshi_offer(role, outcome.kalshi, kbooks[outcome.kalshi], multiplier, outcome.kalshi_side)]
             if self.us:
-                ways.append(polymarket_us_offer(role, outcome.polymarket, pbook, theta, outcome.polymarket_side))
+                ways.append(polymarket_us_offer(role, outcome.polymarket, pbook, theta, outcome.polymarket_side,
+                                                 decimal(market.get("orderPriceMinTickSize") or "0.01")))
             else:
                 token = outcome.polymarket.removeprefix("PM:")
                 normalized = normalize_market(market, token)
@@ -402,6 +405,21 @@ class Engine:
         if current is None or {(leg["ticker"], leg["contract"]) for leg in current.legs} != intended:
             self.reject(event, "recheck_failed", why=why if current is None else "legs_changed")
             return
+        capital_limit = self.limits()
+        edge = max(Decimal(str(self.cfg.min_edge)), 1 - capital_limit / current.sets)
+        if self.us and self.cfg.profit_slippage:
+            def fundable(leg: dict[str, Any], price: Decimal, quantity: int = current.sets) -> bool:
+                candidate = {**leg, "limit": str(price)}
+                return self.brokers[leg["venue"]].check({"ticker": leg["ticker"], **buy(candidate),
+                                                       "count": str(quantity)})["status"] == "ready"
+            widened = split_limits(current.legs, current.sets, edge, fundable)
+            if widened is None:
+                self.reject(event, "slippage_profit_floor")
+                return
+            current.legs = widened
+            if sum(current.sets * decimal(l["limit"]) + decimal(l["fee"]) for l in widened) > self.limits():
+                self.reject(event, "slippage_capital_limit")
+                return
         blocked = self.check_basket(current)
         if blocked:
             self.reject(event, "basket_preflight", detail=blocked)
@@ -417,9 +435,21 @@ class Engine:
         failure: BaseException | None = None
         attempted: tuple[dict[str, Any], str] | None = None
         try:
-            for leg in legs:
+            first_price, first_fees, first_cost = Decimal(0), Decimal(0), Decimal(0)
+            first_quantity = Decimal(0)
+            for index, leg in enumerate(legs):
                 if target < 1:
                     break
+                if self.us and self.cfg.profit_slippage and index == 1:
+                    revised = second_limit(leg, int(target), edge, first_price, first_fees / first_quantity,
+                                           lambda p: fundable(leg, p, int(target))
+                                           and first_cost + cost(leg, p, int(target)) <= capital_limit)
+                    if revised is None:
+                        outcomes.append({"status": "profit_floor", "filled": "0", "ticker": leg["ticker"]})
+                        break
+                    leg = {**leg, "limit": str(revised)}
+                    self.kalshi_broker.observe("slippage_reprice", {"trade_id": trade_id, "leg": leg,
+                        "first_price_bound": str(first_price), "first_fees": str(first_fees), "sets": int(target)})
                 identifier = str(uuid.uuid4())
                 attempted = (leg, identifier)
                 result = self.brokers[venue_of(leg["ticker"])].submit({"client_order_id": identifier, "ticker": leg["ticker"], **buy(leg), "count": str(int(target)),
@@ -435,6 +465,30 @@ class Engine:
                     break
                 sent.append((leg, got))
                 target = min(target, got)
+                if self.us and self.cfg.profit_slippage and index == 1 and got > 0:
+                    receipts = [e["data"] for e in self.store.events(kinds=("execution",))
+                                if e["data"].get("order_id") == identifier]
+                    if sum((decimal(r["quantity"]) for r in receipts), Decimal(0)) != got:
+                        self.halt("missing second-leg fill evidence; reconcile before repair", recoverable=True)
+                        break
+                    second_price = max(decimal(r["yes_price"]) if leg["contract"] == "YES"
+                                       else 1 - decimal(r["yes_price"]) for r in receipts)
+                    second_fees = sum((decimal(r["fee"]) for r in receipts), Decimal(0))
+                    if 1 - first_price - first_fees / first_quantity - second_price - second_fees / got < edge:
+                        failure = ValueError("actual matched fills fall below the profit floor; repairing both legs")
+                        break
+                if self.us and self.cfg.profit_slippage and index == 0 and got > 0:
+                    receipts = [e["data"] for e in self.store.events(kinds=("execution",))
+                                if e["data"].get("order_id") == identifier]
+                    if sum((decimal(r["quantity"]) for r in receipts), Decimal(0)) != got:
+                        self.halt("missing first-leg fill evidence; reconcile before repair", recoverable=True)
+                        break
+                    first_quantity = got
+                    first_price = max(decimal(r["yes_price"]) if leg["contract"] == "YES"
+                                      else 1 - decimal(r["yes_price"]) for r in receipts)
+                    first_fees = sum((decimal(r["fee"]) for r in receipts), Decimal(0))
+                    first_cost = sum((decimal(r["quantity"]) * (decimal(r["yes_price"]) if leg["contract"] == "YES"
+                                     else 1 - decimal(r["yes_price"])) for r in receipts), Decimal(0)) + first_fees
         except Exception as exc:
             failure = exc
             outcomes.append({"status": "error", "error": f"{type(exc).__name__}: {exc}"[:200]})

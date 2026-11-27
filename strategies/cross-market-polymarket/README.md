@@ -226,3 +226,24 @@ These checks cover preprocessing exports, one-pair runtime isolation, independen
 cash pools, whole-basket preflight, retained balances and reservations, restarts,
 partial-fill repairs and unknown execution outcomes. Type checking includes the
 preprocessing bundle.
+
+### Profit-bounded slippage
+
+Set `parameters.profit_slippage` to `true` for a Kalshi/Polymarket US
+experiment to let IOC orders cross beyond the observed book prices. The default
+is `false`. The strategy splits the remaining after-fee profit allowance equally
+between the legs, preserving `min_edge` at their limit prices and respecting
+broker reservations and the basket capital cap. Limits use the market price
+increment (a conservative one-cent increment for Kalshi).
+
+After the first fill, recorded execution prices and fees determine the second
+limit. The calculation uses the worst actual first-leg price, proportionally
+allocates its recorded fees to matched contracts, and bounds second-leg fees for
+each possible integer partial fill. Missing fill evidence halts execution for
+reconciliation. If no second limit meets the floor, the existing automatic repair
+sells the unmatched first leg. Repair losses and a tied game are outside the
+completed-basket profit floor. Slippage does not guarantee execution.
+
+`slippage_reprice` observations record the second limit, first-leg price bound,
+fees, and matched target quantity. The original expected profit remains the
+book-price estimate; order requests record the actual submitted limits.
