@@ -163,7 +163,7 @@ def snapshot(root: Path) -> dict:
                   for r in db.execute("SELECT * FROM orders")]
     finally:
         db.close()
-    configs = selections([e for e in events if e["type"] == "run"])
+    configs = selections([e for e in events if e["type"] == "run"], pools)
     reprice_history(events)
     states = {p["id"]: State() for p in pools}
     cash_history = {c["experiment"]["id"]: [] for c in configs}

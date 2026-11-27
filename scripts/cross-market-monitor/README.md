@@ -18,7 +18,8 @@ uv run python monitor.py dashboard
 ```
 
 Open http://127.0.0.1:8791/. Both commands require no credentials. The collector
-discovers explicit selections from recorded cross-market run configurations,
+discovers explicit selections from recorded cross-market run configurations whose
+pools are still active (retired experiments retain their ledger history),
 reads public Kalshi and Polymarket US books and fee schedules, and appends market
 and quote observations. It does not submit orders, fund pools, or reconcile
 accounts. The dashboard opens SQLite in read-only mode and refreshes every five

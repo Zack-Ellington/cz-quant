@@ -19,7 +19,7 @@ ZERO = Decimal(0)
 FEE_TYPES = {"quadratic", "quadratic_with_maker_fees", "quadratic_with_combo_maker_fees"}
 
 
-def selections(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def selections(events: list[dict[str, Any]], pools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Latest recorded configuration per experiment, deduplicated across its brokers."""
     selected = {}
     for event in sorted(events, key=lambda e: e["sequence"]):
@@ -29,7 +29,8 @@ def selections(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if (data.get("strategy") == "cross-market-polymarket"
                 and experiment.get("pair", {}).get("venue") == "polymarket_us"):
             selected[experiment["id"]] = config
-    return list(selected.values())
+    active = {p["id"] for p in pools if not p["metadata"].get("retired_at")}
+    return [cfg for cfg in selected.values() if set(cfg["experiment"]["portfolio"].values()) <= active]
 
 
 def asks(book: dict, side: str) -> list[tuple[Decimal, Decimal]]:
@@ -170,7 +171,7 @@ def run(root: str | None, interval: float = 5, once: bool = False) -> None:
         while True:
             start = time.monotonic()
             errors = []
-            configs = selections(store.events(kinds=("run",)))
+            configs = selections(store.events(kinds=("run",)), store.pools())
             for config in configs:
                 identifier = config["experiment"]["id"]
                 try:

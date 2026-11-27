@@ -228,6 +228,8 @@ def test_public_sampler_does_not_change_cash_or_orders(tmp_path):
 def test_price_history_retains_all_samples_and_raw_prices(tmp_path):
     store = Store(tmp_path)
     cfg = config()
+    for venue, pid in cfg['experiment']['portfolio'].items():
+        store.create_pool(pid, venue, '10')
     store.append('run', {'strategy': 'cross-market-polymarket', 'config': cfg})
     measured = measure_quotes(cfg, {'GAME1-A': book(), 'GAME1-B': book()}, book('.5', '.5'),
                               D(1), D('.095'), {'kalshi': D(10), 'polymarket_us': D(10)}, D(20))
@@ -245,3 +247,15 @@ def test_price_history_retains_all_samples_and_raw_prices(tmp_path):
     assert D(route['net_per_set']) == D('.06')
     assert game['price_history'][-1]['routes'] == []
     assert len(game['route_labels']) == 2
+
+
+def test_retired_allocations_are_not_selected_for_live_monitoring():
+    from cross_market_monitor import selections
+    old, new = config("old"), config("new")
+    events = [{"sequence": i, "data": {"strategy": "cross-market-polymarket", "config": cfg}}
+              for i, cfg in enumerate([old, new])]
+    pools = [{"id": pid, "metadata": {"retired_at": "2026-11-27"} if cfg is old else {}}
+             for cfg in [old, new] for pid in cfg["experiment"]["portfolio"].values()]
+    assert selections(events, pools) == [new]
+    pools[-1]["metadata"] = {"retired_at": "2026-11-27"}
+    assert selections(events, pools) == []
