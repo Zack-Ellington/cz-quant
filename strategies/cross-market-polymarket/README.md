@@ -84,6 +84,12 @@ The trader.py --experiment FILE.json entry point remains available to existing
 callers. Both entry points run the same engine; --once requests a single scan.
 For YAML inline pairs, quote resolves_at so it remains a string.
 
+Each scan records its input books, fee parameters, buy prices, and affordable
+fee-adjusted cross-venue gaps in the ledger's scan_complete observation. Reporting
+can chart these quote payloads without making separate venue requests. Missing
+or failed reads record an empty quote sample instead of repeating old prices.
+Quote measurements do not change the selected basket or execution settings.
+
 The pair object has venue, kalshi_event, kalshi_series, polymarket_event,
 polymarket_market, resolves_at, outcomes and optional evidence. Preprocessing
 resolves aliases and question inversion into the two explicit outcome mappings.
