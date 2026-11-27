@@ -11,6 +11,12 @@ from packages/czquant and use the same STRATEGY_RUNS_DIR as the monitors.
 The [design principles](../design-principles.md) own the common interface and
 schema.
 
+Both clients log terminal HTTP errors with the venue, request method, path,
+status, and up to 8,192 characters of the response body, with a truncation
+flag. Request headers, request bodies, and query parameters are excluded.
+The original exception and retry behavior are preserved. Read failures that
+recover during retry do not emit this terminal error log.
+
 ## Paper execution
 
 Create a venue-specific pool with explicit hypothetical cash:

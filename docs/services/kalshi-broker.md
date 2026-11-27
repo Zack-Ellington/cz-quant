@@ -11,6 +11,12 @@ for the broker, monitors, and reports. A strategy installs czquant in its own
 environment, for example with uv add ../../packages/czquant from a strategy
 directory two levels below the repository root.
 
+The client logs terminal HTTP errors with the venue, request method, path,
+status, and up to 8,192 characters of the response body, with a truncation
+flag. Request headers, request bodies, and query parameters are excluded.
+The original exception and retry behavior are preserved. Read failures that
+recover during retry do not emit this terminal error log.
+
 ## Paper execution
 
 Create a cash pool once. This records hypothetical funding; opening its broker

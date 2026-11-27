@@ -3,6 +3,7 @@ import base64
 from decimal import Decimal as D
 
 import pytest
+import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from czquant import Broker, Store
@@ -14,6 +15,36 @@ from czquant.polymarket_us import (PolymarketUS, PolymarketUSLive, fee, kalshi_l
 
 SLUG = "aec-nba-bos-sac-2026-11-21"
 TICKER = "PMUS:" + SLUG
+
+
+@pytest.mark.parametrize("body", [
+    '{"code":"FORBIDDEN","message":"Trading permission required"}',
+    '<html>Request blocked</html>',
+    '',
+    'x' * 9000,
+])
+def test_http_error_logs_response_and_preserves_rejection(body, caplog):
+    requests = []
+
+    def reject(request):
+        requests.append(request)
+        return httpx.Response(403, text=body)
+
+    client = PolymarketUS("private-key-id", ed25519.Ed25519PrivateKey.generate(), min_interval=0)
+    client.http.close()
+    with httpx.Client(transport=httpx.MockTransport(reject)) as http:
+        client.http = http
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            client.private("POST", "/v1/orders", body={"private_request": "not-for-logs"})
+    assert caught.value.response.status_code == 403
+    assert caught.value.response.text == body
+    assert len(requests) == 1  # A failed write must not be retried.
+    assert "method=POST path=/v1/orders status=403" in caplog.text
+    assert f"body={body[:8192]!r}" in caplog.text
+    assert f"truncated={len(body) > 8192}" in caplog.text
+    assert "private-key-id" not in caplog.text
+    assert "not-for-logs" not in caplog.text
+    assert requests[0].headers["X-PM-Signature"] not in caplog.text
 
 
 def seed_file(tmp_path, size=32):
