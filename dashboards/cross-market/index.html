@@ -47,6 +47,9 @@
   .gapbig { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
   svg text { fill: var(--muted); font-size: 11px; }
   .empty { color: var(--muted); font-style: italic; padding: 4px 0; }
+  code.err { font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--neg);
+    background: var(--chip); border-radius: 4px; padding: 1px 5px; display: inline-block; margin: 1px 0; white-space: normal; }
+  td.wrap { white-space: normal; }
 </style>
 </head>
 <body>
@@ -136,6 +139,9 @@ function card(e) {
   const tradeRows = e.executed.slice().reverse().map((t) => `<tr><td>${time(t.t)}</td><td>${esc(t.trade_id)}</td>
       <td>${t.legs.map((l) => esc(`${l.venue === "kalshi" ? "K" : "PM"} ${l.side.toUpperCase()} ${l.qty}@${Number(l.price).toFixed(3)}`)).join(" · ")}</td>
       <td class="r">${esc(t.open_sets)}</td><td class="r">${usd(t.fees)}</td><td class="r ${sign(t.expected_profit)}">${usd(t.expected_profit)}</td><td>${!t.basket ? '<span class="neg">one leg filled, sold back</span>' : t.unwound ? "repaired" : t.complete ? "complete" : "partial"}</td></tr>`).join("");
+  const missedRows = (e.missed || []).slice().reverse().map((m) => `<tr><td>${time(m.start)}</td><td class="r">${m.duration_s ? dur(m.duration_s) : "1 scan"}</td>
+      <td class="r pos">${usd(m.max_net)}</td><td class="r">${esc(m.sets ?? "–")}</td><td class="r">${m.edge == null ? "–" : cents(m.edge)}</td>
+      <td class="wrap">${m.errors.map((x) => `<code class="err">${esc(x)}</code>`).join(" ")}</td></tr>`).join("");
   const hb = e.heartbeat;
   const stale = !hb || (Date.now() - new Date(hb.t).getTime()) > 120000;
   const gap = latest?.gap;
@@ -165,6 +171,8 @@ function card(e) {
         <div class="scroll">${winRows ? `<table><thead><tr><th>Opened</th><th class="r">Lasted</th><th class="r">Max gap</th><th class="r">Max net</th><th class="r">Sets</th><th>Not traded because</th></tr></thead><tbody>${winRows}</tbody></table>` : '<div class="empty">None yet: a set has cost at least $1 at every scan.</div>'}</div>
       </div>
     </div>
+    <h3>Unfilled opportunities (${e.totals.missed} · ${usd(e.totals.missed_potential)} potential)</h3>
+    <div class="scroll">${missedRows ? `<table><thead><tr><th>Found</th><th class="r">Lasted</th><th class="r">Potential</th><th class="r">Sets</th><th class="r">Edge/set</th><th>Why it wasn't filled</th></tr></thead><tbody>${missedRows}</tbody></table>` : '<div class="empty">None: every basket that passed the filters was filled.</div>'}</div>
     <div class="grid">
       <div><h3>Trade attempts (${e.attempts.length})</h3><div class="scroll">${attemptRows ? `<table><thead><tr><th>Time</th><th>Trade</th><th class="r">Sets</th><th class="r">Expected</th><th>Legs</th></tr></thead><tbody>${attemptRows}</tbody></table>` : '<div class="empty">No attempts.</div>'}</div></div>
       <div><h3>Fills (${e.totals.executed} baskets, ${e.totals.repaired} repaired legs)</h3><div class="scroll">${tradeRows ? `<table><thead><tr><th>Time</th><th>Trade</th><th>Fills</th><th class="r">Open sets</th><th class="r">Fees</th><th class="r">Expected P&amp;L</th><th></th></tr></thead><tbody>${tradeRows}</tbody></table>` : '<div class="empty">No fills.</div>'}</div></div>
@@ -176,11 +184,12 @@ function render(state) {
   if (!state) return;
   const shown = state.experiments.filter((e) => mode === "all" || e.mode === mode);
   const modes = mode === "all" ? Object.keys(state.overall) : [mode];
-  const agg = {experiments: 0, funded: 0, cash: 0, available: 0, attempts: 0, executed: 0, repaired: 0, expected_profit: 0};
+  const agg = {experiments: 0, funded: 0, cash: 0, available: 0, attempts: 0, executed: 0, repaired: 0, expected_profit: 0, missed: 0, missed_potential: 0};
   modes.forEach((m) => { const o = state.overall[m]; if (!o) return; for (const k in agg) agg[k] += Number(o[k]); });
   $("#summary").innerHTML = tile("Experiments", agg.experiments) + tile("Funded", usd(agg.funded)) + tile("Cash", usd(agg.cash))
     + tile("Available", usd(agg.available)) + tile("Trade attempts", agg.attempts) + tile("Executed baskets", agg.executed) + tile("Repaired legs", agg.repaired)
-    + tile("Realized + expected P&L", usd(agg.expected_profit), sign(agg.expected_profit));
+    + tile("Realized + expected P&L", usd(agg.expected_profit), sign(agg.expected_profit))
+    + tile("Unfilled opportunities", agg.missed) + tile("Missed potential", usd(agg.missed_potential));
   $("#cards").innerHTML = shown.length ? shown.map(card).join("") : '<div class="card empty">No experiments recorded yet.</div>';
 }
 

@@ -108,6 +108,89 @@ def windows(scans: list[dict[str, Any]], interval: float) -> list[dict[str, Any]
     return result
 
 
+def _leg_error(outcome: dict[str, Any], limits: dict[str, str]) -> str:
+    venue = "Kalshi" if outcome.get("venue") == "kalshi" else "Polymarket US"
+    price = limits.get(outcome.get("ticker", ""))
+    at = f" @ {Decimal(price) * 100:.2f}c" if price else ""
+    if "unwind" in outcome:
+        return f"REPAIR {venue}: sold back {outcome.get('sold')}/{outcome.get('unwind')} (status {outcome.get('status')})"
+    return (f"IOC_{str(outcome.get('status', 'unknown')).upper()} {venue}: filled "
+            f"{outcome.get('filled', '0')}/{outcome.get('asked', '?')}{at}")
+
+
+def missed_opportunities(obs: list[dict[str, Any]], cooldown: float) -> list[dict[str, Any]]:
+    """Opportunities the strategy found but did not fill, with what stopped each one.
+
+    An opportunity is a run of consecutive scans where the strategy priced a basket
+    that cleared its fee, size and return filters. Events after a scan and before the
+    next one are its outcome: an execution (legs and how they ended), a recorded
+    refusal (preflight, recheck, cooldown, risk), a pause or a halt. A run that
+    filled a complete basket is not missed. Refusals the strategy rate-limits in its
+    log are reported as unrecorded rather than guessed."""
+    result: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    last_attempt: float | None = None
+
+    def close() -> None:
+        if current is None:
+            return
+        if not current["filled"]:
+            if not current["errors"]:
+                since = None if last_attempt is None else ts(current["start"]) - last_attempt
+                current["errors"].append(
+                    f"COOLDOWN: {round(since)}s after the last attempt (cooldown {round(cooldown)}s)"
+                    if since is not None and 0 <= since < cooldown else
+                    "NO_ATTEMPT_RECORDED: no execution or refusal logged (repeated refusals are rate-limited)")
+            current["errors"] = list(dict.fromkeys(current["errors"]))
+            result.append(current)
+
+    for e in obs:
+        d, t = e["data"], e["effective_at"]
+        kind = d.get("kind")
+        if kind == "scan_complete":
+            basket = d.get("basket")
+            if not basket:
+                close()
+                current = None
+                continue
+            if current is None:
+                current = {"start": t, "end": t, "scans": 0, "max_net": basket["net"], "sets": basket.get("sets"),
+                           "edge": basket.get("edge"), "errors": [], "filled": False}
+            current["end"], current["scans"] = t, current["scans"] + 1
+            if Decimal(basket["net"]) > Decimal(current["max_net"]):
+                current.update(max_net=basket["net"], sets=basket.get("sets"), edge=basket.get("edge"))
+            continue
+        if current is None:
+            if kind == "basket_execution":
+                last_attempt = ts(t)
+            continue
+        if kind == "basket_execution":
+            last_attempt = ts(t)
+            ctx = d.get("context") or {}
+            limits = {leg["ticker"]: leg.get("limit") for leg in ctx.get("intended_legs") or []}
+            outcomes = d.get("outcomes") or []
+            entries = [o for o in outcomes if "unwind" not in o]
+            if entries and len(entries) == len(ctx.get("intended_legs") or []) and all(
+                    o.get("status") == "filled" and o.get("filled") == o.get("asked") for o in entries):
+                current["filled"] = True
+            else:
+                current["errors"] += [_leg_error(o, limits) for o in outcomes
+                                      if "unwind" in o or o.get("status") != "filled"]
+                if not current["errors"]:
+                    current["errors"].append("PARTIAL: a leg filled short of the basket size")
+        elif kind == "reject":
+            detail = d.get("detail") or d.get("why")
+            current["errors"].append(f"{str(d.get('reason')).upper()}" + (f": {detail}" if detail else ""))
+        elif kind == "live_paused":
+            current["errors"].append(f"PAUSED: {d.get('reason')}")
+        elif kind == "halt":
+            current["errors"].append(f"HALTED: {d.get('reason')}")
+    close()
+    for m in result:
+        m["duration_s"] = round(ts(m["end"]) - ts(m["start"]))
+    return result
+
+
 def experiment_view(store: Store, info: dict[str, Any]) -> dict[str, Any]:
     exp, cfg = info["experiment"], info["config"]
     pools = exp["portfolio"]  # venue -> pool ID
@@ -127,6 +210,7 @@ def experiment_view(store: Store, info: dict[str, Any]) -> dict[str, Any]:
                             "AND json_extract(data,'$.kind') = 'heartbeat' ORDER BY sequence DESC LIMIT 1", (kalshi_pool,)).fetchall()
     obs = sorted(({**dict(r), "data": json.loads(r["data"])} for r in [*rows, *last]),
                  key=lambda e: (e["effective_at"], e["sequence"]))
+    all_runs = obs  # missed opportunities span every run of this experiment
     obs = [e for e in obs if e["effective_at"] >= info["started_at"] or e["data"]["kind"] != "scan_complete"]
     scans, attempts, rejects, halts, cleared = [], [], [], {}, set()
     heartbeat = None
@@ -193,6 +277,7 @@ def experiment_view(store: Store, info: dict[str, Any]) -> dict[str, Any]:
                          "basket": len({k.split("|")[1] for k in trade["held"]}) == 2 or len({l["market"] + l["side"] for l in trade["legs"] if Decimal(l["qty"]) > 0}) >= 2})
     executed.sort(key=lambda x: x["t"])
 
+    missed = missed_opportunities(all_runs, float(cfg.get("cooldown") or 300))
     scans = scans[-MAX_SCANS:]
     interval = float(cfg.get("interval_seconds") or 15)
     latest = scans[-1] if scans else None
@@ -209,14 +294,16 @@ def experiment_view(store: Store, info: dict[str, Any]) -> dict[str, Any]:
             "cash": cash, "latest": latest, "heartbeat": heartbeat, "halts": standing,
             "series": [{"t": s["t"], "gap": s["gap"], "tradable": s["net"] is not None} for s in scans],
             "windows": windows(scans, interval)[-50:], "attempts": attempts[-50:],
-            "rejects": rejects[-20:], "executed": executed,
+            "rejects": rejects[-20:], "executed": executed, "missed": missed[-50:],
             "totals": {"cash": money(sum((Decimal(c["cash"]) for c in cash), ZERO)),
                        "available": money(sum((Decimal(c["available"]) for c in cash), ZERO)),
                        "funded": money(sum((Decimal(c["funded"]) for c in cash), ZERO)),
                        "attempts": len(attempts), "executed": sum(1 for x in executed if x["basket"]),
                        "repaired": sum(1 for x in executed if not x["basket"]),
                        "expected_profit": money(sum((Decimal(x["expected_profit"]) for x in executed), ZERO)),
-                       "scans": len(scans), "windows": len(windows(scans, interval))}}
+                       "scans": len(scans), "windows": len(windows(scans, interval)),
+                       "missed": len(missed),
+                       "missed_potential": money(sum((Decimal(m["max_net"]) for m in missed), ZERO))}}
 
 
 @app.get("/api/state")
@@ -240,9 +327,11 @@ def compute(store: Store) -> dict[str, Any]:
     overall: dict[str, dict[str, Any]] = {}
     for v in views:
         o = overall.setdefault(v["mode"], {"experiments": 0, "cash": ZERO, "available": ZERO, "funded": ZERO,
-                                           "attempts": 0, "executed": 0, "repaired": 0, "expected_profit": ZERO})
+                                           "attempts": 0, "executed": 0, "repaired": 0, "expected_profit": ZERO,
+                                           "missed": 0, "missed_potential": ZERO})
         o["experiments"] += 1
-        for key in ("cash", "available", "funded", "expected_profit"):
+        o["missed"] += v["totals"]["missed"]
+        for key in ("cash", "available", "funded", "expected_profit", "missed_potential"):
             o[key] += Decimal(v["totals"][key])
         o["attempts"] += v["totals"]["attempts"]
         o["executed"] += v["totals"]["executed"]
