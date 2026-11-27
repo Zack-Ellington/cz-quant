@@ -256,3 +256,25 @@ cooldown; the next scan may evaluate a new candidate.
 A confirmed zero-fill canceled/expired IOC uses a one-second cooldown before
 another freshly priced attempt. Rejections, transport errors, uncertain orders,
 and attempts with fills retain the configured cooldown and recovery rules.
+
+### Streaming execution quotes
+
+Set `parameters.execution_websocket` to `true` to use the authenticated
+Polymarket US full-book stream for entry pricing, rechecks, and repair bids.
+`parameters.quote_max_age` defaults to 2 seconds and bounds both exchange
+snapshot age and local time since receipt. Missing, stale, future-dated, or
+non-open snapshots block execution. Freshness is checked again before either
+basket leg is submitted. REST remains the source of market metadata; execution
+books do not fall back to REST when streaming is enabled. Kalshi books continue
+to use their existing REST transport.
+
+The connection subscribes without debouncing, clears its book on disconnect,
+and reconnects with a new signature. A reconnect must deliver a fresh full
+snapshot before execution resumes. Duplicate/older snapshots do not refresh
+quote age. A quiet market with no updates beyond the age limit is conservatively
+ineligible. If the feed fails after a fill, the existing recovery path retains
+the unmatched inventory until fresh repair bids are available.
+
+`execution_quote` observations record the source, exchange timestamp, and quote
+ages immediately before each basket submission. Dashboard quote collection is
+independent and is not changed by this setting.

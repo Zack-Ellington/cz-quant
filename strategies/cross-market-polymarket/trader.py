@@ -32,6 +32,7 @@ from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive,
 from czquant.store import decimal
 
 from experiments import Experiment, Outcome, SelectedPair
+from stream_book import StreamBook, QuoteUnavailable
 from slippage import split_limits, second_limit, cost
 from sum_check import Basket, best, kalshi_offer, polymarket_offer, polymarket_us_offer
 
@@ -48,6 +49,8 @@ class Config:
     experiment: Experiment
     interval_seconds: float = 15.0
     profit_slippage: bool = False
+    execution_websocket: bool = False
+    quote_max_age: float = 2.0
     max_capital_frac: float = 0.10
     max_sets: int = 20
     risk_free: float = 0.05
@@ -119,6 +122,22 @@ class Engine:
         self.counters = {"scans": 0, "baskets": 0, "rejects": 0, "unwinds": 0}
         self._last_logged: dict[tuple, float] = {}
         self.resume()
+        self.stream_book: StreamBook | None = None
+        self.execution_quote: dict[str, Any] | None = None
+        if cfg.execution_websocket:
+            if not self.us or not isinstance(self.poly, PolymarketUS) or not self.poly.authenticated:
+                raise ValueError("execution WebSocket requires authenticated Polymarket US")
+            if not 0 < cfg.quote_max_age < float("inf"):
+                raise ValueError("quote_max_age must be finite and positive")
+            self.stream_book = StreamBook(self.poly, self.pair.polymarket_market, cfg.quote_max_age)
+            self.stream_book.start()
+
+    def us_execution_book(self) -> dict[str, Any]:
+        if self.stream_book is not None:
+            book = self.stream_book.snapshot()
+            self.execution_quote = book["execution_quote"]
+            return book
+        return self.poly.books([self.pair.polymarket_market])[self.pair.polymarket_market]
 
     def validate_inventory(self) -> None:
         """The selected portfolio may contain only this run's pair."""
@@ -359,7 +378,10 @@ class Engine:
                 raise ValueError("Polymarket metadata differs from the prepared pair")
             if market["status"] != "MARKET_STATUS_OPEN":
                 return None, "polymarket_not_trading"
-            pbook = self.poly.books([pair.polymarket_market])[pair.polymarket_market]
+            try:
+                pbook = self.us_execution_book()
+            except QuoteUnavailable as exc:
+                return None, str(exc)
             theta = self.theta_override if self.theta_override is not None else decimal(market.get("feeCoefficient", DEFAULT_THETA))
         else:
             market = self.poly.market_by_slug(pair.polymarket_event)
@@ -454,6 +476,10 @@ class Engine:
                     leg = {**leg, "limit": str(revised)}
                     self.kalshi_broker.observe("slippage_reprice", {"trade_id": trade_id, "leg": leg,
                         "first_price_bound": str(first_price), "first_fees": str(first_fees), "sets": int(target)})
+                if self.stream_book is not None:
+                    self.us_execution_book()
+                    self.kalshi_broker.observe("execution_quote", {"trade_id": trade_id,
+                        "ticker": leg["ticker"], **(self.execution_quote or {})})
                 identifier = str(uuid.uuid4())
                 attempted = (leg, identifier)
                 if index == 0:
@@ -551,7 +577,7 @@ class Engine:
         elif self.us:
             slug = ticker.removeprefix("PMUS:")
             trading = self.poly.market_raw(slug)["status"] == "MARKET_STATUS_OPEN"
-            book = self.poly.books([slug])[slug] if trading else {}
+            book = self.us_execution_book() if trading else {}
         else:
             token = ticker.removeprefix("PM:")
             market = self.poly.market_by_slug(self.pair.polymarket_event)
@@ -639,6 +665,8 @@ class Engine:
                 wait = max(1.0, self.cfg.interval_seconds - (time.monotonic() - started))
                 time.sleep(min(wait, deadline - time.monotonic()) if deadline else wait)
         finally:
+            if self.stream_book is not None:
+                self.stream_book.close()
             self.kalshi_broker.observe("run_stop", {"cash": str(self.cash), "counters": dict(self.counters)})
 
 
