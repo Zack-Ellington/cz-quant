@@ -169,7 +169,13 @@ Use the [reporting guide](reporting.md#backup-and-restore) for database recovery
 
 For normalized IOC/FOK results, use KalshiLive(Kalshi(authenticated=True)).
 The adapter reports status and filled quantity from the response while the
-account monitor books authoritative fills. Explicit confirmed quantities are
+account monitor books authoritative fills. V2 create responses have no status
+field: explicit zero remaining quantity and a valid fill count identify a
+completed order. A full fill is reported as filled; a smaller fill is reported
+as canceled with its confirmed quantity. Missing quantities or nonzero remaining
+quantity keep the outcome unknown. See the
+[V2 response contract](https://docs.kalshi.com/api-reference/orders/create-order-v2).
+Explicit confirmed quantities are
 logged durably and can support an immediate close within the same pool before
 reconciliation. They do not release cash reservations or book estimated cash
 and fees. KalshiLive(..., dry_run=True) logs

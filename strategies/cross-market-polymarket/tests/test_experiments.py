@@ -418,3 +418,48 @@ def test_same_market_opposite_basket_legs_are_rejected_before_submission(setup, 
     engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
     assert "opposite" in store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["detail"]
+
+
+@pytest.mark.parametrize("second_leg", ["filled", "rejected"])
+@pytest.mark.parametrize("first_fill", ["10.00", "4.00", "0.00"])
+def test_kalshi_v2_first_leg_is_hedged_or_unwound(setup, monkeypatch, second_leg, first_fill):
+    store, create, build = setup
+    engine = build(create(mode="live"))
+    basket = engine.scan()
+    assert basket is not None and basket.sets == 10
+    for leg in basket.legs:
+        leg["depth"] = "10" if leg["venue"] == "kalshi" else "100"
+    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    sent = []
+
+    class V2Kalshi:
+        def create_order(self, order):
+            sent.append(order)
+            return {"order_id": "venue-" + order["client_order_id"],
+                    "client_order_id": order["client_order_id"],
+                    "fill_count": order["count"] if order.get("reduce_only") else first_fill,
+                    "remaining_count": "0.00"}
+
+    engine.kalshi_broker.adapter = KalshiLive(V2Kalshi())
+    if second_leg == "rejected":
+        def reject(order, broker):
+            broker.finish(order["client_order_id"], "rejected")
+            return {"status": "rejected", "filled": "0"}
+        monkeypatch.setattr(engine.poly_broker.adapter, "create_order", reject)
+    engine.execute(basket)
+    record = store.events(kinds=("observation",), observations=("basket_execution",))[-1]["data"]
+    assert record["outcomes"][0]["venue"] == "kalshi"
+    assert D(record["outcomes"][0]["filled"]) == D(first_fill)
+    assert not engine.halted
+    if D(first_fill) == 0:
+        assert not engine.poly_broker.orders() and len(sent) == 1
+    elif second_leg == "filled":
+        assert sum(lot["quantity"] for lot in engine.poly_broker.state().lots.values()) == D(first_fill)
+        assert len(sent) == 1
+    else:
+        assert len(sent) == 2 and sent[1]["reduce_only"] and D(sent[1]["count"]) == D(first_fill)
+        assert sent[1]["side"] != sent[0]["side"]
+        assert D(record["outcomes"][-1]["sold"]) == D(first_fill)
+        assert not engine.poly_broker.state().lots
+    # Kalshi's account monitor still owns authoritative fill booking.
+    assert not engine.kalshi_broker.state().lots
