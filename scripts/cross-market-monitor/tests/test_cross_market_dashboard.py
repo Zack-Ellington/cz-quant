@@ -4,8 +4,8 @@ import pytest
 
 from czquant import Store
 from czquant.accounting import State
-from czquant.cross_market_dashboard import conditional_profit, reprice_history, seconds, snapshot, trade_rows, windows
-from czquant.cross_market_monitor import asks, measure_quotes, quote_route, sample
+from cross_market_dashboard import conditional_profit, reprice_history, seconds, snapshot, trade_rows, windows
+from cross_market_monitor import asks, measure_quotes, quote_route, sample
 
 
 def config(event="GAME1"):
