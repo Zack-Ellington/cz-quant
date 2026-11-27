@@ -85,10 +85,9 @@ pools for new trials. Live mapping requires reconciled venue allocations and
 the account conditions in the venue guide. Existing immutable report artifacts
 remain valid records of the policy that generated them.
 
-The previous portfolio creation command with --cash and the cross-market
-CZQUANT_PORTFOLIO setting are replaced by explicit pool creation and selection.
-The Python Store.create spelling remains a deprecated single-venue helper for
-older callers; new integrations use Store.create_pool with an explicit venue.
+New integrations create venue cash pools with Store.create_pool and select them
+explicitly. Store.create remains a deprecated single-venue helper for callers
+that still use historical ledger formats.
 There is no scheduled removal date for historical report support.
 
 ## Generate a comparison
@@ -221,3 +220,12 @@ Share only reviewed report artifacts that contain no private account evidence.
 Implementation: [report.py](../../packages/czquant/src/czquant/report.py),
 [dashboard.py](../../packages/czquant/src/czquant/dashboard.py), and
 [store.py](../../packages/czquant/src/czquant/store.py).
+
+## Experiment companions
+
+Strategy-specific plots belong in independent experiment companions rather than
+the core accounting package. They read the same ledger in read-only mode.
+Cross-market decision charts consume scan_complete quote payloads, while trade
+markers and balances come from broker and account-monitor evidence. Companions
+have no exchange connections and do not replace missing scan data with reference
+marks. See the [service connection and capture contract](../design-principles.md#service-connections-and-decision-capture).

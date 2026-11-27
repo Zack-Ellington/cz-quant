@@ -36,6 +36,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any, Iterator
@@ -43,6 +44,7 @@ from typing import Any, Iterator
 import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from .http_errors import raise_for_status
 from .broker import Broker
 from .paper import Paper
 from .store import decimal
@@ -194,7 +196,7 @@ class PolymarketUS:
             if method == "GET" and response.status_code in (429, 500, 502, 503, 504) and attempt < 4:
                 time.sleep(0.5 * 2 ** attempt)
                 continue
-            response.raise_for_status()
+            raise_for_status(response, "Polymarket US")
             return response.json() if response.content else {}
         raise RuntimeError("read retry exhausted")
 
@@ -313,6 +315,18 @@ class PolymarketUS:
 
 log = logging.getLogger(__name__)
 
+class QuoteUnavailable(ValueError):
+    """No usable execution quote: missing, stale, closed or incomplete. Never priced from REST."""
+
+
+def _exchange_time(data: dict[str, Any]) -> float | None:
+    stamp = data.get("transactTime")
+    if not stamp:
+        return None
+    when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    return when.timestamp() if when.tzinfo is not None else None
+
+
 class BookStream:
     """Live books from wss://api.polymarket.us/v1/ws/markets.
 
@@ -321,6 +335,12 @@ class BookStream:
     the book. A background thread holds the connection, resubscribes after reconnecting
     with exponential backoff, and records when each snapshot arrived. `book()` returns a
     snapshot only while it is younger than `max_age` seconds; callers fall back to REST.
+    `snapshot()` is the strict execution read: it raises QuoteUnavailable instead.
+
+    Freshness is time since the last snapshot arrived. A quiet market keeps receiving
+    snapshots of an unchanged book, so the exchange timestamp is recorded as evidence
+    but does not expire it; snapshots older than the one held are ignored. A disconnect
+    clears every book, so a reconnect never makes an old book current.
     """
 
     URL = "wss://api.polymarket.us/v1/ws/markets"
@@ -333,6 +353,7 @@ class BookStream:
         self._connect, self._clock = connect, clock
         self._lock = threading.Lock()
         self._books: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._exchange: dict[str, float | None] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.connected, self.reconnects, self.fallbacks, self.messages = False, 0, 0, 0
@@ -352,12 +373,41 @@ class BookStream:
             return None
         return entry[1]
 
+    def snapshot(self, slug: str) -> dict[str, Any]:
+        """The book for execution, in the Kalshi layout, with its freshness evidence."""
+        with self._lock:
+            entry, exchange = self._books.get(slug), self._exchange.get(slug)
+        if entry is None:
+            raise QuoteUnavailable("polymarket_websocket_unavailable")
+        receive_age = self._clock() - entry[0]
+        exchange_age = None if exchange is None else time.time() - exchange
+        if receive_age > self.max_age or (exchange_age is not None and exchange_age < -1):
+            raise QuoteUnavailable("polymarket_websocket_stale")
+        data = entry[1]["marketData"]
+        if data.get("state") != "MARKET_STATE_OPEN":
+            raise QuoteUnavailable("polymarket_websocket_not_open")
+        if not isinstance(data.get("bids"), list) or not isinstance(data.get("offers"), list):
+            raise QuoteUnavailable("polymarket_websocket_incomplete")
+        return {**kalshi_layout(data), "execution_quote": {
+            "source": "polymarket_us_websocket", "exchange_time": exchange,
+            "exchange_age_seconds": exchange_age, "receive_age_seconds": receive_age}}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._books.clear()
+            self._exchange.clear()
+
     def handle(self, raw: str | bytes) -> None:
         message = json.loads(raw)
         data = message.get("marketData")
         if isinstance(data, dict) and data.get("marketSlug"):
+            slug, exchange = str(data["marketSlug"]), _exchange_time(data)
             with self._lock:
-                self._books[str(data["marketSlug"])] = (self._clock(), {"marketData": data})
+                held = self._exchange.get(slug)
+                if slug in self._books and held is not None and exchange is not None and exchange < held:
+                    return  # out of order: keep the newer book
+                self._books[slug] = (self._clock(), {"marketData": data})
+                self._exchange[slug] = exchange
             self.messages += 1
         elif message.get("error"):
             self.last_error = str(message["error"])[:300]
@@ -366,7 +416,8 @@ class BookStream:
     def subscriptions(self) -> list[str]:
         return [json.dumps({"subscribe": {"requestId": f"md-{uuid.uuid4().hex[:12]}",
                                           "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
-                                          "marketSlugs": self.slugs[i:i + self.CHUNK]}})
+                                          "marketSlugs": self.slugs[i:i + self.CHUNK],
+                                          "responsesDebounced": False}})
                 for i in range(0, len(self.slugs), self.CHUNK)]
 
     def _open(self) -> Any:
@@ -395,6 +446,7 @@ class BookStream:
                 self.last_error = f"{type(exc).__name__}: {exc}"[:300]
                 log.warning("Polymarket US market stream disconnected: %s", self.last_error)
             self.connected = False
+            self.clear()
             if self._stop.is_set():
                 return
             self.reconnects += 1

@@ -28,10 +28,13 @@ from czquant.kalshi import Kalshi
 from czquant.live import KalshiLive
 from czquant.paper import Paper
 from czquant.polymarket import Polymarket, PolymarketPaper, kalshi_layout, normalize_market
-from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive, PolymarketUSPaper
+from czquant.polymarket_us import DEFAULT_THETA, BookStream, PolymarketUS, QuoteUnavailable, PolymarketUSLive, PolymarketUSPaper
 from czquant.store import decimal
 
 from experiments import Experiment, Outcome, SelectedPair
+from kalshi_stream import KalshiStreamBook
+from scan_capture import measure
+from slippage import split_limits, second_limit, cost, fee_bound
 from sum_check import Basket, best, kalshi_offer, polymarket_offer, polymarket_us_offer
 
 STRATEGY = "cross-market-polymarket"
@@ -46,6 +49,9 @@ log = logging.getLogger("cross_market_polymarket")
 class Config:
     experiment: Experiment
     interval_seconds: float = 15.0
+    profit_slippage: bool = False
+    execution_websocket: bool = False
+    quote_max_age: float = 2.0
     max_capital_frac: float = 0.10
     max_sets: int = 20
     risk_free: float = 0.05
@@ -73,6 +79,8 @@ class Config:
             raise ValueError("capital fraction, basket size and scan interval must be positive")
         if self.cooldown < 0:
             raise ValueError("invalid cooldown")
+        if not 0 < self.quote_max_age < float("inf"):
+            raise ValueError("quote_max_age must be finite and positive")
         if not 0 <= self.recheck_min_edge <= self.min_edge:
             raise ValueError("recheck_min_edge must be between 0 and min_edge")
         if self.dry_run and self.experiment.mode != "live":
@@ -126,6 +134,31 @@ class Engine:
         self.last_quotes: list[dict[str, Any]] = []
         self._last_logged: dict[tuple, float] = {}
         self.resume()
+        self.kalshi_stream: KalshiStreamBook | None = None
+        # With execution_websocket, execution prices only from the streams: the shared
+        # Polymarket US stream (started above) read strictly, and a Kalshi stream.
+        self.stream_book: BookStream | None = None
+        if cfg.execution_websocket:
+            stream = getattr(self.poly, "stream", None) if self.us else None
+            if stream is None:
+                raise ValueError("execution WebSocket requires the Polymarket US market stream (and its credentials)")
+            self.stream_book = stream
+            kalshi_client = Kalshi(authenticated=True)
+            if not kalshi_client.key:
+                raise ValueError("execution WebSocket requires Kalshi credentials")
+            self.kalshi_stream = KalshiStreamBook(kalshi_client,
+                sorted({name for name, _ in self.pair.contracts("kalshi")}), cfg.quote_max_age)
+            self.kalshi_stream.start()
+
+    def kalshi_execution_book(self, ticker: str) -> dict[str, Any]:
+        if self.kalshi_stream is not None:
+            return self.kalshi_stream.snapshot(ticker)
+        return self.kalshi.book(ticker)
+
+    def us_execution_book(self) -> dict[str, Any]:
+        if self.stream_book is not None:
+            return self.stream_book.snapshot(self.pair.polymarket_market)
+        return self.poly.books([self.pair.polymarket_market])[self.pair.polymarket_market]
 
     def validate_inventory(self) -> None:
         """The selected portfolio may contain only this run's pair."""
@@ -182,14 +215,19 @@ class Engine:
         self.bankroll = state.contributed
         events = active_events(sorted(
             [e for b in self.brokers.values() for e in self.store.events(b.pool_id,
-             kinds=("transaction", "observation", "correction", "order"), observations=("halt", "halt_cleared", "basket_settled"))],
+             kinds=("transaction", "observation", "correction", "order"), observations=("halt", "halt_cleared", "basket_settled", "basket_execution"))],
             key=lambda e: (e["effective_at"], e["sequence"])))
+        empty_cooldowns = {e["data"]["context"]["trade_id"]: float(e["data"]["zero_fill_cooldown_until"])
+                           for e in events if e["type"] == "observation"
+                           and e["data"].get("kind") == "basket_execution"
+                           and "zero_fill_cooldown_until" in e["data"]}
         for event in events:
             data = event["data"]
             if event["type"] == "order" and data.get("status") == "intent":
                 game = data.get("context", {}).get("kalshi_event")
                 if game == self.pair.kalshi_event:
-                    until = datetime.fromisoformat(event["effective_at"]).timestamp() + self.cfg.cooldown
+                    until = empty_cooldowns.get(data.get("context", {}).get("trade_id"),
+                              datetime.fromisoformat(event["effective_at"]).timestamp() + self.cfg.cooldown)
                     self.cooldown_until = max(self.cooldown_until, until)
         observations = [e for e in events if e["type"] == "observation"]
         cleared = {e["data"]["halt_id"] for e in observations if e["data"].get("kind") == "halt_cleared"}
@@ -346,7 +384,7 @@ class Engine:
         from REST."""
         try:
             streamer = self.poly if self.poly.authenticated else PolymarketUS.from_env(authenticated=True)
-            self.poly.stream = streamer.start_stream([self.pair.polymarket_market])
+            self.poly.stream = streamer.start_stream([self.pair.polymarket_market], max_age=self.cfg.quote_max_age)
         except (ValueError, OSError) as exc:
             log.warning("Polymarket US book stream unavailable (%s); reading books over REST", exc)
             self.poly.stream = None
@@ -366,6 +404,10 @@ class Engine:
         chosen basket is still profitable, not whether it still clears the entry bar."""
         pair = self.pair
         self.last_quotes = []
+        self.scan_quote = {"experiment_id": self.experiment.id, "status": "error",
+                           "legs": [], "routes": [], "books": {},
+                           "interval": self.cfg.interval_seconds,
+                           "started_at": datetime.now(timezone.utc).isoformat()}
         markets = {name: self.kalshi.market(name) for name, _ in pair.contracts("kalshi")}
         for name, market in markets.items():
             if market["ticker"] != name or market["event_ticker"] != pair.kalshi_event:
@@ -376,7 +418,13 @@ class Engine:
         if schedule["fee_type"] not in FEE_TYPES:
             return None, "unsupported_kalshi_fees"
         multiplier = decimal(schedule.get("fee_multiplier", "1"))
-        kbooks = {name: self.kalshi.book(name) for name in markets}
+        try:
+            kbooks = {name: self.kalshi_execution_book(name) for name in markets}
+        except QuoteUnavailable as exc:
+            return None, str(exc)
+        self.scan_quote["fee_multiplier"] = multiplier
+        self.scan_quote["books"] = {"kalshi": kbooks}
+        self.scan_quote["kalshi_read_at"] = datetime.now(timezone.utc).isoformat()
         offers: dict[str, list] = {}
         if self.us:
             market = self.poly.market_raw(pair.polymarket_market)
@@ -384,8 +432,14 @@ class Engine:
                 raise ValueError("Polymarket metadata differs from the prepared pair")
             if market["status"] != "MARKET_STATUS_OPEN":
                 return None, "polymarket_not_trading"
-            pbook = self.poly.books([pair.polymarket_market])[pair.polymarket_market]
+            try:
+                pbook = self.us_execution_book()
+            except QuoteUnavailable as exc:
+                return None, str(exc)
+            self.scan_quote["books"]["polymarket"] = pbook
+            self.scan_quote["source"] = pbook.get("execution_quote", {"source": "polymarket_us_rest"})
             theta = self.theta_override if self.theta_override is not None else decimal(market.get("feeCoefficient", DEFAULT_THETA))
+            self.scan_quote["fee_coefficient"] = theta
         else:
             market = self.poly.market_by_slug(pair.polymarket_event)
             if str(market["id"]) != pair.polymarket_market:
@@ -393,20 +447,30 @@ class Engine:
             self.poly.remember(market)
             tokens = [o.polymarket.removeprefix("PM:") for o in pair.outcomes]
             pbooks = {token: kalshi_layout(raw) for token, raw in self.poly.books(tokens).items()}
+            self.scan_quote["books"]["polymarket"] = pbooks
+            self.scan_quote["source"] = {"source": "polymarket_rest"}
         for index, outcome in enumerate(pair.outcomes):
             role = str(index)
             ways = [kalshi_offer(role, outcome.kalshi, kbooks[outcome.kalshi], multiplier, outcome.kalshi_side)]
             if self.us:
-                ways.append(polymarket_us_offer(role, outcome.polymarket, pbook, theta, outcome.polymarket_side))
+                ways.append(polymarket_us_offer(role, outcome.polymarket, pbook, theta, outcome.polymarket_side,
+                                                 decimal(market.get("orderPriceMinTickSize") or "0.01")))
             else:
                 token = outcome.polymarket.removeprefix("PM:")
                 normalized = normalize_market(market, token)
                 if normalized["status"] != "active":
                     return None, "polymarket_not_trading"
                 ways.append(polymarket_offer(role, outcome.polymarket, pbooks[token], normalized["fee_schedule"]))
-            if recheck is not None:
-                ways = [w for w in ways if (w.ticker, w.contract) in recheck]
             offers[role] = ways
+        if len(pair.outcomes) == 2 and recheck is None:
+            # The capture compares both cross-venue routes, so it reads every offer.
+            names = {alias: name for name, alias in pair.evidence.get("kalshi", [])}
+            self.scan_quote.update(measure(offers,
+                [names.get(o.kalshi.rsplit("-", 1)[-1], o.kalshi.rsplit("-", 1)[-1]) for o in pair.outcomes],
+                self.cfg.max_sets, self.limits(), lambda b: self.budget_block(b) is None))
+        self.scan_quote["status"] = "ok"
+        if recheck is not None:
+            offers = {role: [w for w in ways if (w.ticker, w.contract) in recheck] for role, ways in offers.items()}
         # Diagnostics only: each outcome's best ask (price, size) at each venue.
         self.last_quotes = [{"role": way.role, "venue": way.venue, "ticker": way.ticker, "contract": way.contract,
                              "ask": str(way.asks[0][0]) if way.asks else None,
@@ -423,10 +487,13 @@ class Engine:
 
     def scan(self) -> Basket | None:
         self.counters["scans"] += 1
-        basket, reason = self.price_pair()
-        self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
-                                  "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
-                                  "quotes": self.last_quotes})
+        basket, reason = None, "scan_error"
+        try:
+            basket, reason = self.price_pair()
+        finally:
+            self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
+                                      "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
+                                      "quotes": self.last_quotes, "quote": {**self.scan_quote, "reason": reason}})
         return basket
 
     # -- execution -------------------------------------------------------------
@@ -438,14 +505,54 @@ class Engine:
             return "no_cash" if self.cash < 1 else "capital_limit"
         return None
 
+    def fill_bound(self, leg: dict[str, Any], identifier: str,
+                   got: Decimal) -> tuple[Decimal, Decimal, Decimal, bool] | None:
+        """(worst price per contract, fees, all-in cost, exact) for a leg's confirmed fill.
+
+        Polymarket US and paper brokers book receipts as the order returns; use them.
+        Kalshi fills are booked later by the account monitor, so a confirmed IOC fill
+        with no receipt yet is bounded by its limit: a buy never fills above it, and
+        fee_bound covers every fill price at or below it."""
+        receipts = [e["data"] for e in self.store.events(kinds=("execution",))
+                    if e["data"].get("order_id") == identifier]
+        booked = sum((decimal(r["quantity"]) for r in receipts), Decimal(0))
+        if receipts and booked == got:
+            prices = [decimal(r["yes_price"]) if leg["contract"] == "YES" else 1 - decimal(r["yes_price"])
+                      for r in receipts]
+            fees = sum((decimal(r["fee"]) for r in receipts), Decimal(0))
+            spent = sum((decimal(r["quantity"]) * p for r, p in zip(receipts, prices)), Decimal(0)) + fees
+            return max(prices), fees, spent, True
+        if venue_of(leg["ticker"]) == "kalshi" and booked <= got:
+            limit = decimal(leg["limit"])
+            fees = fee_bound(leg, limit, int(got))
+            return limit, fees, got * limit + fees, False
+        return None
+
     def execute(self, basket: Basket) -> None:
         event = self.pair.kalshi_event
-        self.cooldown_until = time.time() + self.cfg.cooldown
         intended = {(leg["ticker"], leg["contract"]) for leg in basket.legs}
         current, why = self.price_pair(recheck=intended)
         if current is None or {(leg["ticker"], leg["contract"]) for leg in current.legs} != intended:
             self.reject(event, "recheck_failed", why=why if current is None else "legs_changed")
             return
+        capital_limit = self.limits()
+        edge = max(Decimal(str(self.cfg.min_edge)), 1 - capital_limit / current.sets)
+        # Slippage spends only the profit above min_edge. A basket the recheck kept below
+        # min_edge (down to recheck_min_edge) has none to spend: it goes at its book prices.
+        widen = bool(self.us and self.cfg.profit_slippage and current.edge >= edge)
+        if widen:
+            def fundable(leg: dict[str, Any], price: Decimal, quantity: int = current.sets) -> bool:
+                candidate = {**leg, "limit": str(price)}
+                return self.brokers[leg["venue"]].check({"ticker": leg["ticker"], **buy(candidate),
+                                                       "count": str(quantity)})["status"] == "ready"
+            widened = split_limits(current.legs, current.sets, edge, fundable)
+            if widened is None:
+                self.reject(event, "slippage_profit_floor")
+                return
+            current.legs = widened
+            if sum(current.sets * decimal(l["limit"]) + decimal(l["fee"]) for l in widened) > self.limits():
+                self.reject(event, "slippage_capital_limit")
+                return
         blocked = self.check_basket(current)
         if blocked:
             self.reject(event, "basket_preflight", detail=blocked)
@@ -461,11 +568,35 @@ class Engine:
         failure: BaseException | None = None
         attempted: tuple[dict[str, Any], str] | None = None
         try:
-            for leg in legs:
+            first_price, first_fees, first_cost = Decimal(0), Decimal(0), Decimal(0)
+            first_quantity = Decimal(0)
+            for index, leg in enumerate(legs):
                 if target < 1:
                     break
+                if widen and index == 1:
+                    revised = second_limit(leg, int(target), edge, first_price, first_fees / first_quantity,
+                                           lambda p: fundable(leg, p, int(target))
+                                           and first_cost + cost(leg, p, int(target)) <= capital_limit)
+                    if revised is None:
+                        outcomes.append({"status": "profit_floor", "filled": "0", "ticker": leg["ticker"]})
+                        break
+                    leg = {**leg, "limit": str(revised)}
+                    self.kalshi_broker.observe("slippage_reprice", {"trade_id": trade_id, "leg": leg,
+                        "first_price_bound": str(first_price), "first_fees": str(first_fees), "sets": int(target)})
+                if self.kalshi_stream is not None:
+                    for ticker, _ in self.pair.contracts("kalshi"):
+                        quote = self.kalshi_execution_book(ticker)["execution_quote"]
+                        self.kalshi_broker.observe("execution_quote", {"trade_id": trade_id,
+                            "ticker": ticker, **quote})
+                if self.stream_book is not None:
+                    quote = self.us_execution_book()["execution_quote"]
+                    self.kalshi_broker.observe("execution_quote", {"trade_id": trade_id,
+                        "ticker": "PMUS:" + self.pair.polymarket_market,
+                        "submitted_ticker": leg["ticker"], **quote})
                 identifier = str(uuid.uuid4())
                 attempted = (leg, identifier)
+                if index == 0:
+                    self.cooldown_until = time.time() + self.cfg.cooldown
                 result = self.brokers[venue_of(leg["ticker"])].submit({"client_order_id": identifier, "ticker": leg["ticker"], **buy(leg), "count": str(int(target)),
                                              "time_in_force": "immediate_or_cancel",
                                              "self_trade_prevention_type": "taker_at_cross"}, context)
@@ -479,6 +610,18 @@ class Engine:
                     break
                 sent.append((leg, got))
                 target = min(target, got)
+                if widen and got > 0:
+                    bound = self.fill_bound(leg, identifier, got)
+                    if bound is None:
+                        self.halt(f"missing fill evidence for {leg['ticker']}; reconcile before repair", recoverable=True)
+                        break
+                    price_bound, fees, spent, exact = bound
+                    if index == 0:
+                        first_quantity, first_price, first_fees, first_cost = got, price_bound, fees, spent
+                    elif exact and 1 - first_price - first_fees / first_quantity - price_bound - fees / got < edge:
+                        # A limit-bounded second leg already met the floor when its limit was set.
+                        failure = ValueError("actual matched fills fall below the profit floor; repairing both legs")
+                        break
         except Exception as exc:
             failure = exc
             outcomes.append({"status": "error", "error": f"{type(exc).__name__}: {exc}"[:200]})
@@ -507,7 +650,15 @@ class Engine:
                 self.halt("basket repair failed; waiting for automatic sell recovery", recoverable=True)
                 failure = failure or exc
                 break
-        self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
+        cooldown_record: dict[str, Any] = {}
+        if (failure is None and not self.halted and len(outcomes) == 1
+                and outcomes[0].get("status") == "canceled"
+                and decimal(outcomes[0].get("filled", "-1")) == 0):
+            # A confirmed empty IOC has no inventory to protect. Retry only after
+            # a short backoff and the next scan's fresh prices and preflight.
+            self.cooldown_until = time.time() + 1.0
+            cooldown_record["zero_fill_cooldown_until"] = self.cooldown_until
+        self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes, **cooldown_record})
         self.resume()
         if failure is not None:
             # Keep the recovery loop alive after a transport failure. Durable
@@ -523,11 +674,11 @@ class Engine:
         if venue == "kalshi":
             market = self.kalshi.market(ticker)
             trading = market["status"] in ("open", "active")
-            book = self.kalshi.book(ticker) if trading else {}
+            book = self.kalshi_execution_book(ticker) if trading else {}
         elif self.us:
             slug = ticker.removeprefix("PMUS:")
             trading = self.poly.market_raw(slug)["status"] == "MARKET_STATUS_OPEN"
-            book = self.poly.books([slug])[slug] if trading else {}
+            book = self.us_execution_book() if trading else {}
         else:
             token = ticker.removeprefix("PM:")
             market = self.poly.market_by_slug(self.pair.polymarket_event)
@@ -616,6 +767,11 @@ class Engine:
                 wait = max(1.0, self.cfg.interval_seconds - (time.monotonic() - started))
                 time.sleep(min(wait, deadline - time.monotonic()) if deadline else wait)
         finally:
+            if self.kalshi_stream is not None:
+                self.kalshi_stream.close()
+            stream = getattr(self.poly, "stream", None) if self.us else None
+            if stream is not None:
+                stream.stop()
             self.kalshi_broker.observe("run_stop", {"cash": str(self.cash), "counters": dict(self.counters)})
 
 

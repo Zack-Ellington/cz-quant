@@ -4,6 +4,7 @@ import base64
 from decimal import Decimal as D
 
 import pytest
+import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from czquant import Broker, Store
@@ -15,6 +16,36 @@ from czquant.polymarket_us import (PolymarketUS, PolymarketUSLive, fee, kalshi_l
 
 SLUG = "aec-nba-bos-sac-2026-11-21"
 TICKER = "PMUS:" + SLUG
+
+
+@pytest.mark.parametrize("body", [
+    '{"code":"FORBIDDEN","message":"Trading permission required"}',
+    '<html>Request blocked</html>',
+    '',
+    'x' * 9000,
+])
+def test_http_error_logs_response_and_preserves_rejection(body, caplog):
+    requests = []
+
+    def reject(request):
+        requests.append(request)
+        return httpx.Response(403, text=body)
+
+    client = PolymarketUS("private-key-id", ed25519.Ed25519PrivateKey.generate(), min_interval=0)
+    client.http.close()
+    with httpx.Client(transport=httpx.MockTransport(reject)) as http:
+        client.http = http
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            client.private("POST", "/v1/orders", body={"private_request": "not-for-logs"})
+    assert caught.value.response.status_code == 403
+    assert caught.value.response.text == body
+    assert len(requests) == 1  # A failed write must not be retried.
+    assert "method=POST path=/v1/orders status=403" in caplog.text
+    assert f"body={body[:8192]!r}" in caplog.text
+    assert f"truncated={len(body) > 8192}" in caplog.text
+    assert "private-key-id" not in caplog.text
+    assert "not-for-logs" not in caplog.text
+    assert requests[0].headers["X-PM-Signature"] not in caplog.text
 
 
 def seed_file(tmp_path, size=32):
@@ -488,13 +519,16 @@ def test_stream_resubscribes_after_a_reconnect_and_records_errors():
     from czquant.polymarket_us import BookStream
     sent, sockets = [], [[snapshot("0.40", "0.42")], [json.dumps({"error": "rate limited"}), snapshot("0.5", "0.6")]]
     stream = BookStream(FakeUS(), [SLUG], connect=lambda: FakeSocket(sockets.pop(0) if sockets else [], sent))
-    stream._stop.wait = lambda seconds: stream._stop.set() if not sockets else None  # no real backoff sleeps
+    stream._stop.wait = lambda seconds: stream._stop.set() if not sockets else None  # no real backoff sleeps
+    seen, handle = [], stream.handle
+    stream.handle = lambda raw: (handle(raw), seen.append(stream.book(SLUG)))  # type: ignore[method-assign]
     stream._run()
     subscribes = [m["subscribe"] for m in sent]
     assert len(subscribes) >= 2 and all(s["marketSlugs"] == [SLUG] for s in subscribes)
     assert all(s["subscriptionType"] == "SUBSCRIPTION_TYPE_MARKET_DATA" for s in subscribes)
     assert stream.reconnects >= 1 and stream.last_error and stream.messages == 2
-    assert stream.book(SLUG)["marketData"]["offers"][0]["px"]["value"] == "0.6"
+    assert seen[-1]["marketData"]["offers"][0]["px"]["value"] == "0.6"
+    assert stream.book(SLUG) is None  # the final disconnect cleared it
 
 
 def test_stream_splits_subscriptions_at_one_hundred_markets():

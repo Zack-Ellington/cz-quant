@@ -40,6 +40,7 @@ class Offer:
     asks: tuple[tuple[Decimal, Decimal], ...]
     fee_multiplier: Decimal | None = None  # Kalshi: the series multiplier
     fee_schedule: Any = None  # Polymarket: the market's schedule (a dict); kept hashable by the caller
+    tick: Decimal = Decimal("0.01")
     contract: str = "YES"  # Kalshi legs can buy NO; a Polymarket leg is always a token bought outright
 
 
@@ -58,12 +59,12 @@ def polymarket_offer(role: str, ticker: str, raw_book: dict, schedule: dict) -> 
                  fee_schedule=tuple(sorted(schedule.items())))
 
 
-def polymarket_us_offer(role: str, ticker: str, raw_book: dict, theta: Decimal, contract: str) -> Offer:
+def polymarket_us_offer(role: str, ticker: str, raw_book: dict, theta: Decimal, contract: str, tick: Decimal = Decimal("0.01")) -> Offer:
     """One side of a Polymarket US market, from its book in the Kalshi layout. The book
     is the YES side's, as on Kalshi: YES is bought at the offers, NO at 1 - the bids."""
     opposite = book_levels(raw_book)["no" if contract == "YES" else "yes"]
     return Offer(role, "polymarket_us", ticker, tuple(sorted((1 - p, q) for p, q in opposite)),
-                 fee_schedule=(("theta", str(theta)),), contract=contract)
+                 fee_schedule=(("theta", str(theta)),), contract=contract, tick=tick)
 
 
 def leg_fee(offer: Offer, fills: list[tuple[Decimal, Decimal]]) -> Decimal:
@@ -139,6 +140,7 @@ def price(offers: tuple[Offer, ...], sets: int, days: float, risk_free: float) -
         basket.cost += cost
         basket.fees += fee
         basket.legs.append({"role": offer.role, "venue": offer.venue, "ticker": offer.ticker, "contract": offer.contract,
+                            "tick": str(offer.tick), "fee_coefficient": str(TAKER * (offer.fee_multiplier or Decimal(1)) if offer.venue == "kalshi" else dict(offer.fee_schedule or ()).get("theta", "0")),
                             "qty": sets, "vwap": str(cost / sets), "limit": str(max(p for p, _ in fills)),
                             "fee": str(fee), "levels": [[str(p), str(q)] for p, q in fills],
                             "depth": str(sum((q for _, q in offer.asks), Decimal(0)))})

@@ -142,3 +142,11 @@ the difference. Public paper settlement does not need this account evidence.
 The US component emits polymarket_us health. Report completeness for a
 reporting portfolio containing pools at both venues requires fresh healthy evidence from both
 account components, independently of a strategy's chosen halt policy.
+
+## Connection ownership
+
+Account reconciliation currently polls REST independently of strategy market-data
+WebSockets. Keep it running while orders, positions, or uncertain writes need
+recovery. Market-feed liveness is not proof that account evidence is current.
+Dashboards consume the resulting ledger evidence without account credentials or
+additional venue connections; see the [service connection contract](../design-principles.md#service-connections-and-decision-capture).

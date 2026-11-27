@@ -313,6 +313,34 @@ or immutable artifact references. These observations never determine realized
 profit. Paper fills also retain the fill-policy version, source observations,
 timing, depth, and fee assumptions needed to interpret the simulation.
 
+### Service connections and decision capture
+
+A strategy owns the market connections required for its decisions. It records
+the exact input books, their source and timestamps, derived opportunities, and
+skip reasons as observations in the shared ledger. Execution captures and
+broker receipts serve different purposes: an observed gap is not a fill.
+
+Account and market monitors own their service connections and continue after a
+strategy stops. REST polling remains appropriate for reconciliation, metadata,
+and reference valuation. Low-latency execution may own WebSocket subscriptions;
+services do not depend on a dashboard to keep a connection alive. Independent
+subscriptions are allowed when services have different coverage or lifetimes.
+A shared feed daemon is not required by the broker contract.
+
+WebSocket readers must follow the venue protocol. Incremental books require an
+initial snapshot, sequence checks, and invalidation/rebuild after missing data.
+Connection liveness and time since a price change are distinct measurements.
+A healthy sequenced feed can hold an unchanged book; ping/pong alone cannot
+repair missing deltas. Full-snapshot readers retain their own freshness policy.
+Reconnecting never makes an old cached book current.
+
+Dashboards open the ledger read-only and make no venue connections. General
+performance reporting uses broker accounting, account evidence, and reference
+marks. Experiment companions may plot strategy-specific decision captures and
+derived metrics without importing the strategy. They live outside the core
+package and do not own execution or a second ledger. Missing captures remain
+visible gaps, rather than reconstructed decisions from later reference quotes.
+
 ### Account evidence
 
 Account collectors record authoritative balances, positions, orders, fills,

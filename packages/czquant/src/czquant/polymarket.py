@@ -33,6 +33,8 @@ from typing import Any, Iterator
 
 import httpx
 
+from .http_errors import raise_for_status
+
 from .broker import Broker
 from .paper import Paper
 from .store import decimal
@@ -148,7 +150,7 @@ class Polymarket:
             if response.status_code in (429, 500, 502, 503, 504) and attempt < 4:
                 time.sleep(0.5 * 2 ** attempt)
                 continue
-            response.raise_for_status()
+            raise_for_status(response, "Polymarket")
             return response.json()
         raise RuntimeError("read retry exhausted")
 
