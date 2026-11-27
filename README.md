@@ -89,8 +89,10 @@ ledger independently of the strategy.
    ```
 
    Creation is atomic. Existing pool IDs can be listed in the config instead of
-   new paper pool definitions, including live pools allocated separately with
-   czquant account and czquant open-sub. A portfolio cannot mix paper and live.
+   new paper pool definitions. For live allocations, specify account and cash
+   per pool; the command allocates from registered account reserves. See the
+   [live config example](strategies/cross-market-polymarket/experiments/portfolio-live.example.yaml).
+   A portfolio cannot mix paper and live.
 
 3. Identify a market pair using the reusable discovery CLI. This requests
    public market data and writes candidates; it does not trade.

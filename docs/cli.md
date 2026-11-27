@@ -14,7 +14,8 @@ uv run czquant portfolios inspect game-a --events 20
 ## Create
 
 The YAML or JSON creation config has id, optional label, and a pools list. Each
-item is either an existing pool ID or a new paper pool with id, venue and cash:
+item can be an existing pool ID, a new independent paper pool with id, venue
+and cash, or a new account allocation with id, account and cash:
 
 ```yaml
 id: game-a
@@ -28,11 +29,37 @@ pools:
     cash: 40
 ```
 
-Creation and initial paper funding share one transaction. Duplicate IDs or an
-invalid member roll back all changes. Repeating creation never adds funding.
-For live portfolios, register accounts and allocate pools with the existing
-account and open-sub commands, then list those IDs as strings under pools.
-The creation command cannot create live capital or mix paper and live pools.
+For account-backed allocations, first register each account with czquant account.
+Put the registered account IDs and allocation amounts directly in the config:
+
+```yaml
+id: game-live
+pools:
+  - id: game-live-kalshi
+    account: main-kalshi
+    cash: 10
+    markets: [KXNFLGAME-EXAMPLE-PIT, KXNFLGAME-EXAMPLE-DEN]
+  - id: game-live-us
+    account: main-polymarket-us
+    cash: 10
+    markets: [PMUS:example-market-slug]
+```
+
+Replace the example market identifiers with the selected contracts, or omit
+markets to leave the allocation unrestricted. markets accepts a nonempty list
+of exact tickers or prefixes ending in *. Venue and paper/live mode come from
+the registered account; do not also specify venue. The command allocates each
+cash amount from that account's reserve using the existing open-sub checks.
+No separate open-sub commands are needed. Live allocations require credentials
+and current venue cash backing; allocation does not deposit or transfer money
+at a venue.
+
+Portfolio creation, pool creation and all cash allocations share one transaction.
+An unknown account, insufficient reserve, failed live backing check, duplicate
+ID or invalid member rolls back every local change, including earlier allocations.
+The portfolio cannot mix paper and live pools. Repeating creation fails without
+topping up existing IDs. Use an existing pool ID string to group an allocation
+that already exists.
 
 ## List and inspect
 

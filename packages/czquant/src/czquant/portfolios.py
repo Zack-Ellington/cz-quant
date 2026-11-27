@@ -10,7 +10,9 @@ from .store import Store, decimal, encode, utc
 
 
 def create(store: Store, config: dict[str, Any]) -> str:
-    """Atomically create paper pools or group existing pools; never top up on retry."""
+    """Atomically fund pools and group them; never top up existing IDs on retry."""
+    from .accounts import open_sub
+
     if set(config) - {'id', 'label', 'pools'}:
         raise ValueError('portfolio config accepts only id, label and pools')
     identifier, pools = config.get('id'), config.get('pools')
@@ -19,7 +21,7 @@ def create(store: Store, config: dict[str, Any]) -> str:
     if not isinstance(config.get('label', ''), str):
         raise ValueError('portfolio label must be a string')
     if not isinstance(pools, list) or not pools:
-        raise ValueError('pools must be a nonempty list of existing IDs or new paper pool definitions')
+        raise ValueError('pools must be a nonempty list of existing IDs or new pool definitions')
     with store.transaction():
         if any(p['id'] == identifier for p in reporting_units(store)):
             raise ValueError(f'portfolio or pool already exists: {identifier}')
@@ -31,16 +33,30 @@ def create(store: Store, config: dict[str, Any]) -> str:
                     raise ValueError(f'cash pool is retired: {item}')
                 members.append(item)
                 continue
-            if not isinstance(item, dict) or set(item) != {'id', 'venue', 'cash'}:
-                raise ValueError('new paper pools require exactly id, venue and cash; use an existing ID for live pools')
+            if not isinstance(item, dict):
+                raise ValueError('a pool must be an existing ID or a mapping')
+            account_backed = 'account' in item
+            required = {'id', 'account', 'cash'} if account_backed else {'id', 'venue', 'cash'}
+            allowed = required | {'markets'} if account_backed else required
+            if not required <= item.keys() or item.keys() - allowed:
+                raise ValueError('new pools require id, cash and either account (optional markets) or venue (paper only)')
             if not isinstance(item['id'], str) or not item['id'].strip():
                 raise ValueError('pool id must be a nonempty string')
-            if item['venue'] not in ('kalshi', 'polymarket', 'polymarket_us', 'polymarket-us'):
-                raise ValueError('unknown pool venue')
             cash = decimal(str(item['cash']))
-            if not cash.is_finite() or cash < 0:
-                raise ValueError('paper cash must be a finite nonnegative amount')
-            store.create_pool(item['id'], item['venue'].replace('-', '_'), str(cash))
+            if cash < 0:
+                raise ValueError('cash must be a nonnegative amount')
+            if account_backed:
+                if not isinstance(item['account'], str) or not item['account'].strip():
+                    raise ValueError('account must be a registered account ID')
+                markets = item.get('markets')
+                if 'markets' in item and (not isinstance(markets, list) or not markets
+                                         or not all(isinstance(m, str) and m.strip() for m in markets)):
+                    raise ValueError('markets must be a nonempty list of market tickers or prefixes')
+                open_sub(store, item['id'], item['account'], str(cash), markets=markets)
+            else:
+                if item['venue'] not in ('kalshi', 'polymarket', 'polymarket_us', 'polymarket-us'):
+                    raise ValueError('unknown pool venue')
+                store.create_pool(item['id'], item['venue'].replace('-', '_'), str(cash))
             members.append(item['id'])
         store.create_portfolio(identifier, members, label=config.get('label', ''))
     return identifier

@@ -145,10 +145,11 @@ parameters.duration_minutes runs until Ctrl-C. Stopping does not close positions
 
 Live execution requires Polymarket US and pre-created live allocations. Follow
 the [virtual-subaccount guide](../../docs/services/virtual-subaccounts.md):
-register each venue account with czquant account, then use czquant open-sub to
-allocate two dedicated pools per experiment. Group their IDs with
-czquant portfolios create using a config whose pools list contains those existing
-IDs, then select that portfolio in the runner config. Optional --markets scopes are
+register each venue account with czquant account, then specify account and cash
+for each pool in a [live portfolio config](experiments/portfolio-live.example.yaml).
+czquant portfolios create --config FILE.yaml allocates from both reserves and
+creates the portfolio atomically. Select its ID in the runner config. Optional
+markets lists in the portfolio config restrict each allocation; these scopes are
 enforced by the brokers. Several US pools require account-wide reconciliation;
 repeating map-live cannot prepare these allocations. Registered accounts also
 prevent experiments from opening opposite sides of the same market.

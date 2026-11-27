@@ -1,0 +1,11 @@
+# Register these accounts with czquant account before creating the portfolio.
+# Venue and mode come from the accounts; cash is allocated from their reserves.
+id: game-live
+label: Live cross-market experiment, $20 total
+pools:
+  - id: game-live-kalshi
+    account: main-kalshi
+    cash: 10
+  - id: game-live-us
+    account: main-polymarket-us
+    cash: 10
