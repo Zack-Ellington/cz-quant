@@ -426,3 +426,14 @@ def test_live_mutations_cannot_cross_venue_or_exceed_adapter_capabilities(live, 
     with pytest.raises(NotImplementedError, match="does not support"):
         getattr(broker, operation)(*args)
     assert store.events() == before
+
+
+def test_book_reads_bypass_the_gateway_cache():
+    """The public book is CDN-cached for 30 s; every read must be unique to be fresh."""
+    client = FakeUS()
+    seen = []
+    client.public = lambda path, params=None: seen.append((path, params)) or {"marketData": {"bids": [], "offers": []}}
+    client.book_raw(SLUG)
+    client.book_raw(SLUG)
+    assert [p for p, _ in seen] == [f"/v1/markets/{SLUG}/book"] * 2
+    assert all(params and params.get("_") for _, params in seen) and seen[0][1] != seen[1][1]

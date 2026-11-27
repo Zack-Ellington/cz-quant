@@ -33,6 +33,7 @@ import base64
 import json
 import os
 import time
+import uuid
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any, Iterator
@@ -223,7 +224,11 @@ class PolymarketUS:
         return self.public(f"/v1/market/slug/{slug}")["market"]
 
     def book_raw(self, slug: str) -> dict[str, Any]:
-        return self.public(f"/v1/markets/{slug}/book")
+        """The current book. The gateway serves books through a CDN with
+        Cache-Control max-age=30, so a plain read can return a book up to 30 s old:
+        in a live game that showed edges that no longer existed (live IOCs expired
+        unfilled; paper filled against them). A unique query string forces a fresh read."""
+        return self.public(f"/v1/markets/{slug}/book", {"_": uuid.uuid4().hex})
 
     def book(self, ticker_: str) -> dict[str, Any]:
         return kalshi_layout(self.book_raw(slug_of(ticker_)))
