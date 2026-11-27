@@ -10,6 +10,8 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 import httpx
+
+from .http_errors import raise_for_status
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding
 
@@ -46,7 +48,7 @@ class Kalshi:
             if method == "GET" and response.status_code in (429, 500, 502, 503, 504) and attempt < 4:
                 time.sleep(0.5 * 2**attempt)
                 continue
-            response.raise_for_status()
+            raise_for_status(response, "Kalshi")
             return response.json() if response.content else {}
         raise RuntimeError("read retry exhausted")
 
