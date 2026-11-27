@@ -261,6 +261,17 @@ class Store:
         sql = f"SELECT * FROM {table}" + (" WHERE " + " AND ".join(conditions) if conditions else "")
         return [{**dict(r), "data": json.loads(r["data"])} for r in self.db.execute(sql + " ORDER BY effective_at,sequence", args)]
 
+    def latest_health(self, component: str) -> dict[str, Any] | None:
+        """The newest health record a monitor component wrote, or None.
+
+        Reads backwards along the (type, effective_at) index and stops at the first
+        match. Callers gate every live order on this: reading every health record
+        (73k on a long-lived ledger) took ~1 s per component per check."""
+        row = self.db.execute(
+            "SELECT * FROM events WHERE type='health' AND json_extract(data,'$.component')=? "
+            "ORDER BY effective_at DESC, sequence DESC LIMIT 1", (component,)).fetchone()
+        return {**dict(row), "data": json.loads(row["data"])} if row else None
+
     def reserved(self, portfolio: str) -> Decimal:
         return sum((decimal(r[0]) for r in self.db.execute("SELECT reserved FROM orders WHERE portfolio_id=?", (portfolio,))), Decimal(0))
 

@@ -304,10 +304,9 @@ class Engine:
             return "awaiting_reconciliation" if busy else None
         now = datetime.now(timezone.utc)
         for component in ("account", "polymarket_us"):
-            rows = [e for e in self.store.events(kinds=("health",)) if e["data"].get("component") == component]
-            if not rows:
+            last = self.store.latest_health(component)
+            if last is None:
                 return f"no_{component}_monitor"
-            last = rows[-1]
             age = (now - datetime.fromisoformat(last["effective_at"])).total_seconds()
             if age > self.cfg.monitor_max_age or last["data"].get("status") == "failed":
                 return f"stale_{component}_monitor"

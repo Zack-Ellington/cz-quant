@@ -344,3 +344,13 @@ def test_an_unexplained_settlement_flags_only_the_pool_that_traded_it(tmp_path):
     api.pages = lambda path, key, **p: iter([odd]) if path == "/portfolio/settlements" else original(path, key, **p)
     flagged = {d["portfolio"] for d in account_pass(store, api)["discrepancies"] if d["kind"] == "unresolved_settlement"}
     assert flagged == {"a"}
+
+
+def test_latest_health_returns_the_newest_record_per_component(tmp_path):
+    store = Store(tmp_path)
+    assert store.latest_health("account") is None
+    store.append("health", {"component": "account", "status": "healthy"}, at="2100-01-01T00:00:00+00:00")
+    store.append("health", {"component": "polymarket_us", "status": "healthy"}, at="2100-01-01T00:00:05+00:00")
+    store.append("health", {"component": "account", "status": "degraded"}, at="2100-01-01T00:00:10+00:00")
+    assert store.latest_health("account")["data"]["status"] == "degraded"
+    assert store.latest_health("polymarket_us")["data"]["status"] == "healthy"
