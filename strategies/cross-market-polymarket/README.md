@@ -94,8 +94,8 @@ Parameters omitted from the file use [Config defaults](trader.py):
   defaults to zero, so there is no separate basket-profit floor unless specified.
 - require_cross defaults to true. False permits both outcomes at one venue.
   Opposite sides of the same market are refused because their fills would net.
-- unwind_slippage limits repair prices. kalshi_latency and polymarket_latency
-  specify paper execution delays.
+- kalshi_latency and polymarket_latency specify paper execution delays.
+  Repairs sell at visible bids, with no entry-price loss limit.
 - pmus_theta overrides US pricing and paper fees. Null uses the market coefficient;
   this parameter does not change live venue fees.
 - dry_run requires live mode and builds orders without submitting them.
@@ -176,16 +176,28 @@ Invalid pool, scope or pair configuration raises an error before submission.
 The thinnest leg goes first as an IOC. Later legs use the smallest known fill.
 Known partial fills or failures trigger reduce-only repair of excess holdings.
 Unknown results stop further submissions and retain reservations for reconciliation.
-Incomplete repairs, unresolved inventory, settlement losses, monitor discrepancies
-and KILL files leave a persistent halt.
+Execution failures leave a recoverable entry halt and keep the recovery loop alive.
+After all outstanding orders reconcile and both account monitors are healthy,
+the strategy compares the two outcomes' total quantities across this experiment's
+pools. It retains matched pairs and sells only excess contracts. This comparison
+uses actual holdings, so FIFO lot attribution cannot cause duplicate repairs.
+
+Each repair reads fresh bids and sends a reduce-only IOC with a limit at the worst
+visible bid needed for the offered quantity. It can realize a loss greater than
+5 cents per contract. No bids or a closed market leave recovery pending. Partial
+exits retry on later scans with a fresh book and the reconciled remainder. A lost
+repair acknowledgement blocks further submissions until the monitor resolves it;
+restarting does not duplicate an uncertain sell. At most one recovery order is
+submitted per scan. Matched inventory partway through settlement is retained.
 
 Restart reads the existing economic records and cooldown. It does not retry
 uncertain orders with new IDs. Acknowledged orders pause entries without a
 persistent halt until the monitor books their fills and releases reservations.
-Pending or unknown writes still halt. Inventory completeness is checked after
-outstanding orders are reconciled; incomplete inventory then halts unless a
-completed basket is partway through settlement. Inspect and reconcile the
-affected pools before clearing a halt:
+Pending or unknown writes still halt entries. Execution-recovery halts clear
+automatically only after reconciliation leaves no excess holdings. Settlement
+losses, missing provenance, monitor discrepancies, manual halts and KILL files
+remain hard stops, including for recovery. Inspect and resolve those conditions
+before explicitly clearing their halt:
 
 ```bash
 uv run czquant halts game-a-kalshi

@@ -164,7 +164,7 @@ def test_a_short_later_leg_has_the_extras_sold_back(engine_for, monkeypatch):
     assert held == {f"{EVENT}-BOS": 10, "PM:tok-sac": 10}  # 30 Sacramento tokens sold back at 0.36
     record = [e["data"] for e in engine.store.events() if e["data"].get("kind") == "basket_execution"][-1]
     unwind = [o for o in record["outcomes"] if "unwind" in o][0]
-    assert (unwind["ticker"], unwind["unwind"], unwind["sold"], unwind["floor"]) == ("PM:tok-sac", "30", "30", "0.33")
+    assert (unwind["ticker"], unwind["unwind"], unwind["sold"], unwind["floor"]) == ("PM:tok-sac", "30", "30", "0.36")
 
 
 def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):

@@ -23,6 +23,7 @@ from typing import Any
 
 from czquant import Broker, Store
 from czquant.accounting import active_events, combine_states, venue_of
+from czquant.book import levels as book_levels
 from czquant.kalshi import Kalshi
 from czquant.live import KalshiLive
 from czquant.paper import Paper
@@ -37,7 +38,6 @@ STRATEGY = "cross-market-polymarket"
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 FEE_TYPES = ("quadratic", "quadratic_with_maker_fees", "quadratic_with_combo_maker_fees")
-TICK = Decimal("0.01")
 TERMINAL = {"filled", "canceled", "rejected", "failed", "dry_run"}
 log = logging.getLogger("cross_market_polymarket")
 
@@ -53,7 +53,6 @@ class Config:
     min_edge: float = 0.01  # per $1 set: margin for rule and settlement risk between venues
     max_apr: float | None = None
     require_cross: bool = True  # baskets need a leg on each venue
-    unwind_slippage: float = 0.05
     kalshi_latency: float = 0.30
     polymarket_latency: float = 0.50
     cooldown: float = 300.0
@@ -68,8 +67,8 @@ class Config:
         self.experiment.validate()
         if not 0 < self.max_capital_frac <= 1 or self.max_sets < 1 or self.interval_seconds <= 0:
             raise ValueError("capital fraction, basket size and scan interval must be positive")
-        if not 0 <= self.unwind_slippage <= 1 or self.cooldown < 0:
-            raise ValueError("invalid repair slippage or cooldown")
+        if self.cooldown < 0:
+            raise ValueError("invalid cooldown")
         if self.dry_run and self.experiment.mode != "live":
             raise ValueError("dry_run requires live mode")
 
@@ -112,6 +111,8 @@ class Engine:
             broker.start(STRATEGY, revision, asdict(cfg))
         self.cooldown_until = 0.0
         self.halted: str | None = None
+        self._halts: dict[str, dict[str, Any]] = {}
+        self.repairs: list[tuple[dict[str, Any], Decimal, dict[str, Any]]] = []
         self.positions: dict[str, dict[str, Any]] = {}
         self.counters = {"scans": 0, "baskets": 0, "rejects": 0, "unwinds": 0}
         self._last_logged: dict[tuple, float] = {}
@@ -170,14 +171,6 @@ class Engine:
         state = combine_states([b.state() for b in self.brokers.values()])
         self.cash = sum((b.available for b in self.brokers.values()), Decimal(0))
         self.bankroll = state.contributed
-        self.positions = {}
-        for lot in state.lots.values():
-            context = lot["context"]
-            if not context.get("trade_id"):
-                self.halt("existing inventory has no basket provenance; reconcile before adding exposure")
-            else:
-                position = self.positions.setdefault(context["trade_id"], {**context, "capital": Decimal(0)})
-                position["capital"] += lot["cost"]
         events = active_events(sorted(
             [e for b in self.brokers.values() for e in self.store.events(b.pool_id,
              kinds=("transaction", "observation", "correction", "order"), observations=("halt", "halt_cleared", "basket_settled"))],
@@ -192,12 +185,36 @@ class Engine:
         observations = [e for e in events if e["type"] == "observation"]
         cleared = {e["data"]["halt_id"] for e in observations if e["data"].get("kind") == "halt_cleared"}
         reported = {e["data"]["trade_id"] for e in observations if e["data"].get("kind") == "basket_settled"}
+        # Recognize old execution halts only for orders owned by these pools.
+        legacy_recovery = {"incomplete basket repair; reconcile holdings and orders before clearing the halt",
+                           "basket repair failed; reconcile holdings and orders before clearing the halt"}
+        for e in events:
+            d = e["data"]
+            if e["type"] == "order" and d.get("status") == "intent":
+                order = d["order"]
+                legacy_recovery.update({f"order on {order['ticker']} has an unknown outcome",
+                    f"order {order['client_order_id']} may have executed; reconcile before repairing this experiment"})
+        self._halts = {}
+        self.halted = None
         for e in observations:
             if e["data"].get("kind") == "halt" and e["record_id"] not in cleared:
-                self.halted = e["data"]["reason"]
+                d = e["data"]
+                self._halts[d["reason"]] = {"id": e["record_id"],
+                    "recoverable": d.get("recoverable", d["reason"] in legacy_recovery)}
+                self.halted = d["reason"]
+        self.positions = {}
+        for lot in state.lots.values():
+            context = lot["context"]
+            if not context.get("trade_id"):
+                self.halt("existing inventory has no basket provenance; reconcile before adding exposure")
+            else:
+                position = self.positions.setdefault(context["trade_id"], {**context, "capital": Decimal(0)})
+                position["capital"] += lot["cost"]
         totals: dict[str, Decimal] = {}
         contexts: dict[str, dict[str, Any]] = {}
         filled: dict[str, dict[tuple[str, str], Decimal]] = {}
+        repaired = set()
+        settled = set()
         for e in events:
             d = e["data"]
             tid = (d.get("context") or {}).get("trade_id")
@@ -205,6 +222,10 @@ class Engine:
                 continue
             totals[tid] = totals.get(tid, Decimal(0)) + decimal(d["cash_delta"])
             contexts[tid] = d["context"]
+            if d["context"].get("repair"):
+                repaired.add(tid)
+            if d["reason"] == "settlement":
+                settled.add(tid)
             for leg in d.get("legs", []):
                 if d["reason"] == "fill" and decimal(leg["quantity_delta"]) > 0 and not d["context"].get("repair"):
                     key = (leg["market"], leg["side"])
@@ -215,35 +236,48 @@ class Engine:
             intended = {(leg["ticker"], leg["contract"].lower()): decimal(leg["qty"])
                         for leg in contexts[tid].get("intended_legs", [])}
             status = ("complete" if filled.get(tid) == intended else "partial") if intended else "unknown"
+            if tid in repaired:
+                status = "repaired"
             if tid not in reported:
                 self.kalshi_broker.observe("basket_settled", {"trade_id": tid, "net_pnl": str(pnl), "fill_status": status,
                     "context": contexts[tid], "filled_legs": [{"ticker": t, "side": s, "quantity": str(q)}
                                                               for (t, s), q in filled.get(tid, {}).items()]})
             # Only a complete basket's loss contradicts the arbitrage; a partial one is directional.
-            if pnl < Decimal("-0.005") and status != "partial":
+            if pnl < Decimal("-0.005") and status not in ("partial", "repaired"):
                 self.halt(f"settled trade {tid} lost ${-pnl:.2f}")
 
-        for tid, position in self.positions.items():
-            # Confirmed live fills can precede their booked lots. Pause until reconciled.
-            if tid in awaiting:
-                continue
-            intended = {(leg["ticker"], leg["contract"].lower()) for leg in position.get("intended_legs", [])}
-            quantities: dict[tuple[str, str], Decimal] = {}
-            for lot in state.lots.values():
-                if lot["context"].get("trade_id") == tid:
-                    key = (lot["market"], lot["side"])
-                    quantities[key] = quantities.get(key, Decimal(0)) + lot["quantity"]
-            # A settled leg can leave the other leg open legitimately. Recovery halts
-            # only incomplete executions, not a basket whose settlement is in progress.
-            settled = any(e["type"] == "transaction" and e["data"].get("reason") == "settlement"
-                          and e["data"].get("context", {}).get("trade_id") == tid for e in events)
-            if not settled and (set(quantities) != intended or len(set(quantities.values())) != 1):
-                self.halt(f"trade {tid} has incomplete inventory; reconcile this experiment before restarting orders")
+        # Account for fungible contracts across baskets: FIFO closes can change
+        # lot provenance without changing the experiment's matched quantities.
+        self.repairs = []
+        if awaiting or settled:
+            # Once a selected market starts settling, wait for the other payout.
+            # FIFO may have moved lot provenance between equivalent baskets.
+            return
+        by_role: list[list[dict[str, Any]]] = [[], []]
+        for lot in state.lots.values():
+            for role, outcome in enumerate(self.pair.outcomes):
+                if (lot["market"], lot["side"].upper()) in {
+                    (outcome.kalshi, outcome.kalshi_side), (outcome.polymarket, outcome.polymarket_side)}:
+                    by_role[role].append(lot)
+        quantities = [sum((lot["quantity"] for lot in lots), Decimal(0)) for lots in by_role]
+        keep = min(quantities)
+        for role, lots in enumerate(by_role):
+            excess = quantities[role] - keep
+            for lot in reversed(lots):
+                count = min(excess, lot["quantity"])
+                if count > 0:
+                    leg = {"ticker": lot["market"], "contract": lot["side"].upper(),
+                           "venue": venue_of(lot["market"])}
+                    self.repairs.append((leg, count, lot["context"]))
+                    excess -= count
+        if self.repairs:
+            self.halt("unmatched inventory requires automatic sell recovery", recoverable=True)
 
-    def halt(self, reason: str) -> None:
-        if not self.halted:
+    def halt(self, reason: str, *, recoverable: bool = False) -> None:
+        if reason not in self._halts:
             self.halted = reason
-            self.kalshi_broker.observe("halt", {"reason": reason})
+            identifier = self.kalshi_broker.observe("halt", {"reason": reason, "recoverable": recoverable})
+            self._halts[reason] = {"id": identifier, "recoverable": recoverable}
             log.error("HALT: %s", reason)
 
     def exposure(self) -> Decimal:
@@ -263,7 +297,7 @@ class Engine:
         missing or stale monitor checks pause until reconciliation catches up."""
         unresolved = sum(len(b.orders(("pending", "unknown"))) for b in self.brokers.values())
         if unresolved:
-            self.halt(f"{unresolved} order(s) awaiting reconciliation; keep the same experiment and pools, reconcile both venues, then clear the halt")
+            self.halt(f"{unresolved} order(s) awaiting reconciliation", recoverable=True)
             return "halted"
         busy = any(b.orders(("acknowledged",)) for b in self.brokers.values())
         if not self.live or self.cfg.dry_run:
@@ -396,7 +430,7 @@ class Engine:
                                  "status": result["status"], "filled": str(got)})
                 if result.get("status") not in TERMINAL or "filled" not in result:
                     # Never send the next leg (or an unwind) on a guess about this one.
-                    self.halt(f"order on {leg['ticker']} has an unknown outcome")
+                    self.halt(f"order on {leg['ticker']} has an unknown outcome", recoverable=True)
                     sent.append((leg, got))
                     break
                 sent.append((leg, got))
@@ -409,7 +443,7 @@ class Engine:
                 rows = [o for o in self.brokers[venue_of(failed_leg["ticker"])].orders()
                         if o["client_order_id"] == identifier]
                 if rows and rows[0]["status"] in ("pending", "unknown", "acknowledged"):
-                    self.halt(f"order {identifier} may have executed; reconcile before repairing this experiment")
+                    self.halt(f"order {identifier} may have executed; reconcile before repairing this experiment", recoverable=True)
                 elif rows and not any(leg is failed_leg for leg, _ in sent):
                     sent.append((failed_leg, decimal(rows[0]["filled"])))
         # A known failure still needs repair of fills already obtained. Unknown writes
@@ -422,27 +456,53 @@ class Engine:
                 outcome = self.unwind(leg, got - keep, context)
                 outcomes.append(outcome)
                 if outcome["status"] not in TERMINAL or decimal(outcome["sold"]) < got - keep:
-                    self.halt("incomplete basket repair; reconcile holdings and orders before clearing the halt")
+                    self.halt("incomplete basket repair; waiting for automatic sell recovery", recoverable=True)
                     break
             except Exception as exc:
                 outcomes.append({"status": "repair_error", "ticker": leg["ticker"], "error": str(exc)[:200]})
-                self.halt("basket repair failed; reconcile holdings and orders before clearing the halt")
+                self.halt("basket repair failed; waiting for automatic sell recovery", recoverable=True)
                 failure = failure or exc
                 break
         self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
         self.resume()
         if failure is not None:
-            raise failure
+            # Keep the recovery loop alive after a transport failure. Durable
+            # broker intent, acknowledgement and fills determine the next action.
+            log.error("basket execution failed: %s", failure)
         if any(decimal(o.get("filled") or "0") > 0 for o in outcomes):
             self.counters["baskets"] += 1
         log.info("BASKET %s %s sets, expected net %s; actual %s", event, current.sets, current.net, outcomes)
 
     def unwind(self, leg: dict[str, Any], count: Decimal, context: dict[str, Any]) -> dict[str, Any]:
-        """Sell back contracts beyond the complete sets, no lower than cost less the slippage."""
-        floor = max(TICK, decimal(leg["vwap"]) - Decimal(str(self.cfg.unwind_slippage)))
+        """Sell excess at visible bids, without an entry-price loss floor."""
+        ticker, venue = leg["ticker"], venue_of(leg["ticker"])
+        if venue == "kalshi":
+            market = self.kalshi.market(ticker)
+            trading = market["status"] in ("open", "active")
+            book = self.kalshi.book(ticker) if trading else {}
+        elif self.us:
+            slug = ticker.removeprefix("PMUS:")
+            trading = self.poly.market_raw(slug)["status"] == "MARKET_STATUS_OPEN"
+            book = self.poly.books([slug])[slug] if trading else {}
+        else:
+            token = ticker.removeprefix("PM:")
+            market = self.poly.market_by_slug(self.pair.polymarket_event)
+            trading = normalize_market(market, token)["status"] == "active"
+            book = kalshi_layout(self.poly.books([token])[token]) if trading else {}
+        quantity, floor = Decimal(0), Decimal(0)
+        for price, depth in book_levels(book)[leg["contract"].lower()]:
+            if not 0 < price < 1:
+                continue
+            quantity += min(depth, count - quantity)
+            floor = price
+            if quantity >= count:
+                break
+        if quantity == 0:
+            return {"ticker": ticker, "venue": venue, "unwind": str(count), "sold": "0",
+                    "status": "no_liquidity" if trading else "market_closed"}
         no = leg["contract"] == "NO"  # orders are on the YES book: selling NO is buying YES at 1 - price
-        result = self.brokers[venue_of(leg["ticker"])].submit({"ticker": leg["ticker"], "side": "bid" if no else "ask",
-                                     "count": str(int(count)), "price": str(1 - floor if no else floor),
+        result = self.brokers[venue].submit({"ticker": ticker, "side": "bid" if no else "ask",
+                                     "count": str(quantity), "price": str(1 - floor if no else floor),
                                      "time_in_force": "immediate_or_cancel",
                                      "self_trade_prevention_type": "taker_at_cross", "reduce_only": True},
                                     {**context, "repair": "unwind"})
@@ -451,6 +511,29 @@ class Engine:
         return {"ticker": leg["ticker"], "venue": leg["venue"], "unwind": str(count), "sold": str(sold),
                 "status": result["status"], "floor": str(floor)}
 
+    def recover(self) -> None:
+        """One recovery pass; outstanding intents fence retries across restarts."""
+        if any(not h["recoverable"] for h in self._halts.values()) or self.live_block():
+            return
+        self.validate_inventory()
+        if self.repairs:
+            # Recompute after each reconciled sale, since FIFO can change lots.
+            # Submit at most one repair per scan and never enter a new basket here.
+            leg, count, context = self.repairs[0]
+            try:
+                outcome = self.unwind(leg, count, context)
+                self.kalshi_broker.observe("recovery_attempt", {"context": context, "outcome": outcome})
+            except Exception as exc:
+                self.kalshi_broker.observe("recovery_attempt", {"context": context,
+                    "outcome": {"ticker": leg["ticker"], "status": "error", "error": str(exc)[:200]}})
+                log.error("automatic sell recovery failed: %s", exc)
+            self.resume()
+        if not self.repairs and not self.live_block() and all(h["recoverable"] for h in self._halts.values()):
+            for h in self._halts.values():
+                self.kalshi_broker.observe("halt_cleared", {"halt_id": h["id"],
+                    "reason": "Automatic recovery: reconciled holdings have no unmatched contracts"})
+            self.resume()
+
     # -- run -------------------------------------------------------------------
 
     def step(self) -> None:
@@ -458,6 +541,7 @@ class Engine:
             self.halt("kill switch file present")
         self.resume()
         if self.halted:
+            self.recover()
             return
         pause = self.live_block()
         if pause:

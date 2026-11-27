@@ -101,10 +101,14 @@ basket. Missing or stale monitor health also pauses entries.
 
 Pending or unknown writes halt new entries and retain reservations for recovery.
 A known later-leg failure permits repair of known excess fills; an uncertain
-execution outcome stops further entry and repair submissions. Incomplete
-reconciled inventory, failed repairs and monitor discrepancies can leave a
-persistent halt. Resolve the underlying condition before clearing that halt;
-a new order identity or a new pool is not a recovery mechanism.
+execution outcome stops further entry and repair submissions until reconciliation.
+The cross-market strategy then automatically sells unmatched inventory at fresh
+visible bids, without an entry-price loss floor. Partial or unavailable exits
+remain pending for later scans. Uncertain repair orders must reconcile before
+another sale. Only execution-recovery halts clear automatically when quantities
+match; monitor discrepancies and other hard halts require explicit resolution.
+A new order identity or a new pool is not a substitute for recovering an
+uncertain write.
 
 
 ## Polymarket US recovery

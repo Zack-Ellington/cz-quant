@@ -38,7 +38,6 @@
     "min_edge": 0.01,
     "max_apr": null,
     "require_cross": true,
-    "unwind_slippage": 0.05,
     "kalshi_latency": 0.3,
     "polymarket_latency": 0.5,
     "cooldown": 300,

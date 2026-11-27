@@ -209,8 +209,7 @@ def test_known_second_leg_failure_repairs_first_fill(setup, monkeypatch, mode):
         response = httpx.Response(400, request=httpx.Request("POST", "https://fixture.invalid/orders"))
         raise httpx.HTTPStatusError("known rejection", request=response.request, response=response)
     monkeypatch.setattr(engine.kalshi_broker.adapter, "create_order", reject)
-    with pytest.raises(httpx.HTTPStatusError):
-        engine.step()
+    engine.step()
     assert not engine.poly_broker.state().lots and not engine.kalshi_broker.state().lots
     assert engine.counters["unwinds"] == 1
     assert engine.poly_broker.available < 50  # repair loss remains with this allocation
@@ -247,8 +246,7 @@ def test_unknown_later_leg_keeps_known_fill_and_halts_for_reconciliation(setup, 
     def timeout(*_):
         raise TimeoutError("reply lost")
     monkeypatch.setattr(engine.kalshi_broker.adapter, "create_order", timeout)
-    with pytest.raises(TimeoutError):
-        engine.step()
+    engine.step()
     assert engine.poly_broker.state().lots and engine.halted
     assert engine.counters["unwinds"] == 0
     assert store.reserved(spec.portfolio["kalshi"]) > 0
@@ -299,19 +297,19 @@ def test_foreign_inventory_is_rejected_before_run_start(setup):
     assert not store.events(kinds=("run", "order"))
 
 
-def test_incomplete_repair_halts_and_survives_restart(setup, monkeypatch):
+def test_incomplete_repair_is_retried_after_restart(setup, monkeypatch):
     store, create, build = setup
     spec = create()
     engine = build(spec)
     monkeypatch.setattr(engine.kalshi_broker.adapter, "create_order", lambda *_: (_ for _ in ()).throw(ValueError("rejected")))
     monkeypatch.setattr(engine, "unwind", lambda *args: {"status": "canceled", "sold": "0"})
-    with pytest.raises(ValueError, match="rejected"):
-        engine.step()
+    engine.step()
     assert engine.halted and engine.poly_broker.state().lots
     restarted = build(spec)
     orders = store.events(kinds=("order",))
     restarted.step()
-    assert restarted.halted and store.events(kinds=("order",)) == orders
+    assert not restarted.halted and len(store.events(kinds=("order",))) > len(orders)
+    assert not restarted.poly_broker.state().lots
 
 
 def test_loader_records_all_resolved_parameters_and_rejects_unknown_keys(tmp_path):
@@ -328,7 +326,7 @@ def test_loader_records_all_resolved_parameters_and_rejects_unknown_keys(tmp_pat
 
 @pytest.mark.parametrize("parameters", [
     {"max_sets": 0}, {"cooldown": -1},
-    {"unwind_slippage": 2}, {"live": True}, {"dry_run": True},
+    {"unwind_slippage": 0.05}, {"live": True}, {"dry_run": True},
 ])
 def test_invalid_parameters_fail_before_any_engine_exists(tmp_path, parameters):
     path = tmp_path / "bad.json"
@@ -399,7 +397,10 @@ def test_live_kalshi_acknowledgement_pauses_until_monitor_books_fills(setup, rec
     broker.finish(order["client_order_id"], "filled")
     restarted.resume()
     if reconcile_quantity == "9":
-        assert restarted.halted and "incomplete inventory" in restarted.halted
+        assert restarted.halted and "unmatched inventory" in restarted.halted
+        restarted.step()
+        assert not restarted.halted
+        assert sum(lot["quantity"] for lot in restarted.poly_broker.state().lots.values()) == 9
     else:
         assert not restarted.halted and restarted.live_block() is None
         restarted.poly.depth = "20"  # replenish the fixture's consumed paper liquidity
@@ -544,6 +545,9 @@ def test_kalshi_v2_first_leg_is_hedged_or_unwound(setup, monkeypatch, second_leg
                     "remaining_count": "0.00"}
 
     engine.kalshi_broker.adapter = KalshiLive(V2Kalshi())
+    original_book = engine.kalshi.book
+    monkeypatch.setattr(engine.kalshi, "book", lambda ticker: {"orderbook_fp": {
+        **original_book(ticker)["orderbook_fp"], "yes_dollars": [["0.20", "100"]]}})
     if second_leg == "rejected":
         def reject(order, broker):
             broker.finish(order["client_order_id"], "rejected")
