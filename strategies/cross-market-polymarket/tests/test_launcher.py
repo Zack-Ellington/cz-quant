@@ -68,12 +68,36 @@ def test_replacement_rolls_back_all_retirements_on_failure(allocation, block):
     assert not any(p["id"] == "new-k" for p in store.pools())
 
 
+@pytest.mark.skipif(launch.WINDOWS, reason="lsof/ps owner checks are POSIX-only")
 def test_stop_launcher_refuses_a_reused_pid(allocation, monkeypatch, tmp_path):
-    def busy(*args):
-        raise BlockingIOError
-    monkeypatch.setattr(launch.fcntl, "flock", busy)
+    monkeypatch.setattr(launch, "_try_lock", lambda lock: False)
     monkeypatch.setattr(launch.subprocess, "run", lambda *a, **k: type("Result", (), {"stdout": "123"})())
     monkeypatch.setattr(launch.subprocess, "check_output", lambda *a, **k: "python /another/service.py")
     monkeypatch.setattr(launch.os, "kill", lambda *a: pytest.fail("must not signal an unrelated process"))
     with (tmp_path / "lock").open("a") as lock, pytest.raises(ValueError, match="does not match"):
         launch.acquire_lock(lock, Path("/intended/launch.py"))
+
+
+def test_the_launch_lock_is_exclusive(tmp_path):
+    path = tmp_path / "cross-market-launch.lock"
+    with path.open("a") as first, path.open("a") as second:
+        assert launch._try_lock(first)
+        assert not launch._try_lock(second)  # a second launcher on this ledger is refused
+
+
+@pytest.mark.skipif(not launch.WINDOWS, reason="Windows has no lsof/ps owner check")
+def test_stop_launcher_never_signals_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(launch, "_try_lock", lambda lock: False)
+    monkeypatch.setattr(launch.os, "kill", lambda *a: pytest.fail("must not signal a guessed process"))
+    with (tmp_path / "lock").open("a") as lock, pytest.raises(ValueError, match="not supported on Windows"):
+        launch.acquire_lock(lock, Path("C:/intended/launch.py"))
+
+
+def test_children_get_a_stop_signal_this_platform_supports():
+    import signal
+    import subprocess
+    if launch.WINDOWS:
+        assert launch.STOP_SIGNAL == signal.CTRL_BREAK_EVENT
+        assert launch.CHILD_GROUP == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        assert launch.STOP_SIGNAL == signal.SIGINT and launch.CHILD_GROUP == {"start_new_session": True}

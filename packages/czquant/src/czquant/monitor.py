@@ -190,12 +190,21 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                 continue
             lots = [(p["id"], lot) for p in group for lot in portfolio_state(store, p["id"]).lots.values()
                     if lot["market"]==settlement["ticker"]]
-            holders = sorted({pid for pid, _ in lots}) or ids
+            # Nobody holding the market: whoever traded it owns any discrepancy, else the
+            # reserve. Never every pool on the account (that halts unrelated experiments).
+            traders = sorted({r[0] for r in store.db.execute("SELECT portfolio_id, request FROM orders")
+                              if r[0] in ids and json.loads(r[1]).get("ticker") == settlement["ticker"]})
+            reserve = [p["id"] for p in group if p["metadata"].get("reserve")]
+            holders = sorted({pid for pid, _ in lots}) or traders or reserve or ids
             yes = decimal(settlement['value'])/100 if settlement.get('value') is not None else (Decimal(1) if settlement['market_result']=='yes' else Decimal(0))
             expected = sum((lot['quantity']*(yes if lot['side']=='yes' else 1-yes) for _, lot in lots),Decimal(0))
             revenue = decimal(settlement['revenue'])/100
-            quantities = {side:sum((l['quantity'] for _, l in lots if l['side']==side),Decimal(0)) for side in ('yes','no')}
-            if expected != revenue or any(quantities[side]!=decimal(settlement[side+'_count_fp']) for side in ('yes','no')):
+            # Kalshi reports gross YES and NO counts: a bought-then-sold position settles as
+            # equal YES and NO with no revenue. Positions net (as Kalshi nets them), so the
+            # ledger's net lots are compared with the settlement's net count.
+            ledger_net = sum((l['quantity']*(1 if l['side']=='yes' else -1) for _, l in lots),Decimal(0))
+            settled_net = decimal(settlement['yes_count_fp']) - decimal(settlement['no_count_fp'])
+            if expected != revenue or ledger_net != settled_net:
                 discrepancies.extend({'portfolio':pid,'kind':'unresolved_settlement','market':settlement['ticker']} for pid in holders)
                 continue
             with store.transaction():
@@ -231,7 +240,8 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                                   "recorded": str(recorded), "observed": str(cash),
                                   **({"shared_with": ids} if len(ids) > 1 else {})} for pid in ids)
         for order in api.pages("/portfolio/orders", "orders", **scope(lead), limit=1000):
-            row = store.db.execute("SELECT id,filled,portfolio_id FROM orders WHERE venue_id=?", (order["order_id"],)).fetchone()
+            row = store.db.execute("SELECT id,filled,portfolio_id FROM orders WHERE venue_id=? "
+                                     "AND status IN ('pending','unknown','acknowledged')", (order["order_id"],)).fetchone()
             if row and order.get("status") in ("canceled", "executed"):
                 if decimal(order.get("fill_count_fp", "0")) == decimal(row["filled"]):
                     Broker(store, row["portfolio_id"]).finish(row["id"], order["status"])
@@ -329,22 +339,33 @@ def _booked(store: Store, source: str) -> Decimal | None:
 
 
 def _advance(store: Store, p: dict[str, Any], activity: dict[str, Any], body: dict[str, Any],
-             discrepancies: list[dict[str, Any]]) -> tuple[bool, Decimal]:
+             discrepancies: list[dict[str, Any]], spendable: Decimal = Decimal(0)) -> tuple[bool, Decimal]:
     """A deposit Polymarket US advanced as buying power before the bank transfer settled.
 
     The advance is booked as cash while the deposit is pending, so the trader can spend it;
     on completion only the remainder is booked, and a failed transfer books the advance
     back out and is reported (Polymarket takes it back). Returns whether the activity was
-    handled here, and the advance still pending (cash the balance holds in reserve)."""
+    handled here, and the advance still pending (cash the balance holds in reserve).
+
+    A deposit with no explicit advancedAmount can still be spendable: Polymarket counts
+    it in buyingPower while it clears. `spendable` is the part of buying power beyond
+    settled cash not yet claimed by another pending deposit; up to the deposit's amount
+    of it is booked as a buying-power advance, with the same reversal if it fails."""
     status = body.get("status") or ""
     txid = body.get("transactionId")
     source = f"pmus-advance:{txid}"
     booked = _booked(store, source)
     advanced = sum((amount(t.get("advancedAmount")) or Decimal(0) for t in body.get("transactions") or []), Decimal(0))
     at = body.get("createTime") or body.get("updateTime")
+    if at and at < p["created_at"]:
+        at = p["created_at"]  # pending when the account was registered: not in its opening cash
     if status.endswith("PENDING"):
+        purpose = "advanced_deposit"
+        if advanced <= 0:
+            advanced = min(amount(body.get("amount")) or Decimal(0), max(Decimal(0), spendable))
+            purpose = "buying_power_advance"
         if booked is None and advanced > 0 and at:
-            store.append("transaction", {"reason": "funding", "purpose": "advanced_deposit", "venue": "polymarket_us",
+            store.append("transaction", {"reason": "funding", "purpose": purpose, "venue": "polymarket_us",
                          "cash_delta": str(advanced), "external_delta": str(advanced), "fee": "0", "legs": [],
                          "evidence": activity}, p["id"], source=source, at=at)
             booked = advanced
@@ -363,20 +384,43 @@ def _advance(store: Store, p: dict[str, Any], activity: dict[str, Any], body: di
 
 
 def _book_activities(store: Store, client: PolymarketUS, p: dict[str, Any],
-                     discrepancies: list[dict[str, Any]]) -> Decimal:
-    """Book funding and rebates; returns advanced deposits still pending."""
+                     discrepancies: list[dict[str, Any]], balance: dict[str, Any] | None = None) -> Decimal:
+    """Book funding and rebates; returns advanced deposits still pending.
+
+    With `balance`, buying power on deposits still clearing is booked as an advance
+    (see `_advance`): settled cash is currentBalance less depositReservation, and only
+    buying power above it, up to the reservation, counts. Advances already booked are
+    claimed first so a deposit is never counted twice."""
     pending_advances = Decimal(0)
-    for activity in client.activities():
+    activities = list(client.activities())
+    spendable = Decimal(0)
+    if balance is not None:
+        clearing = decimal(balance.get("depositReservation") or 0)
+        settled = decimal(balance.get("currentBalance") or 0) - clearing
+        spendable = min(clearing, max(Decimal(0), decimal(balance.get("buyingPower") or 0) - settled))
+        for activity in activities:
+            body = activity.get("accountBalanceChange") or {}
+            if (body.get("status") or "").endswith("PENDING"):
+                spendable -= _booked(store, f"pmus-advance:{body.get('transactionId')}") or Decimal(0)
+    for activity in activities:
         kind = activity.get("type", "")
         if kind not in FUNDING_ACTIVITIES and kind != "ACTIVITY_TYPE_TAKER_FEE_REBATE":
             continue
         body = activity.get("accountBalanceChange") or {}
         at = body.get("updateTime") or body.get("createTime")
         value = amount(body.get("amount"))
-        if at and at < p["created_at"]:
+        # A deposit still clearing at registration, or one whose advance was booked, is
+        # this account's to book or reverse whatever its dates.
+        pending_deposit = FUNDING_ACTIVITIES.get(kind) == 1 and (
+            (body.get("status") or "").endswith("PENDING")
+            or _booked(store, f"pmus-advance:{body.get('transactionId')}") is not None)
+        if at and at < p["created_at"] and not pending_deposit:
             continue
         if FUNDING_ACTIVITIES.get(kind) == 1:
-            handled, pending = _advance(store, p, activity, body, discrepancies)
+            before = _booked(store, f"pmus-advance:{body.get('transactionId')}")
+            handled, pending = _advance(store, p, activity, body, discrepancies, spendable)
+            if before is None and pending:
+                spendable -= pending
             pending_advances += pending
             if handled:
                 continue
@@ -511,8 +555,8 @@ def polymarket_us_pass(store: Store, client: PolymarketUS) -> dict[str, Any]:
         if reserve is None and len(mapped) > 1:
             discrepancies.extend({"portfolio": p["id"], "kind": "unregistered_shared_account"} for p in mapped)
         account = {**owner, "created_at": min(p["created_at"] for p in mapped)}
-        advanced = _book_activities(store, client, account, discrepancies)
         balance = client.balance()
+        advanced = _book_activities(store, client, account, discrepancies, balance)
         positions = client.positions()
         evidence = {"kind": "polymarket_us_snapshot", "balance": balance, "positions": positions,
                     "observed_at": utc()}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import importlib
 import json
 import os
@@ -22,6 +21,12 @@ from czquant.kalshi import Kalshi
 from czquant.monitor import account_pass, polymarket_us_pass
 from czquant.polymarket_us import PolymarketUS
 from czquant.store import decimal
+
+WINDOWS = os.name == "nt"
+if WINDOWS:
+    import msvcrt
+else:
+    import fcntl
 
 REPO = Path(__file__).resolve().parents[2]
 STRATEGY = REPO / "strategies/cross-market-polymarket"
@@ -86,9 +91,29 @@ def reconcile(store: Store, kalshi: Any, pmus: Any, log: Path) -> None:
         raise ValueError(f"account reconciliation failed; inspect {log}")
 
 
+def _try_lock(lock: Any) -> bool:
+    """Take this ledger's launch lock without waiting. False if another process holds it."""
+    try:
+        if WINDOWS:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (BlockingIOError, PermissionError, OSError):
+        return False
+
+
+# Children run in their own process group so a stop request reaches only them.
+# Windows has no SIGINT for child processes: they get CTRL_BREAK_EVENT instead.
+CHILD_GROUP = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS
+               else {"start_new_session": True})
+STOP_SIGNAL = signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGINT
+
+
 def supervise(config_paths: list[Path], logs: Path) -> None:
     children: list[tuple[str, subprocess.Popen, bool]] = []
-    cz = str(Path(sys.executable).with_name("czquant"))
+    cz = str(Path(sys.executable).with_name("czquant.exe" if WINDOWS else "czquant"))
     commands = [("kalshi-monitor", [cz, "monitor", "account", "--interval", "30"], True),
                 ("pmus-monitor", [cz, "monitor", "polymarket-us", "--interval", "30"], True)]
     commands += [(p.stem, [sys.executable, str(STRATEGY / "trader.py"), "--experiment", str(p)], False)
@@ -97,7 +122,7 @@ def supervise(config_paths: list[Path], logs: Path) -> None:
         for name, command, monitor in commands:
             with (logs / f"{name}.log").open("a") as output:
                 proc = subprocess.Popen(command, cwd=STRATEGY, stdout=output,
-                                        stderr=subprocess.STDOUT, start_new_session=True)
+                                        stderr=subprocess.STDOUT, **CHILD_GROUP)
             children.append((name, proc, monitor))
             print(f"Started {name}: PID {proc.pid}; log {logs / (name + '.log')}", flush=True)
         (logs / "processes.json").write_text(json.dumps(
@@ -118,7 +143,7 @@ def supervise(config_paths: list[Path], logs: Path) -> None:
         for monitor in (False, True):
             running = [p for _, p, m in children if m == monitor and p.poll() is None]
             for proc in running:
-                proc.send_signal(signal.SIGINT)
+                proc.send_signal(STOP_SIGNAL)
             for proc in running:
                 try:
                     proc.wait(timeout=30)
@@ -168,12 +193,14 @@ def publish_config(root: Path, config: dict[str, Any], retired: list[str]) -> Pa
 
 def acquire_lock(lock: Any, previous_launcher: Path | None) -> None:
     """Stop only an explicitly selected launcher holding this ledger's lock."""
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if _try_lock(lock):
         return
-    except BlockingIOError:
-        if previous_launcher is None:
-            raise ValueError("another launcher owns this ledger; stop it before replacing pools") from None
+    if previous_launcher is None:
+        raise ValueError("another launcher owns this ledger; stop it before replacing pools")
+    if WINDOWS:
+        # No lsof/ps to prove which process holds the lock: never signal a guess.
+        raise ValueError("--stop-launcher is not supported on Windows; stop the previous launcher "
+                         "in its terminal (Ctrl-C), then relaunch")
     owners = subprocess.run(["lsof", "-t", str(lock.name)], text=True, capture_output=True, check=False)
     candidates = [int(pid) for pid in owners.stdout.split() if int(pid) != os.getpid()]
     if len(candidates) != 1:
@@ -186,11 +213,9 @@ def acquire_lock(lock: Any, previous_launcher: Path | None) -> None:
     os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _try_lock(lock):
             return
-        except BlockingIOError:
-            time.sleep(0.2)
+        time.sleep(0.2)
     raise ValueError("previous launcher has not stopped; no allocations were changed")
 
 
@@ -248,7 +273,10 @@ if __name__ == "__main__":
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGHUP, stop)
+    if hasattr(signal, "SIGHUP"):  # absent on Windows
+        signal.signal(signal.SIGHUP, stop)
+    if hasattr(signal, "SIGBREAK"):  # Windows: Ctrl-Break stops the launcher like Ctrl-C
+        signal.signal(signal.SIGBREAK, stop)
     try:
         main()
     except KeyboardInterrupt:

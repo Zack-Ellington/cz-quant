@@ -334,6 +334,7 @@ class Engine:
     def price_pair(self) -> tuple[Basket | None, str]:
         """Read only the prepared pair. No listings, league scans or matching."""
         pair = self.pair
+        self.last_quotes: list[dict[str, str]] = []
         markets = {name: self.kalshi.market(name) for name, _ in pair.contracts("kalshi")}
         for name, market in markets.items():
             if market["ticker"] != name or market["event_ticker"] != pair.kalshi_event:
@@ -373,6 +374,11 @@ class Engine:
                     return None, "polymarket_not_trading"
                 ways.append(polymarket_offer(role, outcome.polymarket, pbooks[token], normalized["fee_schedule"]))
             offers[role] = ways
+        # Diagnostics only: each outcome's best ask (price, size) at each venue.
+        self.last_quotes = [{"role": way.role, "venue": way.venue, "ticker": way.ticker, "contract": way.contract,
+                             "ask": str(way.asks[0][0]) if way.asks else None,
+                             "size": str(way.asks[0][1]) if way.asks else None}
+                            for ways in offers.values() for way in ways]
         days = max((datetime.fromisoformat(pair.resolves_at).timestamp() - time.time()) / 86400, 1 / 24)
         return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, self.limits(),
                     Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr,
@@ -382,7 +388,8 @@ class Engine:
         self.counters["scans"] += 1
         basket, reason = self.price_pair()
         self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
-                                  "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None})
+                                  "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
+                                  "quotes": getattr(self, "last_quotes", [])})
         return basket
 
     # -- execution -------------------------------------------------------------

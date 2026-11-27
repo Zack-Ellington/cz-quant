@@ -41,3 +41,11 @@ Use one launcher per ledger. Other processes using the same pools must also be
 stopped before replacement. Completed-game inventory must settle through the
 account monitor before its pool can retire; this launcher never fabricates a
 settlement or clears an execution halt to bypass outstanding exposure.
+
+## Windows
+
+The launcher runs on Windows. The ledger lock uses a non-blocking byte-range lock
+(msvcrt) in place of flock. Each child runs in its own process group and is stopped
+with CTRL_BREAK_EVENT, then terminated if it has not exited within the wait.
+`--stop-launcher` is refused on Windows: without lsof and ps the lock owner can't be
+proven, so stop the previous launcher with Ctrl-C in its terminal before relaunching.

@@ -225,3 +225,122 @@ def test_polymarket_us_subs_share_the_account_and_its_activity_goes_to_the_reser
     assert (cash(store, "pmus:reserve"), cash(store, "game")) == (340, 200)
     assert status["balances"][0]["pools"] == ["pmus:reserve", "game"]
     assert SLUG
+
+
+def _pending_deposit(status="PENDING"):
+    return {"type": "ACTIVITY_TYPE_ACCOUNT_DEPOSIT", "accountBalanceChange": {
+        "transactionId": "ach1", "status": f"ACCOUNT_BALANCE_CHANGE_STATUS_{status}", "amount": {"value": "51"},
+        "createTime": "2000-01-01T00:00:00Z", "updateTime": "2000-01-01T00:00:01Z", "transactions": []}}
+
+
+class Clearing(FakeUS):
+    """A $51 ACH deposit clearing since before registration, counted in buying power."""
+
+    def __init__(self, status="PENDING", buying_power="51"):
+        super().__init__()
+        self.status, self.buying_power = status, buying_power
+
+    def private(self, method, path, params=None, body=None):
+        if path == "/v1/account/balances":
+            reservation = "51" if self.status == "PENDING" else "0"
+            current = "51" if self.status in ("PENDING", "COMPLETED") else "0"
+            return {"balances": [{"currency": "USD", "currentBalance": current, "depositReservation": reservation,
+                                  "buyingPower": self.buying_power}]}
+        if path == "/v1/portfolio/activities":
+            return {"activities": [_pending_deposit(self.status)], "eof": True}
+        return super().private(method, path, params, body)
+
+
+def test_buying_power_on_a_clearing_deposit_is_an_advance_booked_once(tmp_path):
+    store, us = Store(tmp_path), Clearing()
+    register_polymarket_us(store, us, "pmus")
+    assert cash(store, "pmus:reserve") == 0  # registration leaves the clearing deposit out
+    status = polymarket_us_pass(store, us)
+    assert status["status"] == "healthy", status["discrepancies"]
+    assert cash(store, "pmus:reserve") == 51
+    booked = [e["data"] for e in store.events("pmus:reserve", kinds=("transaction",)) if e["data"].get("purpose")]
+    assert sorted(d["purpose"] for d in booked) == ["account_opening", "buying_power_advance"]
+    open_sub(store, "game", "pmus", "16.66", api=us)  # the live backing check counts the advance
+    assert polymarket_us_pass(store, us)["status"] == "healthy"
+    assert cash(store, "pmus:reserve") + cash(store, "game") == 51  # not booked twice
+
+    # Completion adds nothing new; a failed transfer takes the advance back and is reported.
+    assert polymarket_us_pass(store, Clearing("COMPLETED"))["status"] == "healthy"
+    assert cash(store, "pmus:reserve") + cash(store, "game") == 51
+
+
+def test_a_failed_clearing_deposit_reverses_its_buying_power_advance(tmp_path):
+    store, us = Store(tmp_path), Clearing()
+    register_polymarket_us(store, us, "pmus")
+    polymarket_us_pass(store, us)
+    status = polymarket_us_pass(store, Clearing("FAILED", buying_power="0"))
+    assert cash(store, "pmus:reserve") == 0
+    assert any(d["kind"] == "deposit_failed" for d in status["discrepancies"])
+
+
+def test_buying_power_below_the_deposit_books_only_what_is_spendable(tmp_path):
+    store = Store(tmp_path)
+    register_polymarket_us(store, Clearing(), "pmus")
+    polymarket_us_pass(store, Clearing(buying_power="20"))
+    assert cash(store, "pmus:reserve") == 20
+
+
+def test_pool_reads_use_the_pool_index(tmp_path):
+    """A pool's events are read through its own index, not by scanning every event of a type."""
+    store = Store(tmp_path)
+    register_paper(store, "acct", "kalshi", "100")
+    plan = store.db.execute("EXPLAIN QUERY PLAN SELECT * FROM events INDEXED BY events_portfolio "
+                            "WHERE portfolio_id=? AND type IN ('order')", ("acct:reserve",)).fetchall()
+    assert any("events_portfolio" in row[3] for row in plan)
+    assert [i[1] for i in store.db.execute("PRAGMA index_list(orders)") if i[1].startswith("orders_")] \
+        == ["orders_venue", "orders_portfolio"] or {"orders_venue", "orders_portfolio"} <= \
+        {i[1] for i in store.db.execute("PRAGMA index_list(orders)")}
+    assert [e["type"] for e in store.events("acct:reserve", kinds=("transaction",))] == ["transaction"]
+
+
+def test_the_account_monitor_finishes_an_order_once(tmp_path):
+    store, api = Store(tmp_path), Kalshi("1000")
+    register_kalshi(store, api, "main", 0, primary=True)
+    open_sub(store, "a", "main", "100", api=api)
+    b = Broker(store, "a")
+    store.db.execute("INSERT INTO orders(id,portfolio_id,run_id,request,context,status,reserved,venue_id) "
+                     "VALUES('c1','a','r',?,'{}','acknowledged','5','v1')",
+                     ('{"ticker":"M","side":"bid","count":"10","price":"0.4"}',))
+    api.orders = [{"order_id": "v1", "status": "canceled", "fill_count_fp": "0"}]
+    original = api.pages
+    api.pages = lambda path, key, **p: iter(api.orders) if path == "/portfolio/orders" else original(path, key, **p)
+    for _ in range(3):
+        account_pass(store, api)
+    finished = [e for e in store.events("a", kinds=("order",)) if e["data"].get("status") == "canceled"]
+    assert len(finished) == 1 and b.available == 100
+
+
+ROUND_TRIP = {"event_ticker": "E", "exchange_index": 0, "fee_cost": "0.505800", "market_result": "yes",
+              "no_count_fp": "16.00", "revenue": 0, "settled_time": "2100-01-01T00:00:00Z", "ticker": "E-PHI",
+              "value": 100, "yes_count_fp": "16.00"}
+
+
+def test_a_bought_and_sold_back_market_settles_without_halting_the_account(tmp_path):
+    """Kalshi reports a closed round trip as 16 YES and 16 NO with no revenue."""
+    store, api = Store(tmp_path), Kalshi("1000")
+    register_kalshi(store, api, "main", 0, primary=True)
+    open_sub(store, "a", "main", "100", api=api)
+    open_sub(store, "b", "main", "100", api=api)
+    original = api.pages
+    api.pages = lambda path, key, **p: iter([ROUND_TRIP]) if path == "/portfolio/settlements" else original(path, key, **p)
+    status = account_pass(store, api)
+    assert not [d for d in status["discrepancies"] if d["kind"] == "unresolved_settlement"], status["discrepancies"]
+
+
+def test_an_unexplained_settlement_flags_only_the_pool_that_traded_it(tmp_path):
+    store, api = Store(tmp_path), Kalshi("1000")
+    register_kalshi(store, api, "main", 0, primary=True)
+    open_sub(store, "a", "main", "100", api=api)
+    open_sub(store, "b", "main", "100", api=api)
+    store.db.execute("INSERT INTO orders(id,portfolio_id,run_id,request,context,status,reserved) "
+                     "VALUES('c1','a','r',?,'{}','filled','0')", ('{"ticker":"E-PHI","side":"bid","count":"16","price":"0.67"}',))
+    original = api.pages
+    odd = {**ROUND_TRIP, "no_count_fp": "10.00"}  # net 6 YES the ledger never recorded
+    api.pages = lambda path, key, **p: iter([odd]) if path == "/portfolio/settlements" else original(path, key, **p)
+    flagged = {d["portfolio"] for d in account_pass(store, api)["discrepancies"] if d["kind"] == "unresolved_settlement"}
+    assert flagged == {"a"}

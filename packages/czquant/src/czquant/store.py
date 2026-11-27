@@ -85,6 +85,8 @@ class Store:
                 id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL, run_id TEXT,
                 request TEXT NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL,
                 reserved TEXT NOT NULL, filled TEXT NOT NULL DEFAULT '0', venue_id TEXT);
+            CREATE INDEX IF NOT EXISTS orders_portfolio ON orders(portfolio_id);
+            CREATE INDEX IF NOT EXISTS orders_venue ON orders(venue_id);
             CREATE TABLE IF NOT EXISTS checkpoints (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cash_pools (
                 id TEXT PRIMARY KEY REFERENCES portfolios(id), venue TEXT NOT NULL);
@@ -251,7 +253,12 @@ class Store:
                 return []
             conditions.append("type IN (" + ",".join("?" for _ in kinds) + ")")
             args.extend(kinds)
-        sql = "SELECT * FROM events" + (" WHERE " + " AND ".join(conditions) if conditions else "")
+        # With one pool named, read through its own index. SQLite otherwise prefers the
+        # type index and scans every event of those types in the whole ledger: on a
+        # large ledger that made each broker check take ~0.3 s and delayed live orders
+        # by seconds after their prices were read.
+        table = "events INDEXED BY events_portfolio" if portfolio is not None else "events"
+        sql = f"SELECT * FROM {table}" + (" WHERE " + " AND ".join(conditions) if conditions else "")
         return [{**dict(r), "data": json.loads(r["data"])} for r in self.db.execute(sql + " ORDER BY effective_at,sequence", args)]
 
     def reserved(self, portfolio: str) -> Decimal:
