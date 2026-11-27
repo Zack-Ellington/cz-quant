@@ -38,18 +38,16 @@ pools:
   - id: game-live-kalshi
     account: main-kalshi
     cash: 10
-    markets: [KXNFLGAME-EXAMPLE-PIT, KXNFLGAME-EXAMPLE-DEN]
   - id: game-live-us
     account: main-polymarket-us
     cash: 10
-    markets: [PMUS:example-market-slug]
 ```
 
-Replace the example market identifiers with the selected contracts, or omit
-markets to leave the allocation unrestricted. markets accepts a nonempty list
-of exact tickers or prefixes ending in *. Venue and paper/live mode come from
-the registered account; do not also specify venue. The command allocates each
-cash amount from that account's reserve using the existing open-sub checks.
+Portfolio configs select accounts and cash amounts. They do not select markets.
+Venue and paper/live mode come from the registered account; do not also specify
+venue. The command allocates each cash amount from that account's reserve using
+the existing open-sub checks, without a market restriction. Strategies select
+markets and submit orders; brokers enforce the venue and allocation constraints.
 No separate open-sub commands are needed. Live allocations require credentials
 and current venue cash backing; allocation does not deposit or transfer money
 at a venue.

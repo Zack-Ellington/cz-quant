@@ -5,13 +5,13 @@ from decimal import Decimal
 
 import pytest
 
-from czquant import Store, accounts, kalshi
+from czquant import Broker, Store, accounts, kalshi
 from czquant.accounting import portfolio_state
 from czquant.cli import main
 from czquant.polymarket_us import PolymarketUS
 from czquant.portfolios import create
 from test_polymarket_us import FakeUS
-from test_virtual_subaccounts import Kalshi
+from test_virtual_subaccounts import Fills, Kalshi, order
 
 
 @pytest.fixture
@@ -24,8 +24,8 @@ def allocation(tmp_path, monkeypatch):
     monkeypatch.setattr(kalshi, 'Kalshi', lambda: k)
     monkeypatch.setattr(PolymarketUS, 'from_env', lambda **kwargs: u)
     config = {'id': 'game', 'pools': [
-        {'id': 'game-k', 'account': 'kalshi-account', 'cash': 10, 'markets': ['KXGAME*']},
-        {'id': 'game-u', 'account': 'us-account', 'cash': 10, 'markets': ['PMUS:game']}]}
+        {'id': 'game-k', 'account': 'kalshi-account', 'cash': 10},
+        {'id': 'game-u', 'account': 'us-account', 'cash': 10}]}
     yield store, config, u
     store.close()
 
@@ -44,8 +44,11 @@ def test_cli_allocates_ten_per_venue_and_preserves_reserves(allocation, tmp_path
         assert portfolio_state(store, account + ':reserve').cash == 20
     pools = {p['id']: p for p in store.pools()}
     assert pools['game-k']['venue'] == 'kalshi' and pools['game-u']['venue'] == 'polymarket_us'
-    assert pools['game-k']['metadata']['markets'] == ['KXGAME*']
-    assert pools['game-u']['metadata']['markets'] == ['PMUS:game']
+    assert 'markets' not in pools['game-k']['metadata']
+    assert 'markets' not in pools['game-u']['metadata']
+    broker = Broker(store, 'game-k', Fills(mode='live'))
+    for market in ('KXGAME-ONE', 'KXOTHER-TWO'):
+        assert broker.submit(order(market, count='1'))['status'] == 'executed'
     assert venue.sent == []
     before = store.events()
     with pytest.raises(SystemExit):
@@ -69,7 +72,7 @@ def test_second_allocation_failure_rolls_back_first(allocation, failure):
         accounts.register_paper(store, 'paper', 'polymarket_us', '30')
         second['account'] = 'paper'
     elif failure == 'markets':
-        second['markets'] = 'PMUS:game'
+        second['markets'] = ['PMUS:game']
     else:
         second['venue'] = 'kalshi'
     before, pools = store.events(), store.pools()

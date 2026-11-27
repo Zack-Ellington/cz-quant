@@ -37,9 +37,8 @@ def create(store: Store, config: dict[str, Any]) -> str:
                 raise ValueError('a pool must be an existing ID or a mapping')
             account_backed = 'account' in item
             required = {'id', 'account', 'cash'} if account_backed else {'id', 'venue', 'cash'}
-            allowed = required | {'markets'} if account_backed else required
-            if not required <= item.keys() or item.keys() - allowed:
-                raise ValueError('new pools require id, cash and either account (optional markets) or venue (paper only)')
+            if set(item) != required:
+                raise ValueError('new pools require exactly id, cash and either account or venue (paper only)')
             if not isinstance(item['id'], str) or not item['id'].strip():
                 raise ValueError('pool id must be a nonempty string')
             cash = decimal(str(item['cash']))
@@ -48,11 +47,7 @@ def create(store: Store, config: dict[str, Any]) -> str:
             if account_backed:
                 if not isinstance(item['account'], str) or not item['account'].strip():
                     raise ValueError('account must be a registered account ID')
-                markets = item.get('markets')
-                if 'markets' in item and (not isinstance(markets, list) or not markets
-                                         or not all(isinstance(m, str) and m.strip() for m in markets)):
-                    raise ValueError('markets must be a nonempty list of market tickers or prefixes')
-                open_sub(store, item['id'], item['account'], str(cash), markets=markets)
+                open_sub(store, item['id'], item['account'], str(cash))
             else:
                 if item['venue'] not in ('kalshi', 'polymarket', 'polymarket_us', 'polymarket-us'):
                     raise ValueError('unknown pool venue')

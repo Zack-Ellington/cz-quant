@@ -148,9 +148,9 @@ the [virtual-subaccount guide](../../docs/services/virtual-subaccounts.md):
 register each venue account with czquant account, then specify account and cash
 for each pool in a [live portfolio config](experiments/portfolio-live.example.yaml).
 czquant portfolios create --config FILE.yaml allocates from both reserves and
-creates the portfolio atomically. Select its ID in the runner config. Optional
-markets lists in the portfolio config restrict each allocation; these scopes are
-enforced by the brokers. Several US pools require account-wide reconciliation;
+creates the portfolio atomically. The portfolio selects accounts and cash only.
+The runner config selects the portfolio ID and the market pair; brokers enforce
+venue ownership and available cash. Several US pools require account-wide reconciliation;
 repeating map-live cannot prepare these allocations. Registered accounts also
 prevent experiments from opening opposite sides of the same market.
 Set mode to live, select the live pool IDs and set parameters.dry_run to true
