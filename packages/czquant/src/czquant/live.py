@@ -12,6 +12,7 @@ synchronous execution reports (czquant.polymarket_us).
 
 from __future__ import annotations
 
+from decimal import InvalidOperation
 from typing import Any
 
 from .broker import Broker
@@ -43,6 +44,17 @@ class KalshiLive:
         venue_id = body.get("order_id")
         raw_fill = body.get("fill_count_fp", body.get("fill_count"))
         status = KALSHI_TERMINAL.get(body.get("status", ""))
+        # V2 create replies omit status. Explicit zero remaining quantity proves
+        # completion; a partial IOC cancels its unfilled remainder. Never infer
+        # completion from HTTP success, the requested TIF, or fill count alone.
+        if "status" not in body and venue_id and raw_fill is not None and body.get("remaining_count") is not None:
+            try:
+                filled, remaining = decimal(raw_fill), decimal(body["remaining_count"])
+                requested = decimal(order["count"])
+                if filled.is_finite() and remaining.is_finite() and 0 <= filled <= requested and remaining == 0:
+                    status = "filled" if filled == requested else "canceled"
+            except (InvalidOperation, TypeError, ValueError):
+                pass  # Preserve ambiguous evidence for account-monitor recovery.
         broker.acknowledge(identifier, venue_id, response, raw_fill, terminal=status is not None)
         if raw_fill is None or status is None:
             # An IOC that isn't terminal in its own reply is unexpected: report it, never guess.

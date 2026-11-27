@@ -326,6 +326,39 @@ def test_kalshi_unknown_reply_persists_unknown_and_keeps_only_its_venue_reserved
     assert not broker.state().lots
 
 
+@pytest.mark.parametrize("tif", ["immediate_or_cancel", "fill_or_kill"])
+@pytest.mark.parametrize("filled,status", [("4.00", "filled"), ("2.00", "canceled"), ("0.00", "canceled")])
+def test_kalshi_v2_terminal_counts_support_next_leg_without_booking_fills(live, tif, filled, status):
+    store, _, kalshi = live
+    kalshi.create_order = lambda order: {"order_id": "v2-order", "client_order_id": order["client_order_id"],
+        "fill_count": filled, "remaining_count": "0.00", "average_fill_price": "0.5", "average_fee_paid": "0.01"}
+    broker = Broker(store, "x:kalshi", KalshiLive(kalshi))
+    result = broker.submit({"ticker": "M", "side": "bid", "count": "4", "price": "0.5", "time_in_force": tif})
+    assert result["status"] == status and D(result["filled"]) == D(filled)
+    ack = [e["data"] for e in store.events(kinds=("order",)) if e["data"].get("status") == "acknowledged"][-1]
+    assert ack["terminal"] and D(ack["confirmed_filled"]) == D(filled)
+    assert broker.available < 300 and broker.state().cash == 300 and not broker.state().lots
+
+
+@pytest.mark.parametrize("response", [
+    {"fill_count": "2.00", "remaining_count": "2.00"},
+    {"fill_count": "4.00"},
+    {"remaining_count": "0.00"},
+    {"fill_count": "4.00", "remaining_count": "-1.00"},
+    {"fill_count": "4.00", "remaining_count": "NaN"},
+    {"fill_count": "4.00", "remaining_count": "invalid"},
+    {"fill_count": "4.00", "remaining_count": "0.00", "status": "resting"},
+])
+def test_kalshi_v2_incomplete_or_conflicting_evidence_remains_unknown(live, response):
+    store, _, kalshi = live
+    kalshi.create_order = lambda order: {"order_id": "v2-order", **response}
+    broker = Broker(store, "x:kalshi", KalshiLive(kalshi))
+    result = broker.submit({"ticker": "M", "side": "bid", "count": "4", "price": "0.5",
+                            "time_in_force": "immediate_or_cancel"})
+    assert result["status"] == "unknown"
+    assert broker.orders()[0]["status"] == "unknown" and store.reserved(broker.pool_id) > 0
+
+
 @pytest.mark.parametrize("account_still_holds", [False, True])
 def test_live_resolution_needs_account_payout_and_retired_position(live, account_still_holds):
     store, us, _ = live
