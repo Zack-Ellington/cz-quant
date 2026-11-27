@@ -100,3 +100,27 @@ def test_only_confirmed_empty_ioc_gets_short_cooldown(setup, monkeypatch, status
     engine.step()
     assert engine.cooldown_until == now + expected
     assert not store.events(kinds=("execution",))
+
+
+
+def test_empty_ioc_cooldown_survives_ledger_resume_and_restart(setup, monkeypatch):
+    import time
+    store, create, build = setup
+    spec = create()
+    engine = build(spec, profit_slippage=True, max_basket_dollars=50)
+    def empty(order, broker):
+        broker.finish(order["client_order_id"], "canceled")
+        return {"status": "canceled", "filled": "0"}
+    for broker in engine.brokers.values():
+        monkeypatch.setattr(broker.adapter, "create_order", empty)
+    before = time.time()
+    engine.step()
+    assert store.events(kinds=("order",))
+    assert before < engine.cooldown_until <= time.time() + 1.01
+    deadline = engine.cooldown_until
+    engine.resume()
+    assert engine.cooldown_until == deadline
+    restarted = build(spec, profit_slippage=True, max_basket_dollars=50)
+    assert restarted.cooldown_until == deadline
+    monkeypatch.setattr("trader.time.time", lambda: deadline + .01)
+    assert restarted.risk_block() is None

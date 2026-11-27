@@ -175,14 +175,19 @@ class Engine:
         self.bankroll = state.contributed
         events = active_events(sorted(
             [e for b in self.brokers.values() for e in self.store.events(b.pool_id,
-             kinds=("transaction", "observation", "correction", "order"), observations=("halt", "halt_cleared", "basket_settled"))],
+             kinds=("transaction", "observation", "correction", "order"), observations=("halt", "halt_cleared", "basket_settled", "basket_execution"))],
             key=lambda e: (e["effective_at"], e["sequence"])))
+        empty_cooldowns = {e["data"]["context"]["trade_id"]: float(e["data"]["zero_fill_cooldown_until"])
+                           for e in events if e["type"] == "observation"
+                           and e["data"].get("kind") == "basket_execution"
+                           and "zero_fill_cooldown_until" in e["data"]}
         for event in events:
             data = event["data"]
             if event["type"] == "order" and data.get("status") == "intent":
                 game = data.get("context", {}).get("kalshi_event")
                 if game == self.pair.kalshi_event:
-                    until = datetime.fromisoformat(event["effective_at"]).timestamp() + self.cfg.cooldown
+                    until = empty_cooldowns.get(data.get("context", {}).get("trade_id"),
+                              datetime.fromisoformat(event["effective_at"]).timestamp() + self.cfg.cooldown)
                     self.cooldown_until = max(self.cooldown_until, until)
         observations = [e for e in events if e["type"] == "observation"]
         cleared = {e["data"]["halt_id"] for e in observations if e["data"].get("kind") == "halt_cleared"}
@@ -517,13 +522,15 @@ class Engine:
                 self.halt("basket repair failed; waiting for automatic sell recovery", recoverable=True)
                 failure = failure or exc
                 break
+        cooldown_record: dict[str, Any] = {}
         if (failure is None and not self.halted and len(outcomes) == 1
                 and outcomes[0].get("status") == "canceled"
                 and decimal(outcomes[0].get("filled", "-1")) == 0):
             # A confirmed empty IOC has no inventory to protect. Retry only after
             # a short backoff and the next scan's fresh prices and preflight.
             self.cooldown_until = time.time() + 1.0
-        self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
+            cooldown_record["zero_fill_cooldown_until"] = self.cooldown_until
+        self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes, **cooldown_record})
         self.resume()
         if failure is not None:
             # Keep the recovery loop alive after a transport failure. Durable
