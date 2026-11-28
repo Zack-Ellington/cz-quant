@@ -228,4 +228,4 @@ the core accounting package. They read the same ledger in read-only mode.
 Cross-market decision charts consume scan_complete quote payloads, while trade
 markers and balances come from broker and account-monitor evidence. Companions
 have no exchange connections and do not replace missing scan data with reference
-marks. See the [service connection and capture contract](../design-principles.md#service-connections-and-decision-capture).
+marks. See the [strategy's capture format](../../strategies/cross-market-polymarket/README.md#streaming-execution-quotes).

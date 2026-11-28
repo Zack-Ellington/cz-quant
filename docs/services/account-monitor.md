@@ -164,4 +164,4 @@ Account reconciliation currently polls REST independently of strategy market-dat
 WebSockets. Keep it running while orders, positions, or uncertain writes need
 recovery. Market-feed liveness is not proof that account evidence is current.
 Dashboards consume the resulting ledger evidence without account credentials or
-additional venue connections; see the [service connection contract](../design-principles.md#service-connections-and-decision-capture).
+additional venue connections; see the [reporting guide](reporting.md#experiment-companions).

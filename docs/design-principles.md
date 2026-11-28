@@ -225,8 +225,6 @@ A retry with an existing client order ID returns the stored order rather than
 sending another order. A new submission returns the adapter's response; paper
 responses include status and filled quantity, while live responses can remain
 venue-shaped. Callers must not assume every response is a completed execution.
-Immediate execution evidence may inform strategy decisions, but must not create
-spendable cash before accounting or cause the same execution to be counted twice.
 Unknown live writes retain their reservations for reconciliation. Exact result
 normalization is an implementation concern to keep explicit when changing the
 interface.
@@ -314,26 +312,6 @@ Optional context can hold intended baskets, model outputs, expected returns,
 or immutable artifact references. These observations never determine realized
 profit. Paper fills also retain the fill-policy version, source observations,
 timing, depth, and fee assumptions needed to interpret the simulation.
-
-### Service connections and decision capture
-
-A strategy owns the market connections and freshness policy required for its
-decisions. Connection liveness and evidence that a book is current are distinct.
-Missing evidence must remain explicit; a reconnect does not itself establish
-that cached data is current. Venue protocols and reader policies belong in the
-relevant service or strategy guide.
-
-Account and market monitors own their service connections and continue after a
-strategy stops. Services do not depend on a dashboard to keep a connection alive.
-Independent subscriptions are allowed when services have different coverage or
-lifetimes. Neither a shared feed nor a particular transport is required by the
-broker contract.
-
-Decision captures are optional strategy diagnostics, not execution receipts or
-a mandatory research schema. Independent reports may interpret them without
-owning execution or maintaining a second economic ledger. Missing captures
-remain visible gaps; later reference quotes cannot reconstruct an earlier
-decision.
 
 ### Account evidence
 
