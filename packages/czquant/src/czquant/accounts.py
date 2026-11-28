@@ -110,6 +110,21 @@ def _pmus_cash(balance: dict[str, Any]) -> Decimal:
     return decimal(balance["currentBalance"]) - decimal(balance.get("depositReservation") or 0)
 
 
+def pending_advances(store: Store) -> Decimal:
+    """Advances the monitor booked on Polymarket US deposits that are still clearing:
+    neither completed (then booked in full) nor reversed."""
+    total = ZERO
+    for row in store.db.execute("SELECT source_key, data FROM events WHERE source_key LIKE 'pmus-advance:%' "
+                                "AND source_key NOT LIKE '%:reversed'"):
+        txid = row["source_key"].split(":", 1)[1]
+        settled = store.db.execute(
+            "SELECT 1 FROM events WHERE source_key=? OR source_key LIKE ?",
+            (row["source_key"] + ":reversed", f"pmus-activity:%:{txid}")).fetchone()
+        if not settled:
+            total += decimal(json.loads(row["data"])["cash_delta"])
+    return total
+
+
 def register_polymarket_us(store: Store, api: Any, identifier: str) -> None:
     """Register the Polymarket US account. A pool mapped to it before registration
     becomes a member; the reserve opens with the cash none of its pools records."""
@@ -192,7 +207,10 @@ def _check_live_cash(store: Store, p: dict[str, Any], api: Any = None) -> dict[s
         from .polymarket_us import PolymarketUS
         api = api or PolymarketUS.from_env(authenticated=True)
         balance = api.balance()
-        observed = _pmus_cash(balance)
+        # Cash still clearing backs the pools only as far as the monitor booked it as an
+        # advance (buying power), and never beyond what Polymarket holds in reservation.
+        clearing = decimal(balance.get("depositReservation") or 0)
+        observed = _pmus_cash(balance) + min(clearing, pending_advances(store))
     else:
         raise ValueError(f"live allocation is unsupported for {p['venue']}")
     recorded = sum(balances, ZERO)

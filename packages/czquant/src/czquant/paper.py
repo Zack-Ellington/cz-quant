@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any
 
-from .broker import Broker
+from .broker import Broker, execution_summary
 from .store import decimal, utc
 
 
@@ -18,12 +19,16 @@ class Paper:
     venue = "kalshi"
     policy = "ioc-depth-v1"
 
-    def __init__(self, client: Any, latency: float = 0.3):
+    def __init__(self, client: Any, latency: float = 0.3, *,
+                 fee_schedule: Callable[[dict[str, Any]], dict[str, Any]] | None = None):
         self.client, self.latency = client, latency
+        self._fee_schedule = fee_schedule
         self.series: dict[str, Any] = {}
 
     def fee_schedule(self, market: dict[str, Any]) -> dict[str, Any]:
-        """The market's taker fee schedule: its Kalshi series, read once per series."""
+        """Use the supplied reader, or fetch and cache the market's Kalshi series."""
+        if self._fee_schedule is not None:
+            return self._fee_schedule(market)
         series_id = market.get("series_ticker") or market.get("event_ticker", "").split("-")[0]
         if series_id not in self.series:
             self.series[series_id] = self.client.get(f"/series/{series_id}").get("series", {})
@@ -90,6 +95,7 @@ class Paper:
                         "fee_schedule": schedule, "levels": [[str(p), str(q)] for _, p, q in fills],
                         "latency_seconds": self.latency}
             store.append("market", {"ticker": ticker, "market": market, "book": raw}, source=None, at=observed)
+            receipts = []
             if quantity:
                 average = sum((p * q for _, p, q in fills), Decimal(0)) / quantity
                 # Check exact cash effects including closing opposing positions and fees.
@@ -108,6 +114,7 @@ class Paper:
                 for index, (_, price, qty) in enumerate(fills):
                     allocated_fee = (fee * qty / quantity).quantize(Decimal("0.0001"), rounding=ROUND_DOWN) if index < len(fills)-1 else remaining_fee
                     remaining_fee -= allocated_fee
+                    receipts.append((price, qty, allocated_fee))
                     broker.fill(identifier, str(qty), str(price), str(allocated_fee),
                                 f"paper:{identifier}:{index}", evidence)
                 for native_price, _, qty in fills:
@@ -116,7 +123,8 @@ class Paper:
                                      (broker.pool_id, ticker, source_side, str(native_price), str(current)))
             broker.finish(identifier, "filled" if quantity == requested else "canceled")
             return {"client_order_id": identifier, "status": "filled" if quantity == requested else "canceled",
-                    "filled": str(quantity), "fee": str(fee), "evidence": evidence}
+                    "filled": str(quantity), "fee": str(fee), "evidence": evidence,
+                    **({"execution": execution_summary(receipts)} if receipts else {})}
 
 
 def update_consumed(store: Any, ticker: str, book: dict[str, Any], now: float) -> None:

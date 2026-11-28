@@ -41,7 +41,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from .http_errors import raise_for_status
-from .broker import Broker
+from .broker import Broker, execution_summary
 from .paper import Paper
 from .store import decimal
 
@@ -362,6 +362,7 @@ class PolymarketUSLive:
     def book(broker: Broker, identifier: str, venue_id: str | None, executions: list[dict[str, Any]],
              response: dict[str, Any]) -> dict[str, Any]:
         state = None
+        receipts = []
         for execution in executions:
             qty = decimal(execution.get("lastShares") or "0")
             if qty > 0:
@@ -369,6 +370,7 @@ class PolymarketUSLive:
                 if price is None:
                     raise ValueError("execution lacks a price")
                 charge = amount(execution.get("commissionNotionalCollected")) or Decimal(0)
+                receipts.append((price, qty, charge))
                 broker.fill(identifier, str(qty), str(price), str(charge), f"pmus-exec:{execution['id']}",
                             {"venue": VENUE, "venue_order_id": venue_id, "trade_id": execution.get("tradeId"),
                              "execution": execution})
@@ -383,7 +385,8 @@ class PolymarketUSLive:
             broker.finish(identifier, "unknown", release=False)
             status = "unknown"
         return {"client_order_id": identifier, "status": status, "filled": str(filled),
-                "order": {"order_id": venue_id}, "response": response}
+                "order": {"order_id": venue_id}, "response": response,
+                **({"execution": execution_summary(receipts)} if receipts else {})}
 
 
 class PolymarketUSPaper(Paper):

@@ -28,19 +28,23 @@ class Kalshi:
                 Path(os.environ["KALSHI_PRIVATE_KEY_PATH"]).expanduser().read_bytes(), password=None)
         self.http = httpx.Client(timeout=30)
 
+    def headers(self, method: str, path: str) -> dict[str, str]:
+        """Sign an HTTP or WebSocket handshake path, without query parameters."""
+        if not self.key:
+            return {}
+        ts = str(int(time.time() * 1000))
+        message = (ts + method + path.split("?", 1)[0]).encode()
+        signature = self.key.sign(message) if isinstance(self.key, ed25519.Ed25519PrivateKey) else self.key.sign(
+            message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH), hashes.SHA256())
+        return {"KALSHI-ACCESS-KEY": str(self.key_id), "KALSHI-ACCESS-TIMESTAMP": ts,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode()}
+
     def request(self, method: str, path: str, data: dict[str, Any] | None = None,
                 params: Any = None) -> dict[str, Any]:
         url = self.base + path
         # Only reads are automatically retried. Uncertain writes are reconciled.
         for attempt in range(5 if method == "GET" else 1):
-            headers = {}
-            if self.key:
-                ts = str(int(time.time() * 1000))
-                message = (ts + method + urlparse(url).path).encode()
-                signature = self.key.sign(message) if isinstance(self.key, ed25519.Ed25519PrivateKey) else self.key.sign(
-                    message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH), hashes.SHA256())
-                headers = {"KALSHI-ACCESS-KEY": self.key_id, "KALSHI-ACCESS-TIMESTAMP": ts,
-                           "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode()}
+            headers = self.headers(method, urlparse(url).path)
             ratelimit.acquire()
             response = self.http.request(method, url, headers=headers, json=data, params=params)
             if response.status_code == 429:

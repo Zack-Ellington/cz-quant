@@ -6,6 +6,9 @@ supported paper positions. They run outside strategy processes and continue
 after strategies stop. Strategy authors may use their own market readers;
 they need not call these collectors.
 
+The collectors poll REST and retain each reference's observation time.
+Strategies that use these references choose their own freshness policy.
+
 Use the [shared setup](../../README.md#shared-services). Run commands from
 packages/czquant with the same STRATEGY_RUNS_DIR as execution. The common
 record types and time semantics are in the

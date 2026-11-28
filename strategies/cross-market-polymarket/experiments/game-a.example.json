@@ -31,7 +31,7 @@
     }
   },
   "parameters": {
-    "interval_seconds": 15,
+    "interval_seconds": 0.1,
     "max_sets": 20,
     "risk_free": 0.05,
     "min_net": 0,
@@ -40,7 +40,6 @@
     "require_cross": true,
     "kalshi_latency": 0.3,
     "polymarket_latency": 0.5,
-    "cooldown": 300,
     "duration_minutes": null,
     "dry_run": false,
     "pmus_theta": null,

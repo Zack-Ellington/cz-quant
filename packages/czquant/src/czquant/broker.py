@@ -19,6 +19,15 @@ PRIMARY = 0  # the account itself; Kalshi's default when no subaccount is named
 FEE_ALLOWANCE = {"kalshi": Decimal("0.0175"), "polymarket_us": Decimal("0.025")}
 
 
+def execution_summary(fills: list[tuple[Decimal, Decimal, Decimal]]) -> dict[str, str]:
+    """Quantity, YES notional, fees and price bounds from authoritative fills."""
+    return {"quantity": str(sum((q for _, q, _ in fills), Decimal(0))),
+            "yes_notional": str(sum((p * q for p, q, _ in fills), Decimal(0))),
+            "fee": str(sum((f for _, _, f in fills), Decimal(0))),
+            "yes_price_min": str(min(p for p, _, _ in fills)),
+            "yes_price_max": str(max(p for p, _, _ in fills))}
+
+
 def scope(metadata: dict[str, Any]) -> dict[str, Any]:
     """Request parameters naming a live portfolio's account. The primary account
     (mapped with --primary-account) is named by omission: no subaccount field."""
