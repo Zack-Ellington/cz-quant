@@ -193,3 +193,17 @@ The source is [broker.py](../../packages/czquant/src/czquant/broker.py),
 [kalshi.py](../../packages/czquant/src/czquant/kalshi.py),
 [paper.py](../../packages/czquant/src/czquant/paper.py), and
 [operator.py](../../packages/czquant/src/czquant/operator.py).
+
+## Immediate execution evidence
+
+For terminal V2 IOC/FOK replies, the live adapter returns confirmed quantity and,
+when valid averages are present, an execution summary with YES notional, total
+fees and individual-price bounds. Notional and fees use the response averages;
+the submitted limit supplies the conservative bound for partial matching.
+Missing or invalid averages leave the summary absent and produce a diagnostic.
+Strategies must not assume that the filled count implies priced accounting lots.
+
+The raw response is durable in the order acknowledgement. The account monitor
+books exact fills once and releases filled reservations. A confirmed terminal
+zero-fill reply releases its reservation immediately. See the venue's
+[create-order response](https://docs.kalshi.com/api-reference/orders/create-order-v2).

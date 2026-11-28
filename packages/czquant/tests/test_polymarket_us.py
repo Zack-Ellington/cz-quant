@@ -368,7 +368,13 @@ def test_kalshi_v2_terminal_counts_support_next_leg_without_booking_fills(live, 
     assert result["status"] == status and D(result["filled"]) == D(filled)
     ack = [e["data"] for e in store.events(kinds=("order",)) if e["data"].get("status") == "acknowledged"][-1]
     assert ack["terminal"] and D(ack["confirmed_filled"]) == D(filled)
-    assert broker.available < 300 and broker.state().cash == 300 and not broker.state().lots
+    assert (broker.available < 300) == (D(filled) > 0)
+    assert broker.state().cash == 300 and not broker.state().lots
+    if D(filled):
+        assert D(result["execution"]["yes_notional"]) == D(filled) * D("0.5")
+        assert D(result["execution"]["fee"]) == D(filled) * D("0.01")
+    else:
+        assert not broker.orders(("acknowledged",))
 
 
 @pytest.mark.parametrize("response", [
@@ -457,3 +463,33 @@ def test_live_mutations_cannot_cross_venue_or_exceed_adapter_capabilities(live, 
     with pytest.raises(NotImplementedError, match="does not support"):
         getattr(broker, operation)(*args)
     assert store.events() == before
+
+
+@pytest.mark.parametrize('side,average,limit', [('bid', '.42', '.5'), ('ask', '.58', '.5')])
+def test_kalshi_execution_summary_uses_limit_for_individual_fill_bounds(live, side, average, limit):
+    store, _, kalshi = live
+    kalshi.create_order = lambda order: {'order_id': 'v2-summary', 'fill_count': '4', 'remaining_count': '0',
+        'average_fill_price': average, 'average_fee_paid': '.0125'}
+    broker = Broker(store, 'x:kalshi', KalshiLive(kalshi))
+    result = broker.submit({'ticker': 'M', 'side': side, 'count': '4', 'price': limit,
+                            'time_in_force': 'immediate_or_cancel'})
+    summary = result['execution']
+    assert D(summary['yes_notional']) == D(average) * 4
+    assert D(summary['fee']) == D('.05')
+    assert D(summary['yes_price_max' if side == 'bid' else 'yes_price_min']) == D(limit)
+    assert not store.events('x:kalshi', kinds=('execution',))
+
+
+@pytest.mark.parametrize('fields', [{}, {'average_fill_price': '.5'},
+    {'average_fill_price': 'NaN', 'average_fee_paid': '.01'},
+    {'average_fill_price': '.51', 'average_fee_paid': '.01'},
+    {'average_fill_price': '.5', 'average_fee_paid': '-.01'}])
+def test_kalshi_invalid_cost_evidence_does_not_invent_zero_fees(live, fields):
+    store, _, kalshi = live
+    kalshi.create_order = lambda order: {'order_id': 'v2-summary', 'fill_count': '4', 'remaining_count': '0', **fields}
+    broker = Broker(store, 'x:kalshi', KalshiLive(kalshi))
+    result = broker.submit({'ticker': 'M', 'side': 'bid', 'count': '4', 'price': '.5',
+                            'time_in_force': 'immediate_or_cancel'})
+    assert result['filled'] == '4' and 'execution' not in result
+    assert broker.available < broker.state().cash
+    assert store.events('x:kalshi', kinds=('observation',), observations=('execution_evidence_unavailable',))

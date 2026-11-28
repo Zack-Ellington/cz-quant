@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 """The trader on Polymarket US: pairing, paper fills, and the live guards (dry run)."""
 from decimal import Decimal as D
 
@@ -42,7 +43,8 @@ class FakeUSVenue(PolymarketUS):
         return [market()] if ids == ["m1"] else []
 
     def book_raw(self, slug):
-        return {"marketData": {"marketSlug": slug, "bids": [{"px": {"value": "0.62"}, "qty": self.depth}],
+        return {"marketData": {"marketSlug": slug, "state": "MARKET_STATE_OPEN",
+            "transactTime": datetime.now(timezone.utc).isoformat(), "bids": [{"px": {"value": "0.62"}, "qty": self.depth}],
                                "offers": [{"px": {"value": "0.66"}, "qty": self.depth}]}}
 
     def market_raw(self, slug):

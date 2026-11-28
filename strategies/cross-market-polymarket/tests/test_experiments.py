@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 """Isolated allocations and sequential failure recovery, entirely offline."""
 import json
 from dataclasses import asdict, replace
@@ -97,7 +98,7 @@ def test_two_experiments_trade_only_their_pair_and_keep_separate_cash(setup, mod
     store, create, build = setup
     a, b = build(create("a", mode)), build(create("b", mode))
     if b.experiment.id == "b":
-        b.poly.book_raw = lambda slug: {"marketData": {"marketSlug": slug,
+        b.poly.book_raw = lambda slug: {"marketData": {"marketSlug": slug, "state": "MARKET_STATE_OPEN", "transactTime": datetime.now(timezone.utc).isoformat(),
             "bids": [{"px": {"value": "0.80"}, "qty": "10"}],
             "offers": [{"px": {"value": "0.82"}, "qty": "10"}]}}
     assert b.scan().apr > a.scan().apr
@@ -189,14 +190,13 @@ def test_complete_basket_limit_cost_must_fit_both_allocations(setup, monkeypatch
         if leg["venue"] == "kalshi":
             leg["limit"] = "0.99"
     store.append("transaction", {"reason": "funding", "cash_delta": "-44", "external_delta": "-44", "legs": []}, engine.kalshi_broker.pool_id)
-    monkeypatch.setattr(engine, "price_pair", lambda *_: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **kw: (basket, "ok"))
     engine.execute(basket)
     rejected = [e["data"] for e in store.events(kinds=("observation",)) if e["data"].get("kind") == "reject"]
     assert rejected[-1]["reason"] == "basket_preflight"
     assert not store.events(kinds=("order", "execution"))
 
     store.append("transaction", {"reason": "funding", "cash_delta": "44", "external_delta": "44", "legs": []}, engine.kalshi_broker.pool_id)
-    engine.cooldown_until = 0
     engine.step()
     assert engine.counters["baskets"] == 1
 
@@ -256,7 +256,7 @@ def test_unknown_later_leg_keeps_known_fill_and_halts_for_reconciliation(setup, 
     assert store.events(kinds=("order",)) == orders
 
 
-def test_restart_keeps_inventory_cash_and_cooldown_without_funding(setup):
+def test_restart_keeps_inventory_cash_without_funding(setup):
     store, create, build = setup
     spec = create()
     engine = build(spec)
@@ -264,7 +264,6 @@ def test_restart_keeps_inventory_cash_and_cooldown_without_funding(setup):
     orders = store.events(kinds=("order",))
     balances = [b.available for b in engine.brokers.values()]
     restarted = build(spec)
-    restarted.step()
     assert [b.available for b in restarted.brokers.values()] == balances
     assert restarted.positions == engine.positions
     assert store.events(kinds=("order",)) == orders
@@ -314,10 +313,10 @@ def test_incomplete_repair_is_retried_after_restart(setup, monkeypatch):
 
 def test_loader_records_all_resolved_parameters_and_rejects_unknown_keys(tmp_path):
     path = tmp_path / "experiment.json"
-    data = {**asdict(experiment()), "parameters": {"max_sets": 7, "cooldown": 12}}
+    data = {**asdict(experiment()), "parameters": {"max_sets": 7, "interval_seconds": 0.05}}
     path.write_text(json.dumps(data))
     cfg = load_experiment(str(path))
-    assert cfg.max_sets == 7 and cfg.cooldown == 12 and cfg.max_basket_dollars == 25
+    assert cfg.max_sets == 7 and cfg.interval_seconds == 0.05 and cfg.max_basket_dollars == 25
     data["parameters"]["max_setz"] = 8
     path.write_text(json.dumps(data))
     with pytest.raises(TypeError):
@@ -325,7 +324,7 @@ def test_loader_records_all_resolved_parameters_and_rejects_unknown_keys(tmp_pat
 
 
 @pytest.mark.parametrize("parameters", [
-    {"max_sets": 0}, {"cooldown": -1},
+    {"max_sets": 0}, {"interval_seconds": 0},
     {"unwind_slippage": 0.05}, {"live": True}, {"dry_run": True},
 ])
 def test_invalid_parameters_fail_before_any_engine_exists(tmp_path, parameters):
@@ -341,7 +340,7 @@ def test_selected_basket_cannot_substitute_an_unrelated_contract(setup, monkeypa
     basket = engine.scan()
     assert basket is not None
     basket.legs[0]["ticker"] = "KXOTHER-GAME-BOS"
-    monkeypatch.setattr(engine, "price_pair", lambda *_: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **kw: (basket, "ok"))
     with pytest.raises(ValueError, match="outside the selected pair"):
         engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
@@ -371,7 +370,7 @@ def test_preflight_reconciliation_change_rejects_without_crashing(setup, monkeyp
 def test_live_kalshi_acknowledgement_pauses_until_monitor_books_fills(setup, reconcile_quantity):
     store, create, build = setup
     spec = create(mode="live")
-    engine = build(spec, cooldown=0)
+    engine = build(spec)
 
     class FilledKalshi:
         def create_order(self, order):
@@ -386,7 +385,7 @@ def test_live_kalshi_acknowledgement_pauses_until_monitor_books_fills(setup, rec
     assert engine.live_block() == "awaiting_reconciliation"
     orders = store.events(kinds=("order",))
     engine.step()
-    restarted = build(spec, cooldown=0)
+    restarted = build(spec)
     restarted.step()
     assert not restarted.halted
     assert store.events(kinds=("order",)) == orders
@@ -415,7 +414,7 @@ def test_same_market_opposite_basket_legs_are_rejected_before_submission(setup, 
     assert basket is not None
     for leg in basket.legs:
         leg.update(ticker="PMUS:" + SLUG, venue="polymarket_us", contract=engine.pair.outcomes[int(leg["role"])].polymarket_side)
-    monkeypatch.setattr(engine, "price_pair", lambda *_: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda *_, **kw: (basket, "ok"))
     engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
     assert "opposite" in store.events(kinds=("observation",), observations=("reject",))[-1]["data"]["detail"]
@@ -429,7 +428,7 @@ def pool_sizing_engine(setup, mode='paper', kalshi_price='.16', us_price='.79', 
         store.append('transaction', {'reason': 'funding', 'cash_delta': str(delta),
                                     'external_delta': str(delta), 'legs': []}, broker.pool_id)
     engine.kalshi.asks = {'BOS': kalshi_price, 'SAC': '.99'}
-    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug, 'state': 'MARKET_STATE_OPEN', 'transactTime': datetime.now(timezone.utc).isoformat(),
         'bids': [{'px': {'value': str(1-D(us_price))}, 'qty': '100'}],
         'offers': [{'px': {'value': str(1-D(us_price)+D('.02'))}, 'qty': '100'}]}}
     return engine
@@ -484,7 +483,7 @@ def test_sizing_subtracts_pending_reservations_and_ignores_other_pools(setup):
 
 def test_sizing_uses_limit_cost_when_depth_crosses_a_price_level(setup):
     engine = pool_sizing_engine(setup, kalshi_price='.10', us_cash='5')
-    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug, 'state': 'MARKET_STATE_OPEN', 'transactTime': datetime.now(timezone.utc).isoformat(),
         'bids': [{'px': {'value': '.80'}, 'qty': '5'}, {'px': {'value': '.20'}, 'qty': '100'}],
         'offers': [{'px': {'value': '.82'}, 'qty': '100'}]}}
     # Seven cost only 2.60 at VWAP but require >5 at the .80 limit. Six fit.
@@ -504,7 +503,7 @@ def test_sizing_aggregates_multiple_legs_on_the_same_venue(setup):
     engine = pool_sizing_engine(setup)
     engine.cfg.require_cross = False
     engine.kalshi.asks = {'BOS': '.4', 'SAC': '.4'}
-    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug,
+    engine.poly.book_raw = lambda slug: {'marketData': {'marketSlug': slug, 'state': 'MARKET_STATE_OPEN', 'transactTime': datetime.now(timezone.utc).isoformat(),
         'bids': [{'px': {'value': '.5'}, 'qty': '100'}],
         'offers': [{'px': {'value': '.5'}, 'qty': '100'}]}}
     basket = engine.scan()
@@ -533,7 +532,7 @@ def test_kalshi_v2_first_leg_is_hedged_or_unwound(setup, monkeypatch, second_leg
     assert basket is not None and basket.sets == 10
     for leg in basket.legs:
         leg["depth"] = "10" if leg["venue"] == "kalshi" else "100"
-    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda **_: (basket, "ok"))
     sent = []
 
     class V2Kalshi:

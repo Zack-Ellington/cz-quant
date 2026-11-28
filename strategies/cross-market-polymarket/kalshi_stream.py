@@ -17,8 +17,10 @@ log = logging.getLogger(__name__)
 
 
 class KalshiStreamBook:
-    def __init__(self, client: Kalshi, tickers: list[str], max_age: float):
+    def __init__(self, client: Kalshi, tickers: list[str], max_age: float,
+                 changed: threading.Event | None = None):
         self.client, self.tickers, self.max_age = client, set(tickers), max_age
+        self.changed = changed or threading.Event()
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.thread: threading.Thread | None = None
@@ -33,10 +35,12 @@ class KalshiStreamBook:
             self.sid: int | None = None
             self.seq: int | None = None
             self.healthy_at = 0.0
+        self.changed.set()
 
     def confirmed_pong(self) -> None:
         with self.lock:
             self.healthy_at = time.monotonic()
+        self.changed.set()
 
     def accept(self, message: dict[str, Any]) -> None:
         with self.lock:
@@ -88,6 +92,7 @@ class KalshiStreamBook:
                 levels.pop(price, None)
         self.sid, self.seq = sid, seq
         self.received[ticker], self.exchange[ticker] = time.monotonic(), exchange_time
+        self.changed.set()
 
     def snapshot(self, ticker: str) -> dict[str, Any]:
         with self.lock:

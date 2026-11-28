@@ -12,14 +12,19 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from types import SimpleNamespace
+
+import httpx
 
 from czquant import Broker, Store
 from czquant.accounting import active_events, combine_states, venue_of
@@ -34,7 +39,9 @@ from czquant.store import decimal
 from experiments import Experiment, Outcome, SelectedPair
 from kalshi_stream import KalshiStreamBook
 from scan_capture import measure
-from stream_book import StreamBook, QuoteUnavailable
+from stream_book import StreamBook, QuoteUnavailable, rest_snapshot
+from metadata import Metadata
+from czquant.polymarket_us import normalize_market as normalize_us_market
 from slippage import split_limits, second_limit, cost
 from sum_check import Basket, best, kalshi_offer, polymarket_offer, polymarket_us_offer
 
@@ -46,10 +53,27 @@ TERMINAL = {"filled", "canceled", "rejected", "failed", "dry_run"}
 log = logging.getLogger("cross_market_polymarket")
 
 
+class QuoteUpdates(threading.Event):
+    """Consume a wakeup atomically so an update cannot race with clearing it."""
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
+
+    def set(self) -> None:
+        with self.lock:
+            super().set()
+
+    def consume(self) -> bool:
+        with self.lock:
+            changed = self.is_set()
+            super().clear()
+            return changed
+
+
 @dataclass
 class Config:
     experiment: Experiment
-    interval_seconds: float = 15.0
+    interval_seconds: float = 0.1  # REST polling / streaming recovery watchdog
     profit_slippage: bool = False
     execution_websocket: bool = False
     quote_max_age: float = 2.0
@@ -62,7 +86,6 @@ class Config:
     require_cross: bool = True  # baskets need a leg on each venue
     kalshi_latency: float = 0.30
     polymarket_latency: float = 0.50
-    cooldown: float = 300.0
     duration_minutes: float | None = None
     dry_run: bool = False  # live, but build and sign orders without sending them
     pmus_theta: float | None = None  # Polymarket US taker coefficient; None: each market's own
@@ -72,10 +95,11 @@ class Config:
 
     def __post_init__(self) -> None:
         self.experiment.validate()
-        if not 0 < self.max_capital_frac <= 1 or self.max_sets < 1 or self.interval_seconds <= 0:
+        if (not 0 < self.max_capital_frac <= 1 or self.max_sets < 1
+                or not math.isfinite(self.interval_seconds) or self.interval_seconds <= 0):
             raise ValueError("capital fraction, basket size and scan interval must be positive")
-        if self.cooldown < 0:
-            raise ValueError("invalid cooldown")
+        if not math.isfinite(self.quote_max_age) or self.quote_max_age <= 0:
+            raise ValueError("quote_max_age must be finite and positive")
         if self.dry_run and self.experiment.mode != "live":
             raise ValueError("dry_run requires live mode")
 
@@ -116,7 +140,11 @@ class Engine:
         revision = revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
         for broker in self.brokers.values():
             broker.start(STRATEGY, revision, asdict(cfg))
-        self.cooldown_until = 0.0
+        self.changed = QuoteUpdates()
+        self.metadata: Metadata | None = None
+        self._pending_scan: dict[str, Any] | None = None
+        self._pause_reason: str | None = None
+        self._entry_waiting = True
         self.halted: str | None = None
         self._halts: dict[str, dict[str, Any]] = {}
         self.repairs: list[tuple[dict[str, Any], Decimal, dict[str, Any]]] = []
@@ -129,26 +157,50 @@ class Engine:
         if cfg.execution_websocket:
             if not self.us or not isinstance(self.poly, PolymarketUS) or not self.poly.authenticated:
                 raise ValueError("execution WebSocket requires authenticated Polymarket US")
-            if not 0 < cfg.quote_max_age < float("inf"):
-                raise ValueError("quote_max_age must be finite and positive")
-            self.stream_book = StreamBook(self.poly, self.pair.polymarket_market, cfg.quote_max_age)
+            self.stream_book = StreamBook(self.poly, self.pair.polymarket_market, cfg.quote_max_age, self.changed)
             kalshi_client = Kalshi(authenticated=True)
             if not kalshi_client.key:
                 raise ValueError("execution WebSocket requires Kalshi credentials")
             self.kalshi_stream = KalshiStreamBook(kalshi_client,
-                sorted({name for name, _ in self.pair.contracts("kalshi")}), cfg.quote_max_age)
+                sorted({name for name, _ in self.pair.contracts("kalshi")}), cfg.quote_max_age, self.changed)
+            metadata_kalshi = Kalshi(authenticated=False, base_url=self.kalshi.base)
+            metadata_poly = PolymarketUS(gateway_url=self.poly.gateway, api_url=self.poly.api)
+            self.metadata = Metadata(lambda: self._read_metadata(metadata_kalshi, metadata_poly), self.changed)
+            self.metadata.thread.start()
             self.kalshi_stream.start()
             self.stream_book.start()
+
+        if isinstance(kalshi_adapter, Paper) and self.us:
+            kalshi_adapter.client = SimpleNamespace(book=self.kalshi_execution_book,
+                market=lambda ticker: self.references()[0][ticker], get=self.kalshi.get)
+            poly_adapter.client = SimpleNamespace(book=lambda ticker: self.us_execution_book(),
+                market=lambda ticker: normalize_us_market(self.references()[2]))
+
+    def _read_metadata(self, kalshi: Any = None, poly: Any = None) -> tuple[dict[str, Any], dict[str, Any], Any]:
+        kalshi, poly = kalshi or self.kalshi, poly or self.poly
+        markets = {name: kalshi.market(name) for name, _ in self.pair.contracts("kalshi")}
+        schedule = kalshi.get(f"/series/{self.pair.kalshi_series}")["series"]
+        market = poly.market_raw(self.pair.polymarket_market) if self.us else None
+        return markets, schedule, market
+
+    def references(self) -> tuple[dict[str, Any], dict[str, Any], Any]:
+        return self.metadata.snapshot() if self.metadata is not None else self._read_metadata()
 
     def kalshi_execution_book(self, ticker: str) -> dict[str, Any]:
         if self.kalshi_stream is not None:
             return self.kalshi_stream.snapshot(ticker)
-        return self.kalshi.book(ticker)
+        started = time.monotonic()
+        book = self.kalshi.book(ticker)
+        elapsed = time.monotonic() - started
+        if elapsed > self.cfg.quote_max_age:
+            raise QuoteUnavailable("kalshi_rest_request_stale")
+        return {**book, "execution_quote": {"source": "kalshi_rest",
+            "received_at": time.time(), "request_seconds": elapsed}}
 
     def us_execution_book(self) -> dict[str, Any]:
         if self.stream_book is not None:
             return self.stream_book.snapshot()
-        return self.poly.books([self.pair.polymarket_market])[self.pair.polymarket_market]
+        return rest_snapshot(self.poly, self.pair.polymarket_market, self.cfg.quote_max_age)
 
     def validate_inventory(self) -> None:
         """The selected portfolio may contain only this run's pair."""
@@ -207,18 +259,6 @@ class Engine:
             [e for b in self.brokers.values() for e in self.store.events(b.pool_id,
              kinds=("transaction", "observation", "correction", "order"), observations=("halt", "halt_cleared", "basket_settled", "basket_execution"))],
             key=lambda e: (e["effective_at"], e["sequence"])))
-        empty_cooldowns = {e["data"]["context"]["trade_id"]: float(e["data"]["zero_fill_cooldown_until"])
-                           for e in events if e["type"] == "observation"
-                           and e["data"].get("kind") == "basket_execution"
-                           and "zero_fill_cooldown_until" in e["data"]}
-        for event in events:
-            data = event["data"]
-            if event["type"] == "order" and data.get("status") == "intent":
-                game = data.get("context", {}).get("kalshi_event")
-                if game == self.pair.kalshi_event:
-                    until = empty_cooldowns.get(data.get("context", {}).get("trade_id"),
-                              datetime.fromisoformat(event["effective_at"]).timestamp() + self.cfg.cooldown)
-                    self.cooldown_until = max(self.cooldown_until, until)
         observations = [e for e in events if e["type"] == "observation"]
         cleared = {e["data"]["halt_id"] for e in observations if e["data"].get("kind") == "halt_cleared"}
         reported = {e["data"]["trade_id"] for e in observations if e["data"].get("kind") == "basket_settled"}
@@ -341,10 +381,9 @@ class Engine:
             return "awaiting_reconciliation" if busy else None
         now = datetime.now(timezone.utc)
         for component in ("account", "polymarket_us"):
-            rows = [e for e in self.store.events(kinds=("health",)) if e["data"].get("component") == component]
-            if not rows:
+            last = self.store.latest_health(component)
+            if last is None:
                 return f"no_{component}_monitor"
-            last = rows[-1]
             age = (now - datetime.fromisoformat(last["effective_at"])).total_seconds()
             if age > self.cfg.monitor_max_age or last["data"].get("status") == "failed":
                 return f"stale_{component}_monitor"
@@ -368,20 +407,22 @@ class Engine:
 
     # -- selected market data and pricing ------------------------------------
 
-    def price_pair(self) -> tuple[Basket | None, str]:
+    def price_pair(self, recheck: set[tuple[str, str]] | None = None) -> tuple[Basket | None, str]:
         """Read only the prepared pair. No listings, league scans or matching."""
         pair = self.pair
         self.scan_quote = {"experiment_id": self.experiment.id, "status": "error",
                            "legs": [], "routes": [], "books": {},
                            "interval": self.cfg.interval_seconds,
                            "started_at": datetime.now(timezone.utc).isoformat()}
-        markets = {name: self.kalshi.market(name) for name, _ in pair.contracts("kalshi")}
+        try:
+            markets, schedule, us_market = self.references()
+        except QuoteUnavailable as exc:
+            return None, str(exc)
         for name, market in markets.items():
             if market["ticker"] != name or market["event_ticker"] != pair.kalshi_event:
                 raise ValueError("Kalshi metadata differs from the prepared pair")
             if market["status"] not in ("active", "open"):
                 return None, "kalshi_not_trading"
-        schedule = self.kalshi.get(f"/series/{pair.kalshi_series}")["series"]
         if schedule["fee_type"] not in FEE_TYPES:
             return None, "unsupported_kalshi_fees"
         multiplier = decimal(schedule.get("fee_multiplier", "1"))
@@ -394,7 +435,7 @@ class Engine:
         self.scan_quote["kalshi_read_at"] = datetime.now(timezone.utc).isoformat()
         offers: dict[str, list] = {}
         if self.us:
-            market = self.poly.market_raw(pair.polymarket_market)
+            market = us_market
             if market["slug"] != pair.polymarket_market:
                 raise ValueError("Polymarket metadata differs from the prepared pair")
             if market["status"] != "MARKET_STATUS_OPEN":
@@ -428,8 +469,8 @@ class Engine:
                 if normalized["status"] != "active":
                     return None, "polymarket_not_trading"
                 ways.append(polymarket_offer(role, outcome.polymarket, pbooks[token], normalized["fee_schedule"]))
-            offers[role] = ways
-        if len(pair.outcomes) == 2:
+            offers[role] = [w for w in ways if (w.ticker, w.contract) in recheck] if recheck else ways
+        if recheck is None and len(pair.outcomes) == 2:
             names = {alias: name for name, alias in pair.evidence.get("kalshi", [])}
             self.scan_quote.update(measure(offers,
                 [names.get(o.kalshi.rsplit("-", 1)[-1], o.kalshi.rsplit("-", 1)[-1]) for o in pair.outcomes],
@@ -440,22 +481,27 @@ class Engine:
                     Decimal(str(self.cfg.min_net)), Decimal(str(self.cfg.min_edge)), self.cfg.max_apr,
                     self.cfg.require_cross, fundable=lambda basket: self.budget_block(basket) is None)
 
-    def scan(self) -> Basket | None:
+    def scan(self, *, defer: bool = False) -> Basket | None:
         self.counters["scans"] += 1
         basket, reason = None, "scan_error"
         try:
             basket, reason = self.price_pair()
         finally:
-            self.kalshi_broker.observe("scan_complete", {"reason": reason, "candidates": int(basket is not None),
-                                      "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
-                                      "quote": {**self.scan_quote, "reason": reason}})
+            self._pending_scan = {"reason": reason, "candidates": int(basket is not None),
+                "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
+                "quote": {**self.scan_quote, "reason": reason}}
+            if not defer:
+                self.flush_scan()
         return basket
+
+    def flush_scan(self) -> None:
+        if self._pending_scan is not None:
+            self.kalshi_broker.observe("scan_complete", self._pending_scan)
+            self._pending_scan = None
 
     # -- execution -------------------------------------------------------------
 
     def risk_block(self) -> str | None:
-        if time.time() < self.cooldown_until:
-            return "cooldown"
         if self.limits() < 1:
             return "no_cash" if self.cash < 1 else "capital_limit"
         return None
@@ -463,7 +509,7 @@ class Engine:
     def execute(self, basket: Basket) -> None:
         event = self.pair.kalshi_event
         intended = {(leg["ticker"], leg["contract"]) for leg in basket.legs}
-        current, why = self.price_pair()
+        current, why = self.price_pair(recheck=intended)
         if current is None or {(leg["ticker"], leg["contract"]) for leg in current.legs} != intended:
             self.reject(event, "recheck_failed", why=why if current is None else "legs_changed")
             return
@@ -496,6 +542,7 @@ class Engine:
         target, outcomes, sent = Decimal(current.sets), [], []
         failure: BaseException | None = None
         attempted: tuple[dict[str, Any], str] | None = None
+        diagnostics: list[tuple[str, dict[str, Any]]] = []
         try:
             first_price, first_fees, first_cost = Decimal(0), Decimal(0), Decimal(0)
             first_quantity = Decimal(0)
@@ -510,25 +557,20 @@ class Engine:
                         outcomes.append({"status": "profit_floor", "filled": "0", "ticker": leg["ticker"]})
                         break
                     leg = {**leg, "limit": str(revised)}
-                    self.kalshi_broker.observe("slippage_reprice", {"trade_id": trade_id, "leg": leg,
-                        "first_price_bound": str(first_price), "first_fees": str(first_fees), "sets": int(target)})
+                    diagnostics.append(("slippage_reprice", {"trade_id": trade_id, "leg": leg,
+                        "first_price_bound": str(first_price), "first_fees": str(first_fees), "sets": int(target)}))
+                quotes = []
                 if self.kalshi_stream is not None:
                     for ticker, _ in self.pair.contracts("kalshi"):
-                        quote = self.kalshi_execution_book(ticker)["execution_quote"]
-                        self.kalshi_broker.observe("execution_quote", {"trade_id": trade_id,
-                            "ticker": ticker, **quote})
-                if self.stream_book is not None:
-                    quote = self.us_execution_book()["execution_quote"]
-                    self.kalshi_broker.observe("execution_quote", {"trade_id": trade_id,
-                        "ticker": "PMUS:" + self.pair.polymarket_market,
-                        "submitted_ticker": leg["ticker"], **quote})
+                        quotes.append({"ticker": ticker, **self.kalshi_execution_book(ticker)["execution_quote"]})
+                if self.us:
+                    quotes.append({"ticker": "PMUS:" + self.pair.polymarket_market,
+                                   **self.us_execution_book()["execution_quote"]})
                 identifier = str(uuid.uuid4())
                 attempted = (leg, identifier)
-                if index == 0:
-                    self.cooldown_until = time.time() + self.cfg.cooldown
                 result = self.brokers[venue_of(leg["ticker"])].submit({"client_order_id": identifier, "ticker": leg["ticker"], **buy(leg), "count": str(int(target)),
                                              "time_in_force": "immediate_or_cancel",
-                                             "self_trade_prevention_type": "taker_at_cross"}, context)
+                                             "self_trade_prevention_type": "taker_at_cross"}, {**context, "execution_quotes": quotes})
                 got = decimal(result.get("filled") or "0")
                 outcomes.append({"ticker": leg["ticker"], "venue": leg["venue"], "asked": str(int(target)),
                                  "status": result["status"], "filled": str(got)})
@@ -539,30 +581,21 @@ class Engine:
                     break
                 sent.append((leg, got))
                 target = min(target, got)
-                if self.us and self.cfg.profit_slippage and index == 1 and got > 0:
-                    receipts = [e["data"] for e in self.store.events(kinds=("execution",))
-                                if e["data"].get("order_id") == identifier]
-                    if sum((decimal(r["quantity"]) for r in receipts), Decimal(0)) != got:
-                        self.halt("missing second-leg fill evidence; reconcile before repair", recoverable=True)
+                if self.us and self.cfg.profit_slippage and got > 0:
+                    evidence = result.get("execution")
+                    if evidence is None or decimal(evidence["quantity"]) != got:
+                        self.halt("missing execution evidence; reconcile before repair", recoverable=True)
                         break
-                    second_price = max(decimal(r["yes_price"]) if leg["contract"] == "YES"
-                                       else 1 - decimal(r["yes_price"]) for r in receipts)
-                    second_fees = sum((decimal(r["fee"]) for r in receipts), Decimal(0))
-                    if 1 - first_price - first_fees / first_quantity - second_price - second_fees / got < edge:
-                        failure = ValueError("actual matched fills fall below the profit floor; repairing both legs")
+                    price_bound = (decimal(evidence["yes_price_max"]) if leg["contract"] == "YES"
+                                   else 1 - decimal(evidence["yes_price_min"]))
+                    fees = decimal(evidence["fee"])
+                    if index == 0:
+                        first_quantity, first_price, first_fees = got, price_bound, fees
+                        notional = decimal(evidence["yes_notional"])
+                        first_cost = (notional if leg["contract"] == "YES" else got - notional) + fees
+                    elif 1 - first_price - first_fees / first_quantity - price_bound - fees / got < edge:
+                        failure = ValueError("matched fill bounds fall below the profit floor; repairing both legs")
                         break
-                if self.us and self.cfg.profit_slippage and index == 0 and got > 0:
-                    receipts = [e["data"] for e in self.store.events(kinds=("execution",))
-                                if e["data"].get("order_id") == identifier]
-                    if sum((decimal(r["quantity"]) for r in receipts), Decimal(0)) != got:
-                        self.halt("missing first-leg fill evidence; reconcile before repair", recoverable=True)
-                        break
-                    first_quantity = got
-                    first_price = max(decimal(r["yes_price"]) if leg["contract"] == "YES"
-                                      else 1 - decimal(r["yes_price"]) for r in receipts)
-                    first_fees = sum((decimal(r["fee"]) for r in receipts), Decimal(0))
-                    first_cost = sum((decimal(r["quantity"]) * (decimal(r["yes_price"]) if leg["contract"] == "YES"
-                                     else 1 - decimal(r["yes_price"])) for r in receipts), Decimal(0)) + first_fees
         except Exception as exc:
             failure = exc
             outcomes.append({"status": "error", "error": f"{type(exc).__name__}: {exc}"[:200]})
@@ -591,15 +624,10 @@ class Engine:
                 self.halt("basket repair failed; waiting for automatic sell recovery", recoverable=True)
                 failure = failure or exc
                 break
-        cooldown_record: dict[str, Any] = {}
-        if (failure is None and not self.halted and len(outcomes) == 1
-                and outcomes[0].get("status") == "canceled"
-                and decimal(outcomes[0].get("filled", "-1")) == 0):
-            # A confirmed empty IOC has no inventory to protect. Retry only after
-            # a short backoff and the next scan's fresh prices and preflight.
-            self.cooldown_until = time.time() + 1.0
-            cooldown_record["zero_fill_cooldown_until"] = self.cooldown_until
-        self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes, **cooldown_record})
+        with self.store.transaction():
+            for kind, data in diagnostics:
+                self.kalshi_broker.observe(kind, data)
+            self.kalshi_broker.observe("basket_execution", {"context": context, "outcomes": outcomes})
         self.resume()
         if failure is not None:
             # Keep the recovery loop alive after a transport failure. Durable
@@ -613,12 +641,11 @@ class Engine:
         """Sell excess at visible bids, without an entry-price loss floor."""
         ticker, venue = leg["ticker"], venue_of(leg["ticker"])
         if venue == "kalshi":
-            market = self.kalshi.market(ticker)
+            market = self.references()[0][ticker]
             trading = market["status"] in ("open", "active")
             book = self.kalshi_execution_book(ticker) if trading else {}
         elif self.us:
-            slug = ticker.removeprefix("PMUS:")
-            trading = self.poly.market_raw(slug)["status"] == "MARKET_STATUS_OPEN"
+            trading = self.references()[2]["status"] == "MARKET_STATUS_OPEN"
             book = self.us_execution_book() if trading else {}
         else:
             token = ticker.removeprefix("PM:")
@@ -659,6 +686,10 @@ class Engine:
             try:
                 outcome = self.unwind(leg, count, context)
                 self.kalshi_broker.observe("recovery_attempt", {"context": context, "outcome": outcome})
+            except QuoteUnavailable as exc:
+                if not self._throttled(("recovery_quote", str(exc)), 5):
+                    self.kalshi_broker.observe("recovery_waiting", {"reason": str(exc), "context": context})
+                    log.warning("Recovery waiting for current quotes: %s", exc)
             except Exception as exc:
                 self.kalshi_broker.observe("recovery_attempt", {"context": context,
                     "outcome": {"ticker": leg["ticker"], "status": "error", "error": str(exc)[:200]}})
@@ -672,41 +703,70 @@ class Engine:
 
     # -- run -------------------------------------------------------------------
 
-    def step(self) -> None:
+    def step(self, *, scan_quotes: bool = True) -> None:
         if os.path.exists(os.path.join(self.diagnostics, "KILL")):
             self.halt("kill switch file present")
         self.resume()
         if self.halted:
+            self._entry_waiting = True
             self.recover()
             return
         pause = self.live_block()
         if pause:
+            self._entry_waiting = True
             if not self._throttled(("live_block", pause), 60):
                 self.kalshi_broker.observe("live_paused", {"reason": pause})
             return
-        basket = self.scan()
-        if basket is None:
+        if not scan_quotes and not self._entry_waiting:
             return
-        block = self.risk_block()
-        if block:
-            self.reject(self.pair.kalshi_event, block)
-            return
-        self.execute(basket)
+        self._entry_waiting = False
+        try:
+            basket = self.scan(defer=True)
+            reason = str(self._pending_scan["reason"]) if self._pending_scan else "unknown"
+            if reason != self._pause_reason:
+                log.info("Execution scan: %s", reason)
+                self._pause_reason = reason
+            if basket is None:
+                return
+            block = self.risk_block()
+            if block:
+                self.reject(self.pair.kalshi_event, block)
+                return
+            self.execute(basket)
+        except (QuoteUnavailable, httpx.HTTPError, TimeoutError, ConnectionError) as exc:
+            reason = str(exc) if isinstance(exc, QuoteUnavailable) else type(exc).__name__
+            if reason != self._pause_reason:
+                log.warning("Execution paused: %s; waiting for current data", reason)
+                self.kalshi_broker.observe("execution_paused", {"reason": reason})
+                self._pause_reason = reason
+        finally:
+            self.flush_scan()
 
     def run(self, once: bool = False) -> None:
         deadline = time.monotonic() + self.cfg.duration_minutes * 60 if self.cfg.duration_minutes else None
+        scan_quotes = True
         try:
             while True:
                 started = time.monotonic()
-                self.step()
-                self.kalshi_broker.observe("heartbeat", {"cash": str(self.cash), "exposure": str(self.exposure()),
-                                                  "open_trades": len(self.positions), "halted": self.halted,
-                                                  "counters": dict(self.counters)})
+                changed = self.changed.consume()
+                scan_quotes = scan_quotes or changed
+                self.step(scan_quotes=scan_quotes)
+                if not self._throttled(("heartbeat",), 5):
+                    self.kalshi_broker.observe("heartbeat", {"cash": str(self.cash), "exposure": str(self.exposure()),
+                        "open_trades": len(self.positions), "halted": self.halted, "counters": dict(self.counters)})
                 if once or (deadline and time.monotonic() >= deadline):
                     break
-                wait = max(1.0, self.cfg.interval_seconds - (time.monotonic() - started))
-                time.sleep(min(wait, deadline - time.monotonic()) if deadline else wait)
+                wait = max(0.0, self.cfg.interval_seconds - (time.monotonic() - started))
+                if deadline:
+                    wait = max(0.0, min(wait, deadline - time.monotonic()))
+                if self.cfg.execution_websocket:
+                    scan_quotes = self.changed.wait(wait)
+                else:
+                    time.sleep(wait)
+                    scan_quotes = True
         finally:
+            if self.metadata is not None:
+                self.metadata.close()
             if self.kalshi_stream is not None:
                 self.kalshi_stream.close()
             if self.stream_book is not None:

@@ -19,9 +19,11 @@ class QuoteUnavailable(ValueError):
 
 
 class StreamBook:
-    def __init__(self, client: PolymarketUS, slug: str, max_age: float):
+    def __init__(self, client: PolymarketUS, slug: str, max_age: float,
+                 changed: threading.Event | None = None):
         self.client, self.slug, self.max_age = client, slug, max_age
-        self.lock = threading.Lock()
+        self.changed = changed or threading.Event()
+        self.lock = threading.RLock()
         self.stop = threading.Event()
         self.thread: threading.Thread | None = None
         self.socket: Any = None
@@ -37,8 +39,12 @@ class StreamBook:
         with self.lock:
             self.data = None
             self.exchange_time = self.received = 0.0
+        self.changed.set()
 
     def accept(self, message: dict[str, Any]) -> None:
+        if message.get("error"):
+            self.clear()
+            raise QuoteUnavailable("polymarket_websocket_subscription_lost")
         data = message.get("marketData")
         if not data or data.get("marketSlug") != self.slug:
             return
@@ -51,9 +57,13 @@ class StreamBook:
         book = kalshi_layout(data)
         with self.lock:
             if self.data is not None and stamp.timestamp() <= self.exchange_time:
+                if stamp.timestamp() == self.exchange_time and self.data != {"book": book, "state": data.get("state")}:
+                    self.clear()
+                    raise QuoteUnavailable("polymarket_websocket_conflicting_snapshot")
                 return
             self.data = {"book": book, "state": data.get("state")}
             self.exchange_time, self.received = stamp.timestamp(), time.monotonic()
+        self.changed.set()
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -101,3 +111,18 @@ class StreamBook:
         if self.thread is not None:
             self.thread.join(timeout=2)
         self.clear()
+
+
+def rest_snapshot(client: PolymarketUS, slug: str, max_age: float) -> dict[str, Any]:
+    """REST is an explicit mode. Never turn an old snapshot into a current book."""
+    feed = StreamBook(client, slug, max_age)
+    started = time.monotonic()
+    try:
+        feed.accept(client.book_raw(slug))
+        if time.monotonic() - started > max_age:
+            raise QuoteUnavailable("polymarket_rest_request_stale")
+        result = feed.snapshot()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise QuoteUnavailable("polymarket_rest_freshness_unavailable") from exc
+    result["execution_quote"]["source"] = "polymarket_us_rest"
+    return result

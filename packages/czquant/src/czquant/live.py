@@ -5,9 +5,9 @@ is sent. With `dry_run` nothing is sent: the order is built (and, for Polymarket
 signed), recorded as `dry_run`, and reported filled 0.
 
 Kalshi fills are booked by the account monitor (`czquant monitor account`), from the
-venue's fill history; the adapter only reports the order's own fill count so the
-trader can size the next leg. Polymarket US fills are booked by its adapter from the
-synchronous execution reports (czquant.polymarket_us).
+venue's fill history; the adapter reports confirmed quantity, cost and fee evidence
+for immediate execution decisions without creating spendable cash. Polymarket US
+fills are booked by its adapter from the synchronous execution reports (czquant.polymarket_us).
 """
 
 from __future__ import annotations
@@ -62,6 +62,29 @@ class KalshiLive:
             broker.observe("order_unresolved", {"client_order_id": identifier, "response": response})
             return {"client_order_id": identifier, "status": "unknown", "filled": "0",
                     "order": {"order_id": venue_id}, "response": response}
-        # The reservation stays until the account monitor books the fills and finishes the order.
+        evidence: dict[str, str] = {}
+        if decimal(raw_fill) > 0:
+            try:
+                average = decimal(body["average_fill_price"])
+                fee = decimal(body["average_fee_paid"])
+                limit = decimal(order["price"])
+                if (not average.is_finite() or not fee.is_finite() or not 0 <= average <= 1 or fee < 0
+                        or (average > limit if order["side"] == "bid" else average < limit)):
+                    raise ValueError("invalid execution price or fee")
+                quantity = decimal(raw_fill)
+                # An average is not a bound for a partially matched basket. The
+                # submitted limit bounds every fill; exact notional bounds capital.
+                evidence = {"quantity": str(quantity), "yes_notional": str(average * quantity),
+                            "fee": str(fee * quantity),
+                            "yes_price_min": "0" if order["side"] == "bid" else str(limit),
+                            "yes_price_max": str(limit) if order["side"] == "bid" else "1"}
+            except (KeyError, InvalidOperation, TypeError, ValueError):
+                broker.observe("execution_evidence_unavailable", {"client_order_id": identifier,
+                    "reason": "Kalshi response lacks valid average fill price and fee"})
+        elif status is not None:
+            # A terminal empty IOC has no executions left to reconcile.
+            broker.finish(identifier, status)
+        # Filled reservations stay until the account monitor books exact receipts.
         return {"client_order_id": identifier, "status": status, "filled": str(decimal(raw_fill)),
-                "order": {"order_id": venue_id}, "response": response}
+                "order": {"order_id": venue_id}, "response": response,
+                **({"execution": evidence} if evidence else {})}

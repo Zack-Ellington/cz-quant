@@ -44,6 +44,21 @@ and allocations. The collector compares their aggregate cash and inventory
 with the account. Cash discrepancies apply to all its allocations; position
 discrepancies identify the holders of the affected market. The collector
 records these facts without imposing a universal strategy halt.
+Kalshi settlement checks compare net YES minus NO quantity and expected revenue.
+A closed round trip can report equal gross YES and NO counts with zero revenue.
+Unexplained settlements are attributed to current holders, then pools that traded
+the market, then the registered reserve. Legacy unregistered groups retain the
+account-wide discrepancy when no owner can be identified. Completed orders are
+not finished again on every monitor pass.
+
+For Polymarket US, pending deposits can carry an explicit advance or buying power
+above settled cash. The latter is bounded by the deposit reservation and pending
+deposit amounts. The collector books the supported advance once to the account
+owner, normally its reserve, including deposits pending at registration.
+Completion books only the remainder; failure reverses the advance and records a
+deposit_failed discrepancy. Allocation checks count recorded pending advances
+only up to the venue's current deposit reservation.
+
 Supported funding and settlements become economic transactions;
 raw venue evidence remains available for audit. See the
 [schema](../design-principles.md#event-envelope-and-economic-schema).

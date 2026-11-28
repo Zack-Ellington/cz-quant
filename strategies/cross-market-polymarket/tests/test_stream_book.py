@@ -101,11 +101,10 @@ def test_stale_before_submission_sends_no_order_or_cooldown(setup, monkeypatch):
     engine = build(create(), profit_slippage=True, max_basket_dollars=50)
     basket = engine.scan()
     assert basket is not None
-    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda **_: (basket, "ok"))
     engine.stream_book = StreamBook(engine.poly, engine.pair.polymarket_market, 2)
     engine.execute(basket)
     assert not store.events(kinds=("order", "execution"))
-    assert engine.cooldown_until == 0
 
 
 def test_disconnect_after_first_fill_blocks_second_and_retains_repair(setup, monkeypatch):
@@ -113,9 +112,12 @@ def test_disconnect_after_first_fill_blocks_second_and_retains_repair(setup, mon
     engine = build(create(), profit_slippage=True, max_basket_dollars=50)
     basket = engine.scan()
     assert basket is not None
-    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda **_: (basket, "ok"))
     f = StreamBook(engine.poly, engine.pair.polymarket_market, 2)
-    f.accept(message(slug=f.slug))
+    snapshot = message(slug=f.slug)
+    snapshot['marketData']['bids'][0]['px']['value'] = '.62'
+    snapshot['marketData']['offers'][0]['px']['value'] = '.66'
+    f.accept(snapshot)
     engine.stream_book = f
     first = min(basket.legs, key=lambda l: float(l['depth']))
     broker = engine.brokers[first['venue']]

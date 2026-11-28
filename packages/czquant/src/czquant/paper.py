@@ -6,7 +6,7 @@ import time
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any
 
-from .broker import Broker
+from .broker import Broker, execution_summary
 from .store import decimal, utc
 
 
@@ -90,6 +90,7 @@ class Paper:
                         "fee_schedule": schedule, "levels": [[str(p), str(q)] for _, p, q in fills],
                         "latency_seconds": self.latency}
             store.append("market", {"ticker": ticker, "market": market, "book": raw}, source=None, at=observed)
+            receipts = []
             if quantity:
                 average = sum((p * q for _, p, q in fills), Decimal(0)) / quantity
                 # Check exact cash effects including closing opposing positions and fees.
@@ -108,6 +109,7 @@ class Paper:
                 for index, (_, price, qty) in enumerate(fills):
                     allocated_fee = (fee * qty / quantity).quantize(Decimal("0.0001"), rounding=ROUND_DOWN) if index < len(fills)-1 else remaining_fee
                     remaining_fee -= allocated_fee
+                    receipts.append((price, qty, allocated_fee))
                     broker.fill(identifier, str(qty), str(price), str(allocated_fee),
                                 f"paper:{identifier}:{index}", evidence)
                 for native_price, _, qty in fills:
@@ -116,7 +118,8 @@ class Paper:
                                      (broker.pool_id, ticker, source_side, str(native_price), str(current)))
             broker.finish(identifier, "filled" if quantity == requested else "canceled")
             return {"client_order_id": identifier, "status": "filled" if quantity == requested else "canceled",
-                    "filled": str(quantity), "fee": str(fee), "evidence": evidence}
+                    "filled": str(quantity), "fee": str(fee), "evidence": evidence,
+                    **({"execution": execution_summary(receipts)} if receipts else {})}
 
 
 def update_consumed(store: Any, ticker: str, book: dict[str, Any], now: float) -> None:

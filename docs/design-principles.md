@@ -225,6 +225,10 @@ A retry with an existing client order ID returns the stored order rather than
 sending another order. A new submission returns the adapter's response; paper
 responses include status and filled quantity, while live responses can remain
 venue-shaped. Callers must not assume every response is a completed execution.
+Built-in adapters may also return an execution summary with confirmed quantity,
+YES notional, fees, and conservative individual-price bounds. This is immediate
+decision evidence, not an additional accounting transaction. A summary must not
+make unbooked cash spendable or cause monitor receipts to be counted twice.
 Unknown live writes retain their reservations for reconciliation. Exact result
 normalization is an implementation concern to keep explicit when changing the
 interface.

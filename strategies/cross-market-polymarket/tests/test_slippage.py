@@ -88,43 +88,15 @@ def test_unused_kalshi_tick_allowance_moves_to_first_us_leg():
         assert sum(cost(l, D(l["limit"]), n) for l in result) <= n * D("0.99")
 
 
-@pytest.mark.parametrize("status,expected", [("canceled", 1), ("rejected", 300), ("unknown", 300)])
-def test_only_confirmed_empty_ioc_gets_short_cooldown(setup, monkeypatch, status, expected):
+@pytest.mark.parametrize("status", ["canceled", "rejected", "unknown"])
+def test_submission_does_not_install_a_trade_cooldown(setup, monkeypatch, status):
     store, create, build = setup
     engine = build(create(), profit_slippage=True, max_basket_dollars=50)
-    import time
-    now = time.time()
-    monkeypatch.setattr("trader.time.time", lambda: now)
     for broker in engine.brokers.values():
         monkeypatch.setattr(broker, "submit", lambda *a, **k: {"status": status, "filled": "0"})
     engine.step()
-    assert engine.cooldown_until == now + expected
+    assert engine.risk_block() is None
     assert not store.events(kinds=("execution",))
-
-
-
-def test_empty_ioc_cooldown_survives_ledger_resume_and_restart(setup, monkeypatch):
-    import time
-    store, create, build = setup
-    spec = create()
-    engine = build(spec, profit_slippage=True, max_basket_dollars=50)
-    def empty(order, broker):
-        broker.finish(order["client_order_id"], "canceled")
-        return {"status": "canceled", "filled": "0"}
-    for broker in engine.brokers.values():
-        monkeypatch.setattr(broker.adapter, "create_order", empty)
-    before = time.time()
-    engine.step()
-    assert store.events(kinds=("order",))
-    assert before < engine.cooldown_until <= time.time() + 1.01
-    deadline = engine.cooldown_until
-    engine.resume()
-    assert engine.cooldown_until == deadline
-    restarted = build(spec, profit_slippage=True, max_basket_dollars=50)
-    assert restarted.cooldown_until == deadline
-    monkeypatch.setattr("trader.time.time", lambda: deadline + .01)
-    assert restarted.risk_block() is None
-
 
 
 @pytest.mark.parametrize("block", ["recheck", "profit_floor", "preflight", "capital"])
@@ -134,7 +106,7 @@ def test_pre_submission_rejection_does_not_start_cooldown(setup, monkeypatch, bl
     basket = engine.scan()
     assert basket is not None
     if block == "recheck":
-        monkeypatch.setattr(engine, "price_pair", lambda: (None, "no_edge"))
+        monkeypatch.setattr(engine, "price_pair", lambda **_: (None, "no_edge"))
     elif block == "profit_floor":
         monkeypatch.setattr("trader.split_limits", lambda *a: None)
     elif block == "preflight":
@@ -142,7 +114,6 @@ def test_pre_submission_rejection_does_not_start_cooldown(setup, monkeypatch, bl
     else:
         monkeypatch.setattr("trader.split_limits", lambda legs, *a: [{**l, "fee": "100"} for l in legs])
     engine.execute(basket)
-    assert engine.cooldown_until == 0
     assert engine.risk_block() is None
     assert not store.events(kinds=("order", "execution"))
     assert store.events(kinds=("observation",), observations=("reject",))

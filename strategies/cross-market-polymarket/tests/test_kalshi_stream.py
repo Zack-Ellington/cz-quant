@@ -103,10 +103,9 @@ def test_scan_and_submission_have_no_rest_fallback(setup, monkeypatch):
     assert all(b['execution_quote']['source']=='kalshi_websocket' for b in q['books']['kalshi'].values())
     f.clear()
     assert engine.scan() is None
-    monkeypatch.setattr(engine, 'price_pair', lambda: (basket, 'ok'))
+    monkeypatch.setattr(engine, 'price_pair', lambda **_: (basket, 'ok'))
     engine.execute(basket)
     assert store.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0] == 0
-    assert engine.cooldown_until == 0
     leg = next(leg for leg in basket.legs if leg['venue'] == 'kalshi')
     with pytest.raises(QuoteUnavailable): engine.unwind(leg, 1, {})
 
@@ -138,7 +137,7 @@ def test_connection_loss_after_fill_blocks_hedge_and_preserves_repair(setup, mon
     assert basket is not None
     for leg in basket.legs:
         leg['depth'] = '1' if leg['venue'] == 'kalshi' else '100'
-    monkeypatch.setattr(engine, 'price_pair', lambda: (basket, 'ok'))
+    monkeypatch.setattr(engine, 'price_pair', lambda **_: (basket, 'ok'))
     tickers = sorted({t for t, _ in engine.pair.contracts('kalshi')})
     f = KalshiStreamBook(SimpleNamespace(), tickers, 2)
     for seq, ticker in enumerate(tickers, 1): f.accept(snapshot(ticker, seq))
