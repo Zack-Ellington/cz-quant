@@ -8,6 +8,7 @@ jobs:
       matrix:
         project:
           - packages/czquant
+          - scripts/cross-market-monitor
           - strategies/kalshi_sum_check
           - strategies/kalshi-sum-check-unwind
           - strategies/kalshi-sum-check-retry
