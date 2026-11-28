@@ -190,8 +190,8 @@ def account_pass(store: Store, api: Any) -> dict[str, Any]:
                 continue
             lots = [(p["id"], lot) for p in group for lot in portfolio_state(store, p["id"]).lots.values()
                     if lot["market"]==settlement["ticker"]]
-            # Nobody holding the market: whoever traded it owns any discrepancy, else the
-            # reserve. Never every pool on the account (that halts unrelated experiments).
+            # Attribute discrepancies to holders, past traders, or the reserve.
+            # Unregistered accounts without an owner retain an account-wide gap.
             traders = sorted({r[0] for r in store.db.execute("SELECT portfolio_id, request FROM orders")
                               if r[0] in ids and json.loads(r[1]).get("ticker") == settlement["ticker"]})
             reserve = [p["id"] for p in group if p["metadata"].get("reserve")]

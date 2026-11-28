@@ -127,7 +127,8 @@ class Engine:
             self.poly = poly or Polymarket.from_env()
             poly_adapter = PolymarketPaper(self.poly, latency=cfg.polymarket_latency)
         kalshi_adapter = (KalshiLive(kalshi_live or Kalshi(authenticated=True), dry_run=cfg.dry_run)
-                          if self.live else Paper(self.kalshi, latency=cfg.kalshi_latency))
+                          if self.live else Paper(self.kalshi, latency=cfg.kalshi_latency,
+                              fee_schedule=(lambda market: self.references()[1]) if self.us else None))
         self.kalshi_broker = Broker(self.store, kalshi_pool, kalshi_adapter, self.run_id)
         self.poly_broker = Broker(self.store, poly_pool, poly_adapter, self.run_id)
         self.brokers = {broker.venue: broker for broker in (self.kalshi_broker, self.poly_broker)}
@@ -172,7 +173,7 @@ class Engine:
 
         if isinstance(kalshi_adapter, Paper) and self.us:
             kalshi_adapter.client = SimpleNamespace(book=self.kalshi_execution_book,
-                market=lambda ticker: self.references()[0][ticker], get=self.kalshi.get)
+                market=lambda ticker: self.references()[0][ticker])
             poly_adapter.client = SimpleNamespace(book=lambda ticker: self.us_execution_book(),
                 market=lambda ticker: normalize_us_market(self.references()[2]))
 
@@ -445,7 +446,7 @@ class Engine:
             except QuoteUnavailable as exc:
                 return None, str(exc)
             self.scan_quote["books"]["polymarket"] = pbook
-            self.scan_quote["source"] = pbook.get("execution_quote", {"source": "polymarket_us_rest"})
+            self.scan_quote["source"] = pbook["execution_quote"]
             theta = self.theta_override if self.theta_override is not None else decimal(market.get("feeCoefficient", DEFAULT_THETA))
             self.scan_quote["fee_coefficient"] = theta
         else:

@@ -135,7 +135,7 @@ def test_metadata_failure_invalidates_then_recovers_without_stopping():
     metadata.fetch = lambda: (_ for _ in ()).throw(ConnectionError())
     with pytest.raises(ConnectionError):
         metadata.refresh()
-    with pytest.raises(QuoteUnavailable):
+    with pytest.raises(ConnectionError):
         metadata.snapshot()
     metadata.fetch = lambda: {'fee': '.08'}
     metadata.refresh()
@@ -145,7 +145,18 @@ def test_metadata_failure_invalidates_then_recovers_without_stopping():
         metadata.snapshot()
 
 
-def test_streaming_price_path_does_not_fetch_metadata(setup, monkeypatch):
+@pytest.mark.parametrize('error', [KeyError('market'), TypeError('invalid payload'), ValueError('invalid market')])
+def test_metadata_worker_propagates_unexpected_errors(error, caplog):
+    metadata = Metadata(lambda: (_ for _ in ()).throw(error), threading.Event())
+    metadata._run()
+    with pytest.raises(type(error)) as caught:
+        metadata.snapshot()
+    assert caught.value is error
+    assert metadata.changed.is_set()
+    assert 'Metadata worker failed' in caplog.text
+
+
+def test_streaming_pricing_and_paper_execution_do_not_fetch_metadata(setup, monkeypatch):
     _, create, build = setup
     engine = build(create())
     metadata = Metadata(engine._read_metadata, engine.changed)
@@ -153,7 +164,10 @@ def test_streaming_price_path_does_not_fetch_metadata(setup, monkeypatch):
     engine.metadata = metadata
     for client, method in [(engine.kalshi, 'market'), (engine.kalshi, 'get'), (engine.poly, 'market_raw')]:
         monkeypatch.setattr(client, method, lambda *a: pytest.fail('metadata REST in price path'))
-    assert engine.price_pair()[0] is not None
+    basket = engine.scan()
+    assert basket is not None
+    engine.execute(basket)
+    assert engine.kalshi_broker.state().lots and engine.poly_broker.state().lots
 
 
 def test_stream_update_wakes_loop_before_watchdog(setup, monkeypatch):

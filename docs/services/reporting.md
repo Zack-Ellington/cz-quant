@@ -223,9 +223,8 @@ Implementation: [report.py](../../packages/czquant/src/czquant/report.py),
 
 ## Experiment companions
 
-Strategy-specific plots belong in independent experiment companions rather than
-the core accounting package. They read the same ledger in read-only mode.
-Cross-market decision charts consume scan_complete quote payloads, while trade
-markers and balances come from broker and account-monitor evidence. Companions
-have no exchange connections and do not replace missing scan data with reference
-marks. See the [strategy's capture format](../../strategies/cross-market-polymarket/README.md#streaming-execution-quotes).
+Experiment-specific reports can read strategy observations from the ledger
+alongside broker and account-monitor evidence. Decision plots use the recorded
+inputs; reference marks cannot reconstruct missing decisions. Balances and trade
+markers use accounting records. The cross-market strategy documents its
+[capture format](../../strategies/cross-market-polymarket/README.md#streaming-execution-quotes).

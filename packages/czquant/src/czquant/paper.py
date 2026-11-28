@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Any
 
@@ -18,12 +19,16 @@ class Paper:
     venue = "kalshi"
     policy = "ioc-depth-v1"
 
-    def __init__(self, client: Any, latency: float = 0.3):
+    def __init__(self, client: Any, latency: float = 0.3, *,
+                 fee_schedule: Callable[[dict[str, Any]], dict[str, Any]] | None = None):
         self.client, self.latency = client, latency
+        self._fee_schedule = fee_schedule
         self.series: dict[str, Any] = {}
 
     def fee_schedule(self, market: dict[str, Any]) -> dict[str, Any]:
-        """The market's taker fee schedule: its Kalshi series, read once per series."""
+        """Use the supplied reader, or fetch and cache the market's Kalshi series."""
+        if self._fee_schedule is not None:
+            return self._fee_schedule(market)
         series_id = market.get("series_ticker") or market.get("event_ticker", "").split("-")[0]
         if series_id not in self.series:
             self.series[series_id] = self.client.get(f"/series/{series_id}").get("series", {})

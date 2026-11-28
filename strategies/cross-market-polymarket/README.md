@@ -282,7 +282,10 @@ REST remains the source of market metadata and fee schedules. A strategy-owned
 worker refreshes them every five seconds, outside the quote-to-order path, using
 separate read clients. A failed refresh invalidates the reference snapshot; data
 older than 15 seconds from the start of its request is also unavailable. These
-reference intervals do not control quote sampling.
+reference intervals do not control quote sampling. Request failures pause
+execution and retry. Unexpected worker errors are logged with a traceback and
+propagated to metadata readers. Paper execution uses the refreshed fee schedule
+for each order.
 
 Streaming execution never falls back to REST books. Explicit REST mode requires
 a complete, open Polymarket book with exchange and receipt ages within
@@ -323,17 +326,6 @@ This can suppress opportunities caused by Kalshi price changes while the
 Polymarket book is unchanged. Expiry between basket legs can prevent the second
 submission, and an expired Polymarket book also blocks Polymarket repair orders.
 Recovery retains the exposure and retries; it cannot bound the waiting time.
-For illustration, newer timestamps arriving exactly ten seconds apart would
-make the book eligible for at most two seconds per interval under the default
-policy, even if its prices were still executable. This is a consequence of the
-age rule, not a measured feed cadence or estimate of missed profit.
-
-Assess this policy with authenticated read-only captures of quiet and active
-markets: compare message receipt times, transactTime, book changes, connection
-health, and snapshot responses. Measure time blocked by freshness and repair
-waits separately from profitable opportunities. A stronger freshness policy
-needs evidence that an unchanged snapshot is current and that missed updates
-are detected or repaired; connection ping/pong alone does not establish either.
 
 Both feeds are checked immediately before each basket submission. If a feed
 fails after the first fill, reconciliation and recovery retain unmatched

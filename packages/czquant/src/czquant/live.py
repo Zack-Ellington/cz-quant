@@ -81,7 +81,7 @@ class KalshiLive:
             except (KeyError, InvalidOperation, TypeError, ValueError):
                 broker.observe("execution_evidence_unavailable", {"client_order_id": identifier,
                     "reason": "Kalshi response lacks valid average fill price and fee"})
-        elif status is not None:
+        else:
             # A terminal empty IOC has no executions left to reconcile.
             broker.finish(identifier, status)
         # Filled reservations stay until the account monitor books exact receipts.
