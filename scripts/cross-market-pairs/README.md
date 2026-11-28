@@ -3,7 +3,8 @@
 These tools prepare inputs for the [cross-market strategy](../../strategies/cross-market-polymarket/).
 They discover and match markets without opening a cash pool, starting a strategy
 run or placing orders. Run them from the repository root using the strategy's uv
-environment. Write outputs to a private directory outside the source checkout.
+environment. Write outputs to an ignored experiment folder under experiments/, alongside its
+portfolio and runner configs. See the [example](../../experiments/example/).
 
 ## Sports pairs
 

@@ -2,7 +2,10 @@
 
 The shared czquant CLI manages portfolios independently of strategy execution.
 Portfolio commands use the portfolios create/list/inspect/delete subcommands.
-Run it from packages/czquant after uv sync, or from an installed broker-enabled
+The [example experiment](../experiments/example/) bundles portfolio and runner
+configs with a shell example. The root [live quickstart](../README.md#run-a-live-cross-market-experiment)
+includes account setup and both required monitors for the cross-market strategy.
+Run the CLI from packages/czquant after uv sync, or from an installed broker-enabled
 strategy environment. Export STRATEGY_RUNS_DIR first.
 
 ```bash

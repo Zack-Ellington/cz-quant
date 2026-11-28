@@ -51,7 +51,7 @@ can live in the file. Secrets come from exported environment variables; no
 dotenv file is loaded. The root [quickstart](../../README.md#run-a-cross-market-paper-experiment)
 walks through the complete paper workflow.
 
-Copy [config.example.yaml](experiments/config.example.yaml) to your private
+Copy [config.example.yaml](../../experiments/example/config.example.yaml) to your private
 experiment directory. Its pair_file points to a saved discovery candidate file,
 relative to the config. pair_index explicitly selects one element of its pairs
 array, starting at zero. Review that pair and the venue rules before running;
@@ -78,10 +78,9 @@ portfolio with distinct pools; changing only the experiment ID does not isolate
 capital. The resolved pool IDs and full selected pair are recorded with each run.
 
 An inline pair object can replace pair_file and pair_index. The complete
-[game-a JSON example](experiments/game-a.example.json) shows that shape, including
+[game-a JSON example](../../experiments/example/game-a.example.json) shows that shape, including
 the alternative portfolio mapping from venue names to existing pool IDs.
-The trader.py --experiment FILE.json entry point remains available to existing
-callers. Both entry points run the same engine; --once requests a single scan.
+Use runner.py --config for both YAML and JSON; once in the config requests a single scan.
 For YAML inline pairs, quote resolves_at so it remains a string.
 
 Each scan records its input books, fee parameters, buy prices, and affordable
@@ -126,14 +125,16 @@ Reporting reads the economic log without importing the strategy.
 The [operator CLI guide](../../docs/cli.md) documents portfolio commands and
 retirement after positions and orders are cleared.
 
-Copy [portfolio.example.yaml](experiments/portfolio.example.yaml), edit its IDs
-and funding, and create it once through the operator CLI. From this directory:
+Copy [portfolio.example.yaml](../../experiments/example/portfolio.example.yaml), edit its IDs
+and funding, and create it once through the operator CLI. Copy the example directory
+to an ignored experiments/my-paper-run folder at the repository root, then prepare
+and review its candidates as shown in the root quickstart. From this strategy directory:
 
 ```bash
 uv sync --locked
-uv run czquant portfolios create --config "$STRATEGY_RUNS_DIR/experiments/portfolio.yaml"
+uv run czquant portfolios create --config ../../experiments/my-paper-run/portfolio.example.yaml
 uv run czquant portfolios list
-uv run python runner.py --config "$STRATEGY_RUNS_DIR/experiments/config.yaml"
+uv run python runner.py --config ../../experiments/my-paper-run/config.example.yaml
 uv run czquant portfolios inspect game-a --events 20
 ```
 
@@ -152,19 +153,21 @@ parameters.duration_minutes runs until Ctrl-C. Stopping does not close positions
 Live execution requires Polymarket US and pre-created live allocations. Follow
 the [virtual-subaccount guide](../../docs/services/virtual-subaccounts.md):
 register each venue account with czquant account, then specify account and cash
-for each pool in a [live portfolio config](experiments/portfolio-live.example.yaml).
+for each pool in a [live portfolio config](../../experiments/example/portfolio-live.example.yaml).
 czquant portfolios create --config FILE.yaml allocates from both reserves and
 creates the portfolio atomically. The portfolio selects accounts and cash only.
 The runner config selects the portfolio ID and the market pair; brokers enforce
 venue ownership and available cash. Several US pools require account-wide reconciliation;
 repeating map-live cannot prepare these allocations. Registered accounts also
 prevent experiments from opening opposite sides of the same market.
-Set mode to live, select the live pool IDs and set parameters.dry_run to true
+Set mode to live, select the live portfolio ID and set parameters.dry_run to true
 for a dry run. Export the credentials listed in .env.example. The runtime does
 not create accounts, move funds or manage allocation ownership.
 
-Run the independent market and account collectors documented in the service
-guides against the same logging root. Live runs wait for fresh account and
+The [live quickstart](../../README.md#run-a-live-cross-market-experiment) gives
+commands for both monitors, the healthy-status check, strategy startup and
+retirement. Run the independent market and account collectors documented in the
+service guides against the same logging root. Live runs wait for fresh account and
 Polymarket US monitor evidence. Dry runs skip monitor freshness checks while
 retaining allocation and unresolved-order checks.
 

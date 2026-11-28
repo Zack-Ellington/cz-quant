@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [tool.uv]
-# Plain scripts, not an installable package: `uv run python trader.py`.
+# Plain scripts, not an installable package: `uv run python runner.py --config FILE.yaml`.
 package = false
 # OneDrive rejects the hardlinks uv uses by default, which leaves a half-built .venv.
 link-mode = "copy"
@@ -26,7 +26,7 @@ dev = ["pytest>=8", "basedpyright>=1.30"]
 typeCheckingMode = "basic"
 venvPath = "."
 venv = ".venv"
-include = [".", "../../scripts/cross-market-pairs", "../../scripts/cross-market-launch"]
+include = [".", "../../scripts/cross-market-pairs"]
 extraPaths = ["../../scripts/cross-market-pairs"]
 exclude = ["tests", ".venv"]
 

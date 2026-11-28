@@ -23,3 +23,8 @@ build/
 /runs/
 # Runs created from inside a strategy directory when STRATEGY_RUNS_DIR is unset.
 strategies/*/runs/
+
+# Private experiment configs and prepared inputs; only the example is published.
+/experiments/*
+!/experiments/example/
+/experiments/example/candidates.json
