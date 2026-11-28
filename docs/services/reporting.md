@@ -174,6 +174,11 @@ an operational view, not the frozen comparison
 artifact produced by the report command. A heartbeat indicates activity,
 not profitability or complete evidence.
 
+## Experiment companions
+
+The optional [cross-market companion](../../scripts/cross-market-monitor/) provides
+experiment-specific quote collection and charts in its own environment.
+
 ## Export
 
 Create an output directory first. Export produces the common JSONL event
