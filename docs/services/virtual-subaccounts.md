@@ -13,6 +13,16 @@ This follows [principle 5](../design-principles.md#core-principles): each broker
 binds to one pool, allocations on a shared account never count the same cash
 twice, and every allocation change is recorded and reconciled.
 
+## Credentials and registration
+
+API credentials authenticate the venue client. Account registration is a separate
+local bookkeeping operation in packages/czquant: it records the venue scope,
+creates the reserve pool and records unallocated cash after checking existing
+positions and orders. It does not create a venue account or store credentials.
+Register once in the shared ledger, then reuse the account across portfolios and
+strategies. See the [operator CLI](../cli.md#accounts-and-credentials) for setup
+from the repository root. Independent paper pools do not require registration.
+
 ## Model
 
 | Piece | What it is |

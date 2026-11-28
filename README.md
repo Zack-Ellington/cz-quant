@@ -37,197 +37,226 @@ independently.
 
 ## Quickstart
 
-You need only [uv](https://docs.astral.sh/uv/) and git. uv installs the correct
-Python version for each strategy.
-
-For authenticated monitoring and live account mapping, see the
-[Kalshi broker guide](docs/services/kalshi-broker.md). Public-data paper runs
-do not require account credentials.
+You need [uv](https://docs.astral.sh/uv/) and git. uv installs the required Python
+version. Run the commands below from the repository root:
 
 ```bash
 git clone git@github.com:Zack-Ellington/cz-quant.git
 cd cz-quant
 ```
 
-### Run a cross-market paper experiment
+The shared packages/czquant environment owns account registration, portfolio
+allocation, monitoring and reporting. Strategies have separate environments and
+operate on existing allocations. Only the strategy example below requires the
+cross-market environment.
 
-The operator CLI creates a portfolio and its venue allocations once. The
-strategy selects that existing portfolio by ID. Restarting the runner preserves
-cash, positions, losses and pending orders. Discovery prepares a candidate file;
-reporting reads the same ledger independently of the strategy.
+### Set up the shared CLI and environment
 
-All commands below run from the repository root. Install the strategy and export
-the environment in each shell. Public paper runs can leave the credential values
-empty. The example state directory is shared across working directories.
+Install the shared package and copy the environment template:
 
 ```bash
+uv sync --locked --project packages/czquant
 cp .env.example .env
 ```
 
-After editing .env:
+Edit .env, then export it in every shell used for a strategy or service. Public
+paper runs need no credentials. Live account operations need the keys for their
+venues. The example stores the shared ledger and logs in "$HOME/.czquant/runs".
+No Python command loads .env automatically.
 
 ```bash
 set -a; source .env; set +a
 mkdir -p "$STRATEGY_RUNS_DIR"
-uv sync --locked --project strategies/cross-market-polymarket
-cp -R experiments/example experiments/my-paper-run
+uv run --project packages/czquant czquant --help
 ```
 
-Only experiments/example is tracked. Other experiment folders hold private
-configs and prepared inputs and are ignored by Git. Preserve them when removing
-a checkout. The ledger and execution logs stay under STRATEGY_RUNS_DIR.
-
-The copied portfolio.example.yaml creates game-a with $60 in a Kalshi paper pool
-and $40 in a Polymarket US paper pool. Edit IDs and cash before creating it. Use
-matching portfolio IDs in both configs and distinct pool IDs for independent
-experiments. Repeated creation fails without adding cash.
+Keep experiment configs and reviewed inputs together in a private directory:
 
 ```bash
-uv run --project strategies/cross-market-polymarket czquant portfolios create \
-  --config experiments/my-paper-run/portfolio.example.yaml
-uv run --project strategies/cross-market-polymarket czquant portfolios list
+export EXPERIMENT_DIR="$PWD/experiments/my-run"
+mkdir -p "$EXPERIMENT_DIR"
 ```
 
-Discover a market pair. This reads public data and writes candidates; it does
-not trade. Use another supported league if no suitable pair is returned.
+Only experiments/example is tracked. Every other experiment directory is ignored
+by Git. Preserve those files when removing a checkout. Ledger state and execution
+logs remain under STRATEGY_RUNS_DIR, independently of experiment directories.
+
+### Create a portfolio
+
+A portfolio groups venue cash pools. Each pool has its own cash and cannot spend
+another pool's allocation. Portfolio configs select accounts or paper venues and
+cash amounts, not strategies or markets. Choose one of the following funding
+options, then create the portfolio with the common command below.
+
+For paper trading, copy the paper example. It creates game-a with $60 of
+hypothetical Kalshi cash and $40 of hypothetical Polymarket US cash. Independent
+paper pools need neither credentials nor registered accounts.
 
 ```bash
-uv run --project strategies/cross-market-polymarket python scripts/cross-market-pairs/prepare.py \
-  --venue polymarket-us --leagues nba --out experiments/my-paper-run/candidates.json
+cp experiments/example/portfolio.example.yaml "$EXPERIMENT_DIR/portfolio.yaml"
 ```
 
-Review the pairs array, including outcome mappings, deadlines, ties and
-postponement rules at both venues. Matching names do not establish equivalent
-payouts. Set pair_index in config.example.yaml to the reviewed pair's zero-based
-index. pair_file resolves relative to the config, so keep candidates.json beside
-it and unchanged for reproducible restarts. See the
-[discovery guide](scripts/cross-market-pairs/README.md).
+For live trading, credentials authenticate venue API requests; registration
+establishes ownership in the local ledger. It records the venue account scope
+and creates a reserve for cash not already allocated to pools. This lets brokers
+and monitors reconcile all allocations against one account without counting the
+same money twice. Registration is local bookkeeping, not exchange signup, a new
+API key, or a deposit. It is required for the account allocations in this example
+and is implemented in the shared package, independently of any strategy.
 
-The example uses mode: paper and once: true. Run one scan with the selected
-portfolio, pair, timing and sizing supplied by the config:
+First inspect accounts already registered in this ledger:
 
 ```bash
-uv run --project strategies/cross-market-polymarket python strategies/cross-market-polymarket/runner.py \
-  --config experiments/my-paper-run/config.example.yaml
+uv run --project packages/czquant czquant accounts
 ```
 
-A scan can make no trades when no basket meets the return hurdle. For repeated
-scans, set once to false and parameters.duration_minutes to a time limit, or null
-to run until Ctrl-C. Restart with only the runner command.
-
-Inspect positions, cash, fees, realized and unrealized P&L and ledger events.
-Portfolio totals overlap pool rows; do not add them together.
-
-```bash
-uv run --project strategies/cross-market-polymarket czquant portfolios inspect game-a --events 20
-```
-
-Open positions need fresh recorded marks for complete valuation. Missing or
-stale marks produce null net P&L, not zero profit. Refresh paper references and
-settlement evidence, then inspect again:
+If the venue accounts are not registered, register them once. The IDs below are
+local names; Kalshi's scope is its primary account on the default exchange.
+Reuse existing registered IDs when present. Registration reads the venue and
+refuses unexplained holdings or orders; resolve those through the
+[account setup guide](docs/services/virtual-subaccounts.md).
 
 ```bash
-uv run --project strategies/cross-market-polymarket czquant monitor market --once
-uv run --project strategies/cross-market-polymarket czquant monitor polymarket-us --once
-uv run --project strategies/cross-market-polymarket czquant portfolios inspect game-a
-```
-
-For a new portfolio, after preparing and reviewing its candidates, the copied
-[run.sh](experiments/example/run.sh) runs the create, list, runner and inspect
-commands together. Do not run it after already creating the same portfolio;
-resume with runner.py instead. For frozen reports and a browser dashboard, see
-[reporting](docs/services/reporting.md). For retirement, see the
-[operator CLI guide](docs/cli.md).
-
-### Run a live cross-market experiment
-
-Live execution needs credentials, registered accounts, funded reserves and two
-running account monitors. Portfolio creation only allocates ledger cash; it does
-not deposit money at either venue. The config selects accounts and amounts, not
-markets. Review [live account setup](docs/services/virtual-subaccounts.md) first.
-
-Use the same exported .env and strategy environment as above. Inspect registered
-accounts. If these venue accounts are already registered, use their existing
-IDs in portfolio-live.example.yaml. Otherwise, register them once:
-
-```bash
-uv run --project strategies/cross-market-polymarket czquant accounts
-uv run --project strategies/cross-market-polymarket czquant account main-kalshi \
+uv run --project packages/czquant czquant account main-kalshi \
   --venue kalshi --subaccount 0 --primary-account
-uv run --project strategies/cross-market-polymarket czquant account main-polymarket-us \
+uv run --project packages/czquant czquant account main-polymarket-us \
   --venue polymarket-us
 ```
 
-Create a private experiment directory and discover a pair:
+Copy the live example instead of the paper example. It creates game-live by
+allocating $10 from each registered account reserve. Edit account IDs to match
+your ledger and ensure each reserve has the requested cash.
 
 ```bash
-mkdir -p experiments/my-live-run
-cp experiments/example/portfolio-live.example.yaml experiments/my-live-run/portfolio.yaml
-cp experiments/example/config.example.yaml experiments/my-live-run/config.yaml
+cp experiments/example/portfolio-live.example.yaml "$EXPERIMENT_DIR/portfolio.yaml"
+```
+
+For either option, edit portfolio and pool IDs before creating an independent
+experiment. Creation is atomic and refuses reused IDs without adding cash:
+
+```bash
+uv run --project packages/czquant czquant portfolios create --config "$EXPERIMENT_DIR/portfolio.yaml"
+uv run --project packages/czquant czquant portfolios list
+```
+
+Create the portfolio once. Restarting a strategy preserves its cash, positions,
+losses and pending orders. Account registration is also once per venue account
+in this ledger, not once per portfolio or strategy. See the
+[operator CLI guide](docs/cli.md) for lifecycle details.
+
+### Start live account monitors
+
+Skip this step for a public paper run. Account monitors are shared services that
+record fills and reconcile cash and positions across all allocations at their
+venue. Start the components for the venues you use. They run independently of
+strategies and use the same STRATEGY_RUNS_DIR.
+
+For Kalshi, open a second terminal at the repository root:
+
+```bash
+set -a; source .env; set +a
+uv run --project packages/czquant czquant monitor account --interval 60
+```
+
+For Polymarket US, open another terminal at the repository root:
+
+```bash
+set -a; source .env; set +a
+uv run --project packages/czquant czquant monitor polymarket-us --interval 60
+```
+
+Wait for status healthy with an empty discrepancies list from each component
+(account and polymarket_us). Resolve degraded or failed checks using the
+[account monitor guide](docs/services/account-monitor.md). Keep the collectors
+running during live trading and through reconciliation afterward. Each strategy
+sets its own readiness policy; the cross-market example below pauses live
+entries when either account monitor is stale, missing or discrepant.
+
+### Run a strategy: cross-market example
+
+This example selects one reviewed pair and an existing portfolio containing one
+Kalshi pool and one Polymarket US pool. Other strategies use their own inputs and
+entry points; account and portfolio management remain the shared CLI's job.
+Install this strategy's environment and discover candidate pairs:
+
+```bash
+uv sync --locked --project strategies/cross-market-polymarket
 uv run --project strategies/cross-market-polymarket python scripts/cross-market-pairs/prepare.py \
-  --venue polymarket-us --leagues nba --out experiments/my-live-run/candidates.json
+  --venue polymarket-us --leagues nba --out "$EXPERIMENT_DIR/candidates.json"
+cp experiments/example/config.example.yaml "$EXPERIMENT_DIR/config.yaml"
 ```
 
-After reviewing the pair, edit config.yaml: set id and portfolio to game-live,
-mode to live, pair_index to the reviewed index, and once to false. Set
-parameters.max_basket_dollars and parameters.max_total_dollars to 20 for this
-$20 example. Set parameters.max_capital_frac to 1 to make the full allocation
-available; the default 0.1 limits outstanding cost to 10% of contributed capital.
-Keep parameters.monitor_max_age at its 300-second default. In portfolio.yaml,
-select your registered account IDs. Then allocate $10 per venue in one command:
+Discovery reads public data and does not trade. Review the pairs array, including
+outcome mappings, deadlines, ties and postponement rules at both venues. Matching
+names alone do not establish equivalent payouts. Use another supported league
+if no suitable pair is returned; see the [discovery guide](scripts/cross-market-pairs/README.md).
 
-```bash
-uv run --project strategies/cross-market-polymarket czquant portfolios create \
-  --config experiments/my-live-run/portfolio.yaml
-uv run --project strategies/cross-market-polymarket czquant portfolios inspect game-live
-```
+In config.yaml, set portfolio to the ID created above and pair_index to the
+reviewed pair's zero-based index. pair_file resolves relative to the config;
+keep candidates.json beside it and unchanged for reproducible restarts.
 
-Start the Kalshi account monitor in a second terminal, from the repository root:
-
-```bash
-set -a; source .env; set +a
-uv run --project strategies/cross-market-polymarket czquant monitor account --interval 60
-```
-
-Start the Polymarket US monitor in a third terminal, also from the repository root:
-
-```bash
-set -a; source .env; set +a
-uv run --project strategies/cross-market-polymarket czquant monitor polymarket-us --interval 60
-```
-
-Wait for each terminal to log status healthy with an empty discrepancies list.
-The component names are account and polymarket_us. Resolve degraded or failed
-checks using the [account monitor guide](docs/services/account-monitor.md) before
-starting. Keep both monitors running with the same STRATEGY_RUNS_DIR as the
-strategy. Missing, stale or discrepant account evidence pauses live entries.
-
-In the first terminal, start the configured runner:
+For the paper example, the defaults select game-a, mode: paper and once: true.
+For the live example, set id and portfolio to game-live, mode to live, and once
+to false. Set parameters.max_basket_dollars and parameters.max_total_dollars to
+20 for the $20 allocation. Set parameters.max_capital_frac to 1 to make the full
+allocation available; the default 0.1 limits outstanding cost to 10% of
+contributed capital. Both live monitors must be healthy before starting.
 
 ```bash
 uv run --project strategies/cross-market-polymarket python strategies/cross-market-polymarket/runner.py \
-  --config experiments/my-live-run/config.yaml
+  --config "$EXPERIMENT_DIR/config.yaml"
 ```
 
-This command can submit live orders. Setting parameters.dry_run to true builds
-orders without submitting them, but also skips monitor freshness checks; a dry
-run does not validate monitor readiness. Inspect P&L from another shell:
+Live mode can submit real orders. Setting parameters.dry_run to true builds
+orders without sending them, but skips monitor freshness checks; a dry run does
+not establish monitor readiness. A scan can make no trades when no basket meets
+the configured return hurdle. For repeated scans, set once to false and
+parameters.duration_minutes to a time limit, or null to run until Ctrl-C.
+Restart with only the runner command. See the
+[strategy guide](strategies/cross-market-polymarket/README.md) for execution and recovery.
+
+The [example directory](experiments/example/) also contains a shell script that
+calls the shared CLI and this runner for a new paper portfolio after candidate
+review. Do not use it to recreate a portfolio that already exists.
+
+### Inspect results and retire a portfolio
+
+These commands work independently of the strategy. Use your portfolio ID;
+replace game-a with game-live for the live example:
 
 ```bash
-uv run --project strategies/cross-market-polymarket czquant portfolios inspect game-live --events 20
+uv run --project packages/czquant czquant portfolios inspect game-a --events 20
 ```
 
-Stop the runner with Ctrl-C. Keep monitors running until fills, outstanding
-orders and any settlements reconcile. Stopping does not close positions. When
-flat with no unresolved orders, retire the portfolio and return its remaining
-cash to reserves, then stop monitors if no other live strategy needs them:
+Inspection reports positions, cash, fees, realized and unrealized P&L, and ledger
+events. Portfolio totals overlap pool rows; do not add them together. Open
+positions need fresh recorded marks for complete valuation. Missing or stale
+marks produce null net P&L, not zero profit. For paper portfolios, refresh the
+references for their venues before inspecting again:
 
 ```bash
-uv run --project strategies/cross-market-polymarket czquant portfolios delete game-live
-uv run --project strategies/cross-market-polymarket czquant portfolios inspect game-live --events 20
+uv run --project packages/czquant czquant monitor market --once
+uv run --project packages/czquant czquant monitor polymarket-us --once
+uv run --project packages/czquant czquant portfolios inspect game-a
 ```
 
-Ledger history and logs remain available after retirement.
+The market component covers Kalshi; polymarket-us covers Polymarket US. For
+international Polymarket, use monitor polymarket. Live collectors already running
+continue recording account evidence. For frozen reports and a browser dashboard,
+see the [reporting guide](docs/services/reporting.md).
+
+Stop the strategy with Ctrl-C. Keep live monitors running until outstanding
+orders, fills and settlements reconcile. Stopping does not close positions.
+Once flat with no unresolved orders, retire the portfolio:
+
+```bash
+uv run --project packages/czquant czquant portfolios delete game-a
+uv run --project packages/czquant czquant portfolios inspect game-a --events 20
+```
+
+Registered allocations return their remaining cash to their account reserves.
+Independent paper pools record a capital withdrawal. Ledger history and logs
+remain available. Stop monitors only when no other live strategy needs them.
 
 The older election strategy has its own [quickstart](strategies/2026-midterm-prediction-arbitrage/README.md).
 
@@ -237,8 +266,8 @@ Install the shared CLI separately from strategy environments. From the
 repository root:
 
 ```bash
-cd packages/czquant
-uv sync
+uv sync --locked --project packages/czquant
+uv run --project packages/czquant czquant --help
 ```
 
 Use the suggested state directory outside the checkout, and export the same

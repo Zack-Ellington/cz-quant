@@ -1,18 +1,62 @@
 # Operator CLI
 
-The shared czquant CLI manages portfolios independently of strategy execution.
-Portfolio commands use the portfolios create/list/inspect/delete subcommands.
-The [example experiment](../experiments/example/) bundles portfolio and runner
-configs with a shell example. The root [live quickstart](../README.md#run-a-live-cross-market-experiment)
-includes account setup and both required monitors for the cross-market strategy.
-Run the CLI from packages/czquant after uv sync, or from an installed broker-enabled
-strategy environment. Export STRATEGY_RUNS_DIR first.
+The shared czquant CLI manages accounts, portfolios, monitoring and reporting
+independently of strategy execution. These operations live in packages/czquant;
+no strategy environment is required. All shell examples in this guide run from
+the repository root with STRATEGY_RUNS_DIR exported as described under
+[State directory](#state-directory).
 
 ```bash
-uv run czquant portfolios create --config portfolio.yaml
-uv run czquant portfolios list
-uv run czquant portfolios inspect game-a --events 20
+uv sync --locked --project packages/czquant
+uv run --project packages/czquant czquant --help
 ```
+
+Portfolio commands use the portfolios create/list/inspect/delete subcommands.
+Copy a [sample portfolio config](../experiments/example/) to your own experiment
+directory and edit its IDs and funding before creating it:
+
+```bash
+uv run --project packages/czquant czquant portfolios create --config experiments/my-run/portfolio.yaml
+uv run --project packages/czquant czquant portfolios list
+uv run --project packages/czquant czquant portfolios inspect game-a --events 20
+```
+
+## Accounts and credentials
+
+Credentials authenticate API requests. Registration records the account in the
+local ledger so allocations have an owner and a shared reserve. It reads venue
+balances, checks existing holdings and orders, and records cash not already
+assigned to pools in the reserve. Brokers enforce each pool's allocation;
+monitors reconcile the account against all its pools together.
+
+Registration does not create an exchange account, generate or store API keys,
+deposit money, select a market, or start a strategy. It persists under
+STRATEGY_RUNS_DIR and is needed once per venue account in that ledger. The local
+account ID is an operator-chosen name. Kalshi registration also records the
+subaccount and exchange scope. Credentials continue to come from the environment
+for authenticated commands.
+
+Check for existing registrations first:
+
+```bash
+uv run --project packages/czquant czquant accounts
+```
+
+For venue accounts not yet registered, these commands register Kalshi's primary
+account and the authenticated Polymarket US account:
+
+```bash
+uv run --project packages/czquant czquant account main-kalshi \
+  --venue kalshi --subaccount 0 --primary-account
+uv run --project packages/czquant czquant account main-polymarket-us --venue polymarket-us
+```
+
+Use those IDs in the account fields of allocation configs. Registration and
+allocation reuse the shared package's venue backing and reconciliation checks;
+unexplained holdings or orders must be reconciled before registration succeeds.
+See [virtual subaccounts](services/virtual-subaccounts.md) for account scopes,
+reserves and recovery. Independent paper pools need no registration; hypothetical
+registered accounts are also supported when testing shared-account allocations.
 
 ## Create
 
@@ -66,8 +110,8 @@ that already exists.
 
 portfolios list shows active pool, portfolio and legacy rows with their IDs, mode
 and member pools. portfolios inspect ID returns open FIFO lots with their owning
-pool, current
-cash, contributed capital, reservations, fees, realized and unrealized P&L,
+pool, current cash, contributed capital, reservations, fees, realized and
+unrealized P&L,
 equity and quote bounds using the dashboard's valuation policy. --events N
 includes the latest N ledger events belonging to those pools, plus their total
 count. Events include orders, fills, transactions and strategy observations;
@@ -83,9 +127,9 @@ metrics, evidence coverage and a reproducible snapshot.
 Stop the strategy process before retiring its portfolio:
 
 ```bash
-uv run czquant portfolios delete game-a
-uv run czquant portfolios list --all
-uv run czquant portfolios inspect game-a --events 20
+uv run --project packages/czquant czquant portfolios delete game-a
+uv run --project packages/czquant czquant portfolios list --all
+uv run --project packages/czquant czquant portfolios inspect game-a --events 20
 ```
 
 Deletion retires the portfolio and its pools. It requires flat positions, no
@@ -139,4 +183,4 @@ Account registration, allocation and pool closure are documented in
 are in the [Kalshi](services/kalshi-broker.md) and
 [Polymarket](services/polymarket-broker.md) guides. The
 [reporting guide](services/reporting.md) owns valuation policy, time-window
-reports, dashboard, export and backup. Run uv run czquant --help for all commands.
+reports, dashboard, export and backup. Run uv run --project packages/czquant czquant --help for all commands.

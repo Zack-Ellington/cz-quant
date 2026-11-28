@@ -48,7 +48,7 @@ The runtime interface is `uv run python runner.py --config FILE.yaml` from this
 strategy directory. The file specifies an ID, an existing portfolio ID, mode,
 one prepared pair, once and parameters. JSON is also accepted. All run options
 can live in the file. Secrets come from exported environment variables; no
-dotenv file is loaded. The root [quickstart](../../README.md#run-a-cross-market-paper-experiment)
+dotenv file is loaded. The root [quickstart](../../README.md#run-a-strategy-cross-market-example)
 walks through the complete paper workflow.
 
 Copy [config.example.yaml](../../experiments/example/config.example.yaml) to your private
@@ -128,14 +128,16 @@ retirement after positions and orders are cleared.
 Copy [portfolio.example.yaml](../../experiments/example/portfolio.example.yaml), edit its IDs
 and funding, and create it once through the operator CLI. Copy the example directory
 to an ignored experiments/my-paper-run folder at the repository root, then prepare
-and review its candidates as shown in the root quickstart. From this strategy directory:
+and review its candidates as shown in the root quickstart. From the repository root:
 
 ```bash
-uv sync --locked
-uv run czquant portfolios create --config ../../experiments/my-paper-run/portfolio.example.yaml
-uv run czquant portfolios list
-uv run python runner.py --config ../../experiments/my-paper-run/config.example.yaml
-uv run czquant portfolios inspect game-a --events 20
+uv sync --locked --project packages/czquant
+uv sync --locked --project strategies/cross-market-polymarket
+uv run --project packages/czquant czquant portfolios create --config experiments/my-paper-run/portfolio.example.yaml
+uv run --project packages/czquant czquant portfolios list
+uv run --project strategies/cross-market-polymarket python strategies/cross-market-polymarket/runner.py \
+  --config experiments/my-paper-run/config.example.yaml
+uv run --project packages/czquant czquant portfolios inspect game-a --events 20
 ```
 
 Repeat only the runner command on restart. Cash, positions, losses and
@@ -164,9 +166,9 @@ Set mode to live, select the live portfolio ID and set parameters.dry_run to tru
 for a dry run. Export the credentials listed in .env.example. The runtime does
 not create accounts, move funds or manage allocation ownership.
 
-The [live quickstart](../../README.md#run-a-live-cross-market-experiment) gives
-commands for both monitors, the healthy-status check, strategy startup and
-retirement. Run the independent market and account collectors documented in the
+The [shared monitor setup](../../README.md#start-live-account-monitors) gives
+commands for both monitors and the healthy-status check. Portfolio setup and
+retirement use the shared CLI, independently of this strategy. Run the independent market and account collectors documented in the
 service guides against the same logging root. Live runs wait for fresh account and
 Polymarket US monitor evidence. Dry runs skip monitor freshness checks while
 retaining allocation and unresolved-order checks.
