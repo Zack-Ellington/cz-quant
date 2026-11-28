@@ -50,6 +50,21 @@ def test_partial_fill_and_consumption_survive_restart(tmp_path):
     reopened.create('other','100')
     assert Broker(reopened,'other',Paper(v,0)).submit(order())['filled']=='10'
 
+def test_paper_uses_supplied_fee_schedule_for_each_order(tmp_path, monkeypatch):
+    _, broker, venue = setup(tmp_path)
+    schedule = {'fee_type': 'quadratic', 'fee_multiplier': '1'}
+    def read_schedule(market):
+        assert market['series_ticker'] == 'SERIES'
+        return schedule
+    monkeypatch.setattr(venue, 'get', lambda *args: pytest.fail('unexpected fee request'))
+    broker.adapter = Paper(venue, latency=0, fee_schedule=read_schedule)
+    first = broker.submit(order(count='2'))
+    schedule = {'fee_type': 'quadratic', 'fee_multiplier': '2'}
+    second = broker.submit(order(count='2'))
+    assert D(first['fee']) == D('.04')
+    assert D(second['fee']) == D('.07')
+    assert broker.state().cash == D('98.29')
+
 def test_close_fifo(tmp_path):
     _,b,_=setup(tmp_path); b.submit(order())
     assert b.submit(order('ask','15','.39'))['filled']=='10'

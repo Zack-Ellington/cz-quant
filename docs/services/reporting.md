@@ -69,10 +69,9 @@ pools for new trials. Live mapping requires reconciled venue allocations and
 the account conditions in the venue guide. Existing immutable report artifacts
 remain valid records of the policy that generated them.
 
-The previous portfolio creation command with --cash and the cross-market
-CZQUANT_PORTFOLIO setting are replaced by explicit pool creation and selection.
-The Python Store.create spelling remains a deprecated single-venue helper for
-older callers; new integrations use Store.create_pool with an explicit venue.
+New integrations create venue cash pools with Store.create_pool and select them
+explicitly. Store.create remains a deprecated single-venue helper for callers
+that still use historical ledger formats.
 There is no scheduled removal date for historical report support.
 
 ## Generate a comparison
@@ -158,6 +157,11 @@ an operational view, not the frozen comparison
 artifact produced by the report command. A heartbeat indicates activity,
 not profitability or complete evidence.
 
+## Experiment companions
+
+The optional [cross-market companion](../../scripts/cross-market-monitor/) provides
+experiment-specific quote collection and charts in its own environment.
+
 ## Export
 
 Create an output directory first. Export produces the common JSONL event
@@ -205,3 +209,11 @@ Share only reviewed report artifacts that contain no private account evidence.
 Implementation: [report.py](../../packages/czquant/src/czquant/report.py),
 [dashboard.py](../../packages/czquant/src/czquant/dashboard.py), and
 [store.py](../../packages/czquant/src/czquant/store.py).
+
+## Experiment companions
+
+Experiment-specific reports can read strategy observations from the ledger
+alongside broker and account-monitor evidence. Decision plots use the recorded
+inputs; reference marks cannot reconstruct missing decisions. Balances and trade
+markers use accounting records. The cross-market strategy documents its
+[capture format](../../strategies/cross-market-polymarket/README.md#streaming-execution-quotes).

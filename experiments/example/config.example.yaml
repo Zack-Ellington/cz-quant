@@ -7,7 +7,7 @@ pair_file: candidates.json
 pair_index: 0
 once: true
 parameters:
-  interval_seconds: 15
+  interval_seconds: 0.1
   max_sets: 20
   max_basket_dollars: 25
   max_total_dollars: 100

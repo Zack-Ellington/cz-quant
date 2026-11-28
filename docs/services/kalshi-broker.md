@@ -70,6 +70,10 @@ is reset. These are simulation assumptions, not a queue-position model.
 The [market monitor](market-monitor.md) collects marks and settles paper lots
 after confirmed payouts, including after the strategy stops.
 
+Paper normally fetches and caches each series' fee schedule. A strategy that
+maintains its own metadata can pass fee_schedule=reader to Paper; the reader
+receives the market metadata and returns the fee schedule for each order.
+
 ## Credentials and account setup
 
 Paper market reads need no key. Authenticated account reads and live orders
@@ -189,7 +193,28 @@ the built request and sends nothing. Unknown responses persist as unknown
 and keep their reservations. This adapter does not expose cancel or amend;
 the raw authenticated Kalshi transport above supports those operations.
 
-The source is [broker.py](../../packages/czquant/src/czquant/broker.py),
-[kalshi.py](../../packages/czquant/src/czquant/kalshi.py),
+## Immediate execution evidence
+
+Paper and normalized live results can include an execution object with decimal
+strings: quantity, yes_notional, fee, yes_price_min, and yes_price_max. The
+notional is the sum of YES price times quantity, including for ask orders;
+fee is the total fee. Paper summaries use the simulated fills already booked.
+Live summary evidence can arrive before the account monitor's exact fills.
+It does not release filled reservations or create additional accounting entries.
+
+For terminal V2 IOC/FOK replies, the live adapter returns confirmed quantity and,
+when valid averages are present, an execution summary with YES notional, total
+fees and individual-price bounds. Notional and fees use the response averages;
+the submitted limit supplies the conservative bound for partial matching.
+Missing or invalid averages leave the summary absent and produce a diagnostic.
+Strategies must not assume that the filled count implies priced accounting lots.
+
+The raw response is durable in the order acknowledgement. The account monitor
+books exact fills once and releases filled reservations. A confirmed terminal
+zero-fill reply releases its reservation immediately. See the venue's
+[create-order response](https://docs.kalshi.com/api-reference/orders/create-order-v2).
+
+Implementation: [broker.py](../../packages/czquant/src/czquant/broker.py),
+[live.py](../../packages/czquant/src/czquant/live.py),
 [paper.py](../../packages/czquant/src/czquant/paper.py), and
-[operator.py](../../packages/czquant/src/czquant/operator.py).
+[kalshi.py](../../packages/czquant/src/czquant/kalshi.py).

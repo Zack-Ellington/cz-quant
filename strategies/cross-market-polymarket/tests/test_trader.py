@@ -156,7 +156,7 @@ def test_a_short_later_leg_has_the_extras_sold_back(engine_for, monkeypatch):
     engine = engine_for(kalshi=kalshi, poly=poly)
     basket = engine.scan()
     assert basket is not None
-    monkeypatch.setattr(engine, "price_pair", lambda: (basket, "ok"))
+    monkeypatch.setattr(engine, "price_pair", lambda **_: (basket, "ok"))
     kalshi.fill_depth = "10"  # reprice at 100, but only 10 remain when the order lands
     engine.execute(basket)
     state = combine_states([b.state() for b in engine.brokers.values()])

@@ -88,9 +88,12 @@ def test_configured_paper_run_reports_fills_and_preserves_state_on_restart(tmp_p
     assert result['pnl']['contributed'] == 100
     cash = result['pnl']['cash']
     restarted = trader.Engine(runner.load_experiment(str(path)), FakeKalshi(), revision='fixture', us=FakeUSVenue())
+    # Reopening preserves state. With no cooldown, another scan may trade again.
+    reopened = details(store, 'game')
+    assert reopened['pnl']['cash'] == cash and reopened['pnl']['fills'] == 2
     restarted.run(once=True)
     after = details(store, 'game')
-    assert after['pnl']['cash'] == cash and after['pnl']['fills'] == 2
+    assert after['pnl']['cash'] < cash and after['pnl']['fills'] == 4
     assert after['pnl']['contributed'] == 100
     engine.store.close()
     restarted.store.close()
@@ -105,4 +108,13 @@ def test_retired_portfolio_cannot_start_another_run(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, 'Engine', lambda *a: pytest.fail('engine must not start'))
     with pytest.raises(SystemExit):
         runner.main(['--config', str(path)])
+    store.close()
+
+
+def test_config_accepts_streaming_execution_settings(tmp_path, monkeypatch):
+    store, path = prepare(tmp_path, monkeypatch)
+    path.write_text(path.read_text() + '  execution_websocket: true\n  profit_slippage: true\n  quote_max_age: 1.5\n')
+    cfg = runner.load_experiment(str(path))
+    assert cfg.execution_websocket and cfg.profit_slippage
+    assert cfg.quote_max_age == 1.5 and cfg.interval_seconds == 0.1
     store.close()

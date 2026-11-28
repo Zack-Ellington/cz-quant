@@ -83,11 +83,10 @@ the alternative portfolio mapping from venue names to existing pool IDs.
 Use runner.py --config for both YAML and JSON; once in the config requests a single scan.
 For YAML inline pairs, quote resolves_at so it remains a string.
 
-Each scan records its input books, fee parameters, buy prices, and affordable
-fee-adjusted cross-venue gaps in the ledger's scan_complete observation. Reporting
-can chart these quote payloads without making separate venue requests. Missing
-or failed reads record an empty quote sample instead of repeating old prices.
-Quote measurements do not change the selected basket or execution settings.
+Scan diagnostics retain the books used for decisions. The independent
+[experiment companion](../../scripts/cross-market-monitor/) reads them without
+making exchange requests. See [Streaming execution quotes](#streaming-execution-quotes)
+for capture timing, freshness evidence and diagnostic limitations.
 
 The pair object has venue, kalshi_event, kalshi_series, polymarket_event,
 polymarket_market, resolves_at, outcomes and optional evidence. Preprocessing
@@ -99,8 +98,10 @@ return hurdle. evidence retains the matching method and reviewed rules.
 
 Parameters omitted from the file use [Config defaults](trader.py):
 
-- interval_seconds, cooldown and duration_minutes control timing. A null duration
-  runs until stopped.
+- Streaming runs evaluate on book updates. interval_seconds defaults to 0.1 seconds
+  and controls the recovery watchdog; it does not delay stream updates. In explicit
+  REST mode it is the polling interval, subject to request duration and venue limits.
+  A null duration_minutes runs until stopped. There is no trade cooldown.
 - max_capital_frac limits outstanding cost relative to contributed capital.
   max_sets limits basket size. max_basket_dollars and max_total_dollars impose
   absolute limits; null disables the respective dollar cap.
@@ -205,7 +206,7 @@ repair acknowledgement blocks further submissions until the monitor resolves it;
 restarting does not duplicate an uncertain sell. At most one recovery order is
 submitted per scan. Matched inventory partway through settlement is retained.
 
-Restart reads the existing economic records and cooldown. It does not retry
+Restart reads the existing economic records. It does not retry
 uncertain orders with new IDs. Acknowledged orders pause entries without a
 persistent halt until the monitor books their fills and releases reservations.
 Pending or unknown writes still halt entries. Execution-recovery halts clear
@@ -237,3 +238,124 @@ These checks cover preprocessing exports, one-pair runtime isolation, independen
 cash pools, whole-basket preflight, retained balances and reservations, restarts,
 partial-fill repairs and unknown execution outcomes. Type checking includes the
 preprocessing bundle.
+
+### Profit-bounded slippage
+
+Set `parameters.profit_slippage` to `true` for a Kalshi/Polymarket US
+experiment to let IOC orders cross beyond the observed book prices. The default
+is `false`. The strategy splits the remaining after-fee profit allowance equally
+between the legs, then reallocates unused allowance in submission order when
+price increments or pool caps leave room. It preserves `min_edge` at the limit
+prices and respects
+broker reservations and the basket capital cap. Limits use the market price
+increment (a conservative one-cent increment for Kalshi).
+
+After the first fill, the broker submit result supplies execution quantity,
+YES notional, fees, and price bounds for the second limit. Paper and Polymarket
+US adapters summarize their exact receipts. Kalshi supplies validated V2 response
+averages for cost and fees, and uses the submitted limit as a conservative bound
+on individual fills. An average alone cannot bound a partially matched basket.
+The account monitor still books Kalshi receipts and releases filled reservations;
+the response summary does not create spendable cash or duplicate accounting.
+A confirmed terminal empty order releases its reservation immediately.
+
+The calculation allocates first-leg fees proportionally to matched contracts and
+bounds second-leg fees for each possible integer partial fill. Missing or invalid
+execution evidence creates a recoverable halt. If no second limit meets the
+floor, the existing automatic repair sells the unmatched first leg. Repair losses
+and a tied game are outside the completed-basket profit floor. Slippage does not
+guarantee execution. Rechecks price only the originally selected contracts, using
+the same configured thresholds as entry; there is no lower recheck threshold.
+
+Slippage observations record the second limit, first-leg price bound, fees, and
+matched target quantity. These diagnostics are batched after execution. Quote
+checks are attached to each order's durable submission context, without separate
+observation commits between the quote check and submit. The original expected
+profit remains the book-price estimate; requests record the submitted limits.
+
+Each new attempt requires current quotes, funding, and resolved prior orders.
+There is no additional wait after a successful or confirmed empty IOC. Unknown
+writes and unmatched inventory retain their reconciliation and recovery gates.
+
+### Streaming execution quotes
+
+Set parameters.execution_websocket to true to use authenticated Kalshi and
+Polymarket US order books for entry pricing, rechecks, and repair bids. Both
+venue credentials are required. Stream messages wake the execution loop immediately;
+updates arriving during execution are coalesced into the next evaluation. The
+100 ms default watchdog checks recovery without repeating unchanged quote scans.
+Heartbeats are written every five seconds. Venue rate limits still apply, and a
+filled Kalshi order still pauses new entries until accounting reconciles it.
+This scheduling policy is not a guarantee of venue execution latency.
+
+REST remains the source of market metadata and fee schedules. A strategy-owned
+worker refreshes them every five seconds, outside the quote-to-order path, using
+separate read clients. A failed refresh invalidates the reference snapshot; data
+older than 15 seconds from the start of its request is also unavailable. These
+reference intervals do not control quote sampling. Request failures pause
+execution and retry. Unexpected worker errors are logged with a traceback and
+propagated to metadata readers. Paper execution uses the refreshed fee schedule
+for each order.
+
+Streaming execution never falls back to REST books. Explicit REST mode requires
+a complete, open Polymarket book with exchange and receipt ages within
+quote_max_age; missing timestamps and cached old books visibly block execution.
+No cache-busting workaround silently makes an old book current. Kalshi REST
+snapshots record request duration and reject reads slower than quote_max_age;
+they do not provide the sequence/liveness evidence of streaming books. Streaming
+is the execution mode for low-latency runs. Paper fills use the same selected
+readers and freshness checks as pricing, including checks after simulated latency.
+
+Kalshi starts with full snapshots for both selected tickers and applies deltas
+in subscription sequence order. A missing or repeated sequence number, invalid
+delta, subscription error, or disconnect invalidates both books. Reconnection
+signs a new handshake and requires both snapshots before execution resumes.
+The stream uses immediate updates, without conflation. See Kalshi's
+[order-book protocol](https://docs.kalshi.com/websockets/orderbook-updates).
+
+Kalshi book age and connection health are separate. A quiet book remains usable
+while sequence continuity holds and client-initiated ping/pong checks succeed.
+quote_max_age (default 2 seconds) bounds time since a confirmed pong and the
+transmission age of timestamped incoming messages. Pings run at half that
+interval; an unanswered ping reconnects after half that interval. A missing
+server timestamp is retained as unknown, never invented. Snapshot and delta
+receipt ages remain in the log even when a quiet book is valid. Kalshi documents
+client pings in its [keep-alive protocol](https://docs.kalshi.com/websockets/connection-keep-alive).
+
+Polymarket US sends full snapshots without debouncing. Its existing conservative
+policy requires exchange and receipt ages within quote_max_age (default two
+seconds); duplicate or older snapshots do not renew freshness. The published
+[full-book protocol](https://docs.polymarket.us/api-reference/websocket/markets) does
+not establish timestamp behavior during quiet periods. A quiet Polymarket book
+can therefore pause execution until a fresh timestamp arrives. Ping/pong alone
+does not override this policy. This is an explicit availability limitation until
+venue evidence supports a stronger freshness contract. Both connections clear
+cached books on disconnect and reconnect automatically.
+
+This can suppress opportunities caused by Kalshi price changes while the
+Polymarket book is unchanged. Expiry between basket legs can prevent the second
+submission, and an expired Polymarket book also blocks Polymarket repair orders.
+Recovery retains the exposure and retries; it cannot bound the waiting time.
+
+Both feeds are checked immediately before each basket submission. If a feed
+fails after the first fill, reconciliation and recovery retain unmatched
+inventory until usable repair bids are available. Missing data records a visible
+pause rather than destroying the run; current data permits another evaluation.
+Order context records each venue's source and freshness evidence before submission.
+Kalshi records subscription ID, sequence, connection age, and last book receipt age.
+
+Every evaluated scan records its input books, source timestamps, fee parameters, four raw
+buy prices, and both fee-adjusted cross-venue gaps in the scan_complete quote
+payload. Gaps use the execution pricer and broker funding checks across integer
+sizes up to max_sets; max_gap selects profit per pair, best selects total profit.
+Positive gaps do not bypass the configured execution thresholds. Missing, stale,
+or closed quotes record an empty gap sample and a reason. These observations
+are read-only reporting inputs for an independent dashboard, not fills. Captures
+are written after the execution attempt, including failed scans. A crash can lose
+that diagnostic capture, but order intent and its execution quote context are
+persisted before submission. Full input depth is retained for reproducibility.
+
+The experiment companion reads these scan captures and the existing broker and
+account-monitor records. It makes no exchange connections and does not recompute
+gaps from reference marks. Generic market collectors remain independent sources
+for valuation and settlement; their marks are not substituted for decision data.

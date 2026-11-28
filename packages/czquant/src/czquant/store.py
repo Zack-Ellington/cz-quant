@@ -81,10 +81,15 @@ class Store:
                 effective_at TEXT NOT NULL, recorded_at TEXT NOT NULL, data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS events_portfolio ON events(portfolio_id, sequence);
             CREATE INDEX IF NOT EXISTS events_type ON events(type, effective_at);
+            CREATE INDEX IF NOT EXISTS events_pool_type ON events(portfolio_id, type, sequence);
+            CREATE INDEX IF NOT EXISTS events_pool_observation
+                ON events(portfolio_id, json_extract(data, '$.kind'), sequence) WHERE type='observation';
             CREATE TABLE IF NOT EXISTS orders (
                 id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL, run_id TEXT,
                 request TEXT NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL,
                 reserved TEXT NOT NULL, filled TEXT NOT NULL DEFAULT '0', venue_id TEXT);
+            CREATE INDEX IF NOT EXISTS orders_portfolio ON orders(portfolio_id);
+            CREATE INDEX IF NOT EXISTS orders_venue ON orders(venue_id);
             CREATE TABLE IF NOT EXISTS checkpoints (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cash_pools (
                 id TEXT PRIMARY KEY REFERENCES portfolios(id), venue TEXT NOT NULL);
@@ -238,7 +243,11 @@ class Store:
         `after_sequence` returns only events recorded after that sequence number.
         """
         conditions, args = [], []
-        if observations is not None:
+        # Split selective pool observations from economic facts so neither query
+        # walks historical quote captures. UNION ALL retains every original row.
+        split = (portfolio is not None and observations is not None
+                 and (kinds is None or "observation" in kinds))
+        if observations is not None and not split:
             conditions.append("(type != 'observation' OR json_extract(data, '$.kind') IN ("
                               + ",".join("?" for _ in observations) + "))" if observations else "type != 'observation'")
             args.extend(observations)
@@ -249,13 +258,35 @@ class Store:
             if value is not None:
                 conditions.append(col + ("=?" if col == "portfolio_id" else "<=?"))
                 args.append(value if col == "portfolio_id" else canonical_time(value))
+        common, common_args = list(conditions), list(args)
+        if split:
+            kinds = tuple(k for k in (kinds or ()) if k != 'observation') if kinds is not None else None
+            conditions.append("type != 'observation'")
         if kinds is not None:
             if not kinds:
-                return []
-            conditions.append("type IN (" + ",".join("?" for _ in kinds) + ")")
-            args.extend(kinds)
-        sql = "SELECT * FROM events" + (" WHERE " + " AND ".join(conditions) if conditions else "")
+                conditions.append("0")
+            else:
+                conditions.append("type IN (" + ",".join("?" for _ in kinds) + ")")
+                args.extend(kinds)
+        table = ("events INDEXED BY events_pool_type" if kinds is not None else
+                 "events INDEXED BY events_portfolio") if portfolio is not None else "events"
+        sql = f"SELECT * FROM {table}" + (" WHERE " + " AND ".join(conditions) if conditions else "")
+        if split and observations:
+            selected = common + ["type='observation'", "json_extract(data, '$.kind') IN ("
+                                 + ",".join("?" for _ in observations) + ")"]
+            sql += " UNION ALL SELECT * FROM events INDEXED BY events_pool_observation WHERE " + " AND ".join(selected)
+            args.extend([*common_args, *observations])
         return [{**dict(r), "data": json.loads(r["data"])} for r in self.db.execute(sql + " ORDER BY effective_at,sequence", args)]
+
+    def latest_health(self, component: str) -> dict[str, Any] | None:
+        """The newest health record a monitor component wrote, or None.
+
+        Reads backwards along the (type, effective_at) index and stops at the first
+        match, without loading the component's complete history."""
+        row = self.db.execute(
+            "SELECT * FROM events WHERE type='health' AND json_extract(data,'$.component')=? "
+            "ORDER BY effective_at DESC, sequence DESC LIMIT 1", (component,)).fetchone()
+        return {**dict(row), "data": json.loads(row["data"])} if row else None
 
     def reserved(self, portfolio: str) -> Decimal:
         return sum((decimal(r[0]) for r in self.db.execute("SELECT reserved FROM orders WHERE portfolio_id=?", (portfolio,))), Decimal(0))

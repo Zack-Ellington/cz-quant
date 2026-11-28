@@ -1,0 +1,25 @@
+[project]
+name = "cross-market-monitor"
+version = "0.1.0"
+description = "Local companion for cross-market experiments"
+requires-python = ">=3.12"
+dependencies = ["czquant", "plotly>=5.24"]
+
+[tool.uv]
+package = false
+link-mode = "copy"
+
+[tool.uv.sources]
+czquant = { path = "../../packages/czquant", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "basedpyright>=1.30"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.basedpyright]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+exclude = ["tests", ".venv"]
