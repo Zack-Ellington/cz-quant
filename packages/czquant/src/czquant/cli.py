@@ -2,6 +2,8 @@
 from __future__ import annotations
 import argparse
 import logging
+import sqlite3
+from decimal import InvalidOperation
 from pathlib import Path
 from .store import Store, encode
 
@@ -15,10 +17,17 @@ def main() -> None:
     pool.add_argument('--venue', required=True, choices=['kalshi', 'polymarket', 'polymarket-us'])
     pool.add_argument('--cash', required=True)
     pool.add_argument('--label', default='')
-    create = commands.add_parser('portfolio', help='group existing cash pools for reporting; owns no cash')
-    create.add_argument('id')
-    create.add_argument('--pools', nargs='+', required=True)
-    create.add_argument('--label', default='')
+    portfolio_cli = commands.add_parser('portfolios', help='create, list, inspect or retire portfolios')
+    portfolio_actions = portfolio_cli.add_subparsers(dest='portfolio_action', required=True)
+    portfolio_create = portfolio_actions.add_parser('create', help='create from YAML or JSON')
+    portfolio_create.add_argument('--config', required=True)
+    portfolio_list = portfolio_actions.add_parser('list', help='list active portfolios and pools')
+    portfolio_list.add_argument('--all', action='store_true', help='include retired portfolios and pools')
+    portfolio_inspect = portfolio_actions.add_parser('inspect', help='show positions, P&L and ledger events')
+    portfolio_inspect.add_argument('id')
+    portfolio_inspect.add_argument('--events', type=int, default=0, metavar='N', help='include the last N ledger events')
+    portfolio_delete = portfolio_actions.add_parser('delete', help='retire a flat portfolio; retain ledger history')
+    portfolio_delete.add_argument('id')
     monitor = commands.add_parser('monitor')
     monitor.add_argument('component', choices=['market','account','polymarket','polymarket-us'])
     monitor.add_argument('--once', action='store_true')
@@ -109,8 +118,28 @@ def main() -> None:
     store = Store(args.runs_dir)
     if args.command == 'pool':
         store.create_pool(args.id, args.venue.replace('-', '_'), args.cash, label=args.label)
-    elif args.command == 'portfolio':
-        store.create_portfolio(args.id, args.pools, label=args.label)
+    elif args.command == 'portfolios':
+        from . import portfolios
+        from .config import load_config
+        from .report import reporting_units
+        try:
+            if args.portfolio_action == 'create':
+                identifier = portfolios.create(store, load_config(args.config))
+                print(encode(portfolios.details(store, identifier)))
+            elif args.portfolio_action == 'inspect':
+                if args.events < 0:
+                    parser.error('--events requires a nonnegative count')
+                print(encode(portfolios.details(store, args.id, args.events)))
+            elif args.portfolio_action == 'delete':
+                portfolios.delete(store, args.id)
+                print(encode(portfolios.details(store, args.id)))
+            else:
+                print(encode([p for p in reporting_units(store) if args.all or not p['metadata'].get('retired_at')]))
+        except (OSError, ValueError, InvalidOperation, sqlite3.IntegrityError) as exc:
+            parser.error(str(exc))
+        finally:
+            store.close()
+        return
     elif args.command == 'monitor':
         from .monitor import run_monitor
         run_monitor(str(store.root), args.component, args.interval, args.once)

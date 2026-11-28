@@ -3,7 +3,8 @@
 These tools prepare inputs for the [cross-market strategy](../../strategies/cross-market-polymarket/).
 They discover and match markets without opening a cash pool, starting a strategy
 run or placing orders. Run them from the repository root using the strategy's uv
-environment. Write outputs to a private directory outside the source checkout.
+environment. Write outputs to an ignored experiment folder under experiments/, alongside its
+portfolio and runner configs. See the [example](../../experiments/example/).
 
 ## Sports pairs
 
@@ -25,9 +26,11 @@ Kalshi events. --pairs selects another file with that schema. Pins resolve namin
 ambiguities during preprocessing; blocks exclude events from the exported list.
 matching.py retains date, abbreviation, nickname and doubleheader matching.
 
-The output contains prepared_at, pairs and rejection counts. Review a pair and
-copy that one object into an experiment file's pair field. The strategy reads this
-snapshot and current prices; it never reloads leagues, pins or discovery results.
+The output contains prepared_at, pairs and rejection counts. Review a pair, then
+set pair_file and its zero-based pair_index in the strategy's YAML config.
+Alternatively, copy that one object into an inline pair field. Keep the candidate
+file unchanged for reproducible restarts. The strategy records the resolved pair
+and reads current prices; it never reloads leagues or pins or runs discovery.
 
 ## Binary questions
 

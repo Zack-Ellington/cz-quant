@@ -1,0 +1,16 @@
+id: game-a
+portfolio: game-a
+mode: paper
+# Path relative to this config; index into the candidate file's pairs array.
+# Review the selected pair and both venues' rules before running.
+pair_file: candidates.json
+pair_index: 0
+once: true
+parameters:
+  interval_seconds: 0.1
+  max_sets: 20
+  max_basket_dollars: 25
+  max_total_dollars: 100
+  max_capital_frac: 0.1
+  min_edge: 0.01
+  duration_minutes: null

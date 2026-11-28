@@ -1,6 +1,6 @@
 """Independent cross-market sum check using one broker per venue.
 
-Select one experiment with --experiment FILE; its mode selects paper or live.
+Select one experiment with runner.py --config FILE; its mode selects paper or live.
 The strategy reads one prepared pair and owns
 sizing, sequential IOC execution, partial-fill repairs, and monitor-health gates.
 Brokers retain execution evidence in the shared economic log. See README.md for
@@ -9,8 +9,6 @@ configuration, collectors, recovery, and the supported venue modes.
 
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import math
 import os
@@ -36,7 +34,7 @@ from czquant.polymarket import Polymarket, PolymarketPaper, kalshi_layout, norma
 from czquant.polymarket_us import DEFAULT_THETA, PolymarketUS, PolymarketUSLive, PolymarketUSPaper
 from czquant.store import decimal
 
-from experiments import Experiment, Outcome, SelectedPair
+from experiments import Experiment
 from kalshi_stream import KalshiStreamBook
 from scan_capture import measure
 from stream_book import StreamBook, QuoteUnavailable, rest_snapshot
@@ -93,8 +91,13 @@ class Config:
     max_total_dollars: float | None = 100.0  # hard cap on capital at risk across open trades
     monitor_max_age: float = 300.0  # live: seconds a monitor's last health check stays valid
 
+    once: bool = False
+    portfolio_id: str | None = None  # operator selection retained in run provenance
+
     def __post_init__(self) -> None:
         self.experiment.validate()
+        if not isinstance(self.once, bool):
+            raise ValueError("once must be true or false")
         if (not 0 < self.max_capital_frac <= 1 or self.max_sets < 1
                 or not math.isfinite(self.interval_seconds) or self.interval_seconds <= 0):
             raise ValueError("capital fraction, basket size and scan interval must be positive")
@@ -415,6 +418,7 @@ class Engine:
                            "legs": [], "routes": [], "books": {},
                            "interval": self.cfg.interval_seconds,
                            "started_at": datetime.now(timezone.utc).isoformat()}
+        self.scan_offers = {}
         try:
             markets, schedule, us_market = self.references()
         except QuoteUnavailable as exc:
@@ -471,11 +475,7 @@ class Engine:
                     return None, "polymarket_not_trading"
                 ways.append(polymarket_offer(role, outcome.polymarket, pbooks[token], normalized["fee_schedule"]))
             offers[role] = [w for w in ways if (w.ticker, w.contract) in recheck] if recheck else ways
-        if recheck is None and len(pair.outcomes) == 2:
-            names = {alias: name for name, alias in pair.evidence.get("kalshi", [])}
-            self.scan_quote.update(measure(offers,
-                [names.get(o.kalshi.rsplit("-", 1)[-1], o.kalshi.rsplit("-", 1)[-1]) for o in pair.outcomes],
-                self.cfg.max_sets, self.limits(), lambda b: self.budget_block(b) is None))
+        self.scan_offers = offers
         self.scan_quote["status"] = "ok"
         days = max((datetime.fromisoformat(pair.resolves_at).timestamp() - time.time()) / 86400, 1 / 24)
         return best(offers, days, self.cfg.risk_free, self.cfg.max_sets, self.limits(),
@@ -487,6 +487,16 @@ class Engine:
         basket, reason = None, "scan_error"
         try:
             basket, reason = self.price_pair()
+            # Diagnostic failures must not change the selected trading decision.
+            if self.scan_offers and len(self.pair.outcomes) == 2:
+                try:
+                    names = {alias: name for name, alias in self.pair.evidence.get("kalshi", [])}
+                    self.scan_quote.update(measure(self.scan_offers,
+                        [names.get(o.kalshi.rsplit("-", 1)[-1], o.kalshi.rsplit("-", 1)[-1]) for o in self.pair.outcomes],
+                        self.cfg.max_sets, self.limits(), lambda b: self.budget_block(b) is None))
+                except Exception:
+                    log.exception("Could not measure scan quotes")
+                    self.scan_quote.update(status="error", legs=[], routes=[])
         finally:
             self._pending_scan = {"reason": reason, "candidates": int(basket is not None),
                 "pair": self.pair.kalshi_event, "basket": basket.summary() if basket else None,
@@ -780,45 +790,3 @@ def buy(leg: dict[str, Any]) -> dict[str, str]:
     if leg["contract"] == "NO":
         return {"side": "ask", "price": str(1 - decimal(leg["limit"]))}
     return {"side": "bid", "price": leg["limit"]}
-
-
-def load_experiment(path: str) -> Config:
-    with open(path, encoding="utf-8") as stream:
-        data = json.load(stream)
-    selected = dict(data.pop("pair"))
-    selected["outcomes"] = tuple(Outcome(**o) for o in selected["outcomes"])
-    parameters = data.pop("parameters", {})
-    experiment = Experiment(pair=SelectedPair(**selected), **data)
-    return Config(experiment=experiment, **parameters)
-
-
-def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--experiment", required=True, metavar="FILE.json",
-                   help="one pair, mode, parameters and two pre-created venue allocations; together these form the experiment portfolio")
-    p.add_argument("--once", action="store_true", help="one scan, then stop; funding and holdings are retained")
-    a = p.parse_args(argv)
-    if not os.environ.get("STRATEGY_RUNS_DIR"):
-        p.error("export STRATEGY_RUNS_DIR to the persistent shared logging directory before starting")
-    try:
-        cfg = load_experiment(a.experiment)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        p.error(f"invalid experiment: {exc}")
-    engine = Engine(cfg)
-    run_dir = os.path.join(engine.diagnostics, engine.run_id)
-    os.makedirs(run_dir, exist_ok=True)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-                        handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(run_dir, "run.log"))])
-    if cfg.experiment.mode == "live":
-        log.warning("LIVE%s: portfolio %s, caps $%s per basket, $%s total, %d sets; Kalshi $%s and Polymarket US $%s free",
-                    " DRY RUN (nothing sent)" if cfg.dry_run else "", list(b.pool_id for b in engine.brokers.values()), cfg.max_basket_dollars,
-                    cfg.max_total_dollars, cfg.max_sets, engine.kalshi_broker.available,
-                    engine.poly_broker.available)
-    try:
-        engine.run(once=a.once)
-    except KeyboardInterrupt:
-        pass
-
-
-if __name__ == "__main__":
-    main()

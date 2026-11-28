@@ -168,10 +168,10 @@ def test_a_short_later_leg_has_the_extras_sold_back(engine_for, monkeypatch):
 
 
 def test_main_refuses_to_run_without_a_runs_dir(monkeypatch, capsys):
-    import trader
+    import runner
     monkeypatch.delenv("STRATEGY_RUNS_DIR", raising=False)
     with pytest.raises(SystemExit):
-        trader.main(["--experiment", "missing.json", "--once"])
+        runner.main(["--config", "missing.json"])
     assert "STRATEGY_RUNS_DIR" in capsys.readouterr().err
 
 
@@ -198,7 +198,7 @@ def test_paper_sizes_to_the_venue_with_less_cash(engine_for):
 
 
 def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch):
-    import trader
+    import runner
     monkeypatch.setenv('STRATEGY_RUNS_DIR', str(tmp_path))
     configs = []
 
@@ -209,13 +209,13 @@ def test_cli_risk_defaults_are_identical_in_paper_and_live(tmp_path, monkeypatch
         configs.append(config)
         raise Captured()
 
-    monkeypatch.setattr(trader, 'Engine', capture)
+    monkeypatch.setattr(runner, 'Engine', capture)
     from dataclasses import asdict
     for mode in ("paper", "live"):
         path = tmp_path / f"{mode}.json"
         path.write_text(json.dumps({**asdict(experiment(venue="polymarket_us", mode=mode)), "parameters": {}}))
         with pytest.raises(Captured):
-            trader.main(["--experiment", str(path), "--once"])
+            runner.main(["--config", str(path)])
     assert [(c.max_sets, c.max_basket_dollars, c.max_total_dollars) for c in configs] == [(20, 25, 100)] * 2
     assert [(c.min_net, c.min_edge) for c in configs] == [(0, .01)] * 2
 

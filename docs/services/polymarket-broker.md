@@ -154,8 +154,17 @@ A two-venue experiment also maps a Kalshi pool and can define a reporting group:
 
 ```bash
 uv run czquant map-live example-kalshi-live --venue kalshi --subaccount 1
-uv run czquant portfolio example-live --pools example-kalshi-live example-us-live
+uv run czquant portfolios create --config portfolio.yaml
 ```
+
+Use this portfolio.yaml to group the existing live pools:
+
+```yaml
+id: example-live
+pools: [example-kalshi-live, example-us-live]
+```
+
+See the [operator CLI guide](../cli.md) for inspection and retirement.
 
 Use --subaccount 0 --primary-account for the Kalshi primary account, or
 --share-account to join an already reconciled Kalshi account. Mapping records

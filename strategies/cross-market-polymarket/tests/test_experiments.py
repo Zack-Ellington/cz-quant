@@ -14,7 +14,8 @@ from czquant.polymarket_us import PolymarketUSPaper
 from experiments import Outcome
 from tests.test_trader import EVENT, FakeKalshi, experiment
 from tests.test_trader_us import FakeUSVenue, LiveKalshi, SLUG
-from trader import Config, Engine, load_experiment
+from trader import Config, Engine
+from runner import load_experiment
 
 
 class GameKalshi(FakeKalshi):

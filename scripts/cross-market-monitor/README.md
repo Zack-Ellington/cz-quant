@@ -15,7 +15,6 @@ uv run python monitor.py dashboard
 
 Open http://127.0.0.1:8791/. SQLite is opened read-only and charts refresh every
 five seconds. Strategy and authenticated account monitors remain independent.
-Stop any previously launched standalone quote collector; it is no longer used.
 The strategy must record scan_complete observations with a quote payload.
 
 The light dashboard has an Overall tab and one tab per game. Overall plots venue
@@ -36,7 +35,7 @@ appear as green ticks, dated by their first booked fill.
 Gross gap is $1 minus the two purchase prices. Fee calculations use rounded taker fees and walk depth
 for integer sizes up to the recorded max_sets. A sampled opportunity requires
 positive net at a size funded by both venue pools and within the recorded capital
-limits. Strategy edge, return, cooldown, and execution checks are separate;
+limits. Strategy edge, return, and execution checks are separate;
 an observed opportunity is not an execution recommendation or a guaranteed fill.
 
 Windows report the first and last positive samples, sample count, and peak quoted

@@ -88,7 +88,8 @@ def reporting_units(store: Store) -> list[dict[str, Any]]:
     for group in store.reporting_portfolios():
         members = [pools[pid] for pid in group['pools']]
         units.append({'id': group['id'], 'kind': 'portfolio', 'pools': group['pools'],
-                      'mode': members[0]['mode'], 'metadata': {'label': group['label']},
+                      'mode': members[0]['mode'], 'metadata': {'label': group['label'],
+                          **({'retired_at': group['retired_at']} if group.get('retired_at') else {})},
                       'created_at': max(p['created_at'] for p in members), 'defined_at': group['created_at'],
                       'venue': '', 'venues': sorted({p['venue'] for p in members}), 'deprecated': False})
     return units

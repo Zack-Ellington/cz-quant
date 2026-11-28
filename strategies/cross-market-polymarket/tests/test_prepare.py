@@ -9,7 +9,7 @@ import prepare
 from tests.test_trader import EVENT, FakeKalshi, FakePoly
 from tests.test_trader_us import FakeUSVenue, SLUG
 from tests.test_markets import LISTING, FakeKalshi as QuestionKalshi, FakePoly as QuestionPoly
-from trader import load_experiment
+from runner import load_experiment
 
 
 def load_pair(tmp_path, pair):

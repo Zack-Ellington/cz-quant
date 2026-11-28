@@ -23,24 +23,8 @@ one venue. A broker binds to that pool. A portfolio only groups existing pools
 for reporting; creating one neither funds anything nor changes buying power.
 The cross-market strategy uses two cash pools and two brokers in both modes.
 
-From packages/czquant, create paper pools once with explicit venue funding:
-
-```bash
-uv run czquant pool cross-kalshi --venue kalshi --cash 600
-uv run czquant pool cross-polymarket --venue polymarket-us --cash 400
-```
-
-These amounts are hypothetical and can be arbitrarily large. The Kalshi pool
-can spend only its $600, and the Polymarket pool only its $400. Both use the
-same budget and reservation rules as live pools. Repeating either creation
-fails instead of resetting or refunding it. Live pools are created by map-live;
-see the [live mapping guide](polymarket-broker.md#us-live-mapping-and-execution).
-
-Create an optional portfolio to compare the combined experiment:
-
-```bash
-uv run czquant portfolio cross-market --pools cross-kalshi cross-polymarket
-```
+Use the [operator CLI](../cli.md) to create, list, inspect and retire portfolios.
+Portfolio creation can explicitly fund new paper pools or select existing pools.
 
 Membership is a flat, fixed list of distinct pool IDs in one mode. Multiple
 pools at the same venue can be included. This selection can be defined after
@@ -50,9 +34,9 @@ for a different selection. Portfolio totals overlap their constituent pool
 rows; never sum all output rows as though they were independent holdings.
 
 Reuse the same STRATEGY_RUNS_DIR and pool IDs on every strategy restart. The
-cross-market strategy selects them through the portfolio venue-to-pool mapping
-in its --experiment JSON file. Each invocation records a new run ID and revision;
-existing cash, positions, fees, losses, orders and reservations persist.
+cross-market strategy selects them through the portfolio ID in its --config
+YAML file, or an explicit venue-to-pool mapping. Each invocation records a new
+run ID and revision; existing cash, positions, fees, losses, orders and reservations persist.
 Separate experiments need separate pools; a new run or reporting group does
 not create an independent allocation.
 
