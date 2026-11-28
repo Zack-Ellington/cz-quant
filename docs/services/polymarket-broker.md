@@ -183,6 +183,14 @@ store.close()
 Strategies select the broker for each leg and own sequencing and repairs.
 US live orders support integer-quantity taker IOC/FOK. The adapter books fills
 from synchronous execution reports, including their reported commissions.
+When fills are present, it also returns an execution summary with decimal-string
+quantity, yes_notional, fee, yes_price_min, and yes_price_max. These aggregate
+the fills already booked; they do not create additional accounting entries.
+YES notional is the sum of YES price times quantity, and price bounds are the
+minimum and maximum reported YES fill prices. The shared paper execution path
+returns the same fields from its simulated fills. Consumers must allow an
+absent summary rather than infer priced execution from an acknowledgement.
+
 Cancel and amend are not exposed by this adapter. Missing final state retains
 an unknown order and its reservation. The
 [account monitor](account-monitor.md#polymarket-us-recovery) can recover an

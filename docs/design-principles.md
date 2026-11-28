@@ -225,10 +225,8 @@ A retry with an existing client order ID returns the stored order rather than
 sending another order. A new submission returns the adapter's response; paper
 responses include status and filled quantity, while live responses can remain
 venue-shaped. Callers must not assume every response is a completed execution.
-Built-in adapters may also return an execution summary with confirmed quantity,
-YES notional, fees, and conservative individual-price bounds. This is immediate
-decision evidence, not an additional accounting transaction. A summary must not
-make unbooked cash spendable or cause monitor receipts to be counted twice.
+Immediate execution evidence may inform strategy decisions, but must not create
+spendable cash before accounting or cause the same execution to be counted twice.
 Unknown live writes retain their reservations for reconciliation. Exact result
 normalization is an implementation concern to keep explicit when changing the
 interface.
@@ -319,31 +317,23 @@ timing, depth, and fee assumptions needed to interpret the simulation.
 
 ### Service connections and decision capture
 
-A strategy owns the market connections required for its decisions. It records
-the exact input books, their source and timestamps, derived opportunities, and
-skip reasons as observations in the shared ledger. Execution captures and
-broker receipts serve different purposes: an observed gap is not a fill.
+A strategy owns the market connections and freshness policy required for its
+decisions. Connection liveness and evidence that a book is current are distinct.
+Missing evidence must remain explicit; a reconnect does not itself establish
+that cached data is current. Venue protocols and reader policies belong in the
+relevant service or strategy guide.
 
 Account and market monitors own their service connections and continue after a
-strategy stops. REST polling remains appropriate for reconciliation, metadata,
-and reference valuation. Low-latency execution may own WebSocket subscriptions;
-services do not depend on a dashboard to keep a connection alive. Independent
-subscriptions are allowed when services have different coverage or lifetimes.
-A shared feed daemon is not required by the broker contract.
+strategy stops. Services do not depend on a dashboard to keep a connection alive.
+Independent subscriptions are allowed when services have different coverage or
+lifetimes. Neither a shared feed nor a particular transport is required by the
+broker contract.
 
-WebSocket readers must follow the venue protocol. Incremental books require an
-initial snapshot, sequence checks, and invalidation/rebuild after missing data.
-Connection liveness and time since a price change are distinct measurements.
-A healthy sequenced feed can hold an unchanged book; ping/pong alone cannot
-repair missing deltas. Full-snapshot readers retain their own freshness policy.
-Reconnecting never makes an old cached book current.
-
-Dashboards open the ledger read-only and make no venue connections. General
-performance reporting uses broker accounting, account evidence, and reference
-marks. Experiment companions may plot strategy-specific decision captures and
-derived metrics without importing the strategy. They live outside the core
-package and do not own execution or a second ledger. Missing captures remain
-visible gaps, rather than reconstructed decisions from later reference quotes.
+Decision captures are optional strategy diagnostics, not execution receipts or
+a mandatory research schema. Independent reports may interpret them without
+owning execution or maintaining a second economic ledger. Missing captures
+remain visible gaps; later reference quotes cannot reconstruct an earlier
+decision.
 
 ### Account evidence
 

@@ -196,6 +196,13 @@ The source is [broker.py](../../packages/czquant/src/czquant/broker.py),
 
 ## Immediate execution evidence
 
+Paper and normalized live results can include an execution object with decimal
+strings: quantity, yes_notional, fee, yes_price_min, and yes_price_max. The
+notional is the sum of YES price times quantity, including for ask orders;
+fee is the total fee. Paper summaries use the simulated fills already booked.
+Live summary evidence can arrive before the account monitor's exact fills.
+It does not release filled reservations or create additional accounting entries.
+
 For terminal V2 IOC/FOK replies, the live adapter returns confirmed quantity and,
 when valid averages are present, an execution summary with YES notional, total
 fees and individual-price bounds. Notional and fees use the response averages;

@@ -310,13 +310,30 @@ receipt ages remain in the log even when a quiet book is valid. Kalshi documents
 client pings in its [keep-alive protocol](https://docs.kalshi.com/websockets/connection-keep-alive).
 
 Polymarket US sends full snapshots without debouncing. Its existing conservative
-policy requires exchange and receipt ages within quote_max_age; duplicate or
-older snapshots do not renew freshness. The published full-book protocol does
+policy requires exchange and receipt ages within quote_max_age (default two
+seconds); duplicate or older snapshots do not renew freshness. The published
+[full-book protocol](https://docs.polymarket.us/api-reference/websocket/markets) does
 not establish timestamp behavior during quiet periods. A quiet Polymarket book
 can therefore pause execution until a fresh timestamp arrives. Ping/pong alone
 does not override this policy. This is an explicit availability limitation until
 venue evidence supports a stronger freshness contract. Both connections clear
 cached books on disconnect and reconnect automatically.
+
+This can suppress opportunities caused by Kalshi price changes while the
+Polymarket book is unchanged. Expiry between basket legs can prevent the second
+submission, and an expired Polymarket book also blocks Polymarket repair orders.
+Recovery retains the exposure and retries; it cannot bound the waiting time.
+For illustration, newer timestamps arriving exactly ten seconds apart would
+make the book eligible for at most two seconds per interval under the default
+policy, even if its prices were still executable. This is a consequence of the
+age rule, not a measured feed cadence or estimate of missed profit.
+
+Assess this policy with authenticated read-only captures of quiet and active
+markets: compare message receipt times, transactTime, book changes, connection
+health, and snapshot responses. Measure time blocked by freshness and repair
+waits separately from profitable opportunities. A stronger freshness policy
+needs evidence that an unchanged snapshot is current and that missed updates
+are detected or repaired; connection ping/pong alone does not establish either.
 
 Both feeds are checked immediately before each basket submission. If a feed
 fails after the first fill, reconciliation and recovery retain unmatched
